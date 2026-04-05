@@ -9,10 +9,11 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
 use reqwest::Url;
+use semver::Version;
 use tauri::path::BaseDirectory;
 use tauri::webview::PageLoadEvent;
 use tauri::{AppHandle, Emitter, Manager, State, WebviewUrl, WebviewWindowBuilder};
-use tauri_plugin_updater::{Update, UpdaterExt};
+use tauri_plugin_opener::OpenerExt;
 
 #[cfg(target_os = "windows")]
 use std::os::windows::process::CommandExt;
@@ -48,8 +49,7 @@ enum BackendState {
 // decode at a time; additional workers increase parallelism but also RAM usage.
 const DEFAULT_BACKEND_POOL_SIZE: usize = 1;
 const BACKEND_LAZY_INIT_MESSAGE: &str = "Backend not started yet (lazy init)";
-const APP_UPDATE_STATUS_EVENT: &str = "app-update-status";
-const UPDATER_PUBLIC_KEY: &str = "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDVEQzBCNDBFN0UwMDBFMjAKUldRZ0RnQitEclRBWFovYzVDdjVuZ1ZCS2pFdHNJQXEzOFo1bUluRVdZeURRQThXRVRtcGIxeHgK";
+const APP_UPDATE_CHECK_TIMEOUT_SECS: u64 = 10;
 
 fn backend_pool_size() -> usize {
     std::env::var("RADAR_BACKEND_POOL_SIZE")
@@ -66,9 +66,6 @@ struct NwwsBridgeState {
     child: Mutex<Option<Child>>,
 }
 
-#[derive(Default)]
-struct PendingUpdate(Mutex<Option<Update>>);
-
 #[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 struct UpdateInfo {
@@ -77,6 +74,7 @@ struct UpdateInfo {
     body: Option<String>,
     date: Option<String>,
     download_url: String,
+    release_url: String,
 }
 
 #[derive(serde::Serialize)]
@@ -88,15 +86,19 @@ struct UpdateCheckResponse {
     message: Option<String>,
 }
 
-#[derive(Clone, serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-struct UpdateStatusPayload {
-    phase: String,
-    version: Option<String>,
-    message: Option<String>,
-    downloaded_bytes: Option<u64>,
-    total_bytes: Option<u64>,
-    error: Option<String>,
+#[derive(serde::Deserialize)]
+struct GitHubReleaseAsset {
+    name: String,
+    browser_download_url: String,
+}
+
+#[derive(serde::Deserialize)]
+struct GitHubLatestRelease {
+    tag_name: String,
+    body: Option<String>,
+    html_url: String,
+    published_at: Option<String>,
+    assets: Vec<GitHubReleaseAsset>,
 }
 
 fn terminate_child_process(child: &mut Child) {
@@ -230,7 +232,7 @@ fn newest_existing_path(paths: Vec<PathBuf>) -> Option<PathBuf> {
         })
 }
 
-fn normalize_updater_endpoint(raw: &str) -> Option<String> {
+fn normalize_release_endpoint(raw: &str) -> Option<String> {
     raw.lines()
         .map(str::trim)
         .find(|line| !line.is_empty() && !line.starts_with('#'))
@@ -238,16 +240,22 @@ fn normalize_updater_endpoint(raw: &str) -> Option<String> {
         .filter(|line| line.starts_with("https://"))
 }
 
-fn resolve_updater_endpoint(app: &AppHandle) -> Option<String> {
+fn resolve_release_endpoint(app: &AppHandle) -> Option<String> {
+    if let Ok(value) = std::env::var("RADAR_RELEASE_ENDPOINT") {
+        if let Some(endpoint) = normalize_release_endpoint(&value) {
+            return Some(endpoint);
+        }
+    }
+
     if let Ok(value) = std::env::var("RADAR_UPDATER_ENDPOINT") {
-        if let Some(endpoint) = normalize_updater_endpoint(&value) {
+        if let Some(endpoint) = normalize_release_endpoint(&value) {
             return Some(endpoint);
         }
     }
 
     if let Ok(path) = app.path().resolve("updater-endpoint.txt", BaseDirectory::Resource) {
         if let Ok(contents) = fs::read_to_string(path) {
-            if let Some(endpoint) = normalize_updater_endpoint(&contents) {
+            if let Some(endpoint) = normalize_release_endpoint(&contents) {
                 return Some(endpoint);
             }
         }
@@ -256,7 +264,7 @@ fn resolve_updater_endpoint(app: &AppHandle) -> Option<String> {
     if let Ok(manifest_dir) = std::env::var("CARGO_MANIFEST_DIR") {
         let path = PathBuf::from(manifest_dir).join("updater-endpoint.txt");
         if let Ok(contents) = fs::read_to_string(path) {
-            if let Some(endpoint) = normalize_updater_endpoint(&contents) {
+            if let Some(endpoint) = normalize_release_endpoint(&contents) {
                 return Some(endpoint);
             }
         }
@@ -265,31 +273,37 @@ fn resolve_updater_endpoint(app: &AppHandle) -> Option<String> {
     None
 }
 
-fn updater_builder(app: &AppHandle) -> Result<tauri_plugin_updater::UpdaterBuilder, String> {
-    let endpoint = resolve_updater_endpoint(app).ok_or_else(|| {
-        "Updater endpoint not configured. Set src-tauri/updater-endpoint.txt first.".to_string()
-    })?;
-    let endpoint_url = Url::parse(&endpoint).map_err(|err| format!("Invalid updater endpoint: {err}"))?;
-    let app_for_exit = app.clone();
-    app.updater_builder()
-        .pubkey(UPDATER_PUBLIC_KEY)
-        .endpoints(vec![endpoint_url])
-        .map_err(|err| err.to_string())
-        .map(|builder| {
-            builder
-                .timeout(Duration::from_secs(20))
-                .on_before_exit(move || stop_nwws_bridge_process_for_app(&app_for_exit))
-        })
+fn release_version_label(raw: &str) -> String {
+    raw.trim()
+        .strip_prefix('v')
+        .unwrap_or(raw.trim())
+        .trim()
+        .to_string()
 }
 
-fn map_update_info(update: &Update) -> UpdateInfo {
-    UpdateInfo {
-        version: update.version.clone(),
-        current_version: update.current_version.to_string(),
-        body: update.body.clone(),
-        date: update.date.map(|date| date.to_string()),
-        download_url: update.download_url.to_string(),
-    }
+fn parse_release_version(raw: &str) -> Result<Version, String> {
+    Version::parse(&release_version_label(raw))
+        .map_err(|err| format!("Release tag `{raw}` is not valid semver: {err}"))
+}
+
+fn pick_release_download_url(release: &GitHubLatestRelease) -> String {
+    release
+        .assets
+        .iter()
+        .min_by_key(|asset| {
+            let name = asset.name.to_ascii_lowercase();
+            if name.ends_with("-setup.exe") {
+                0u8
+            } else if name.ends_with(".msi") {
+                1u8
+            } else if name.ends_with(".exe") {
+                2u8
+            } else {
+                3u8
+            }
+        })
+        .map(|asset| asset.browser_download_url.clone())
+        .unwrap_or_else(|| release.html_url.clone())
 }
 
 fn command_exists(program: &str) -> bool {
@@ -3223,157 +3237,81 @@ async fn clear_decode_cache(app: AppHandle) -> Result<ClearDecodeCacheResponse, 
 }
 
 #[tauri::command]
-async fn check_for_app_update(
-    app: AppHandle,
-    pending_update: tauri::State<'_, PendingUpdate>,
-) -> Result<UpdateCheckResponse, String> {
+async fn check_for_app_update(app: AppHandle) -> Result<UpdateCheckResponse, String> {
     let current_version = app.package_info().version.to_string();
-
-    let builder = match updater_builder(&app) {
-        Ok(builder) => builder,
-        Err(message) => {
-            *pending_update
-                .0
-                .lock()
-                .unwrap_or_else(|e| e.into_inner()) = None;
+    let endpoint = match resolve_release_endpoint(&app) {
+        Some(endpoint) => endpoint,
+        None => {
             return Ok(UpdateCheckResponse {
                 status: "disabled".into(),
                 current_version,
                 update: None,
-                message: Some(message),
+                message: Some("Release check endpoint not configured.".into()),
             });
         }
     };
 
-    let updater = builder.build().map_err(|err| err.to_string())?;
-    let update = updater.check().await.map_err(|err| err.to_string())?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let latest_release_url = Url::parse(&endpoint)
+            .map_err(|err| format!("Invalid release endpoint: {err}"))?;
+        let client = reqwest::blocking::Client::builder()
+            .timeout(Duration::from_secs(APP_UPDATE_CHECK_TIMEOUT_SECS))
+            .user_agent(format!("RadarApp/{current_version}"))
+            .build()
+            .map_err(|err| format!("Could not create release-check client: {err}"))?;
+        let release = client
+            .get(latest_release_url)
+            .header("Accept", "application/vnd.github+json")
+            .send()
+            .and_then(|resp| resp.error_for_status())
+            .map_err(|err| format!("GitHub release check failed: {err}"))?
+            .text()
+            .map_err(|err| format!("Could not read GitHub release response: {err}"))
+            .and_then(|body| {
+                serde_json::from_str::<GitHubLatestRelease>(&body)
+                    .map_err(|err| format!("Could not parse GitHub release response: {err}"))
+            })?;
 
-    let mut guard = pending_update
-        .0
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
+        let current = Version::parse(&current_version)
+            .map_err(|err| format!("Current app version is invalid: {err}"))?;
+        let latest = parse_release_version(&release.tag_name)?;
 
-    if let Some(update) = update {
-        let info = map_update_info(&update);
-        *guard = Some(update);
-        return Ok(UpdateCheckResponse {
+        if latest <= current {
+            return Ok(UpdateCheckResponse {
+                status: "upToDate".into(),
+                current_version,
+                update: None,
+                message: Some("You already have the latest version.".into()),
+            });
+        }
+
+        Ok(UpdateCheckResponse {
             status: "available".into(),
-            current_version,
-            update: Some(info),
+            current_version: current_version.clone(),
+            update: Some(UpdateInfo {
+                version: release_version_label(&release.tag_name),
+                current_version,
+                body: release.body.clone(),
+                date: release.published_at.clone(),
+                download_url: pick_release_download_url(&release),
+                release_url: release.html_url,
+            }),
             message: None,
-        });
-    }
-
-    *guard = None;
-    Ok(UpdateCheckResponse {
-        status: "upToDate".into(),
-        current_version,
-        update: None,
-        message: Some("You already have the latest version.".into()),
+        })
     })
+    .await
+    .map_err(|err| err.to_string())?
 }
 
 #[tauri::command]
-async fn install_app_update(
-    app: AppHandle,
-    pending_update: tauri::State<'_, PendingUpdate>,
-) -> Result<(), String> {
-    let update = {
-        let guard = pending_update
-            .0
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        guard
-            .clone()
-            .ok_or_else(|| "No pending update. Check for updates first.".to_string())?
-    };
-
-    let version = update.version.clone();
-    let _ = app.emit(
-        APP_UPDATE_STATUS_EVENT,
-        UpdateStatusPayload {
-            phase: "starting".into(),
-            version: Some(version.clone()),
-            message: Some(format!("Preparing update {version}...")),
-            downloaded_bytes: Some(0),
-            total_bytes: None,
-            error: None,
-        },
-    );
-
-    let mut downloaded_bytes = 0u64;
-    let app_for_chunk = app.clone();
-    let version_for_chunk = version.clone();
-    let app_for_install = app.clone();
-    let version_for_install = version.clone();
-
-    let result = update
-        .download_and_install(
-            move |chunk_length, content_length| {
-                downloaded_bytes = downloaded_bytes.saturating_add(chunk_length as u64);
-                let _ = app_for_chunk.emit(
-                    APP_UPDATE_STATUS_EVENT,
-                    UpdateStatusPayload {
-                        phase: "downloading".into(),
-                        version: Some(version_for_chunk.clone()),
-                        message: Some(format!("Downloading update {version_for_chunk}...")),
-                        downloaded_bytes: Some(downloaded_bytes),
-                        total_bytes: content_length,
-                        error: None,
-                    },
-                );
-            },
-            move || {
-                let _ = app_for_install.emit(
-                    APP_UPDATE_STATUS_EVENT,
-                    UpdateStatusPayload {
-                        phase: "installing".into(),
-                        version: Some(version_for_install.clone()),
-                        message: Some(format!("Installing update {version_for_install}...")),
-                        downloaded_bytes: None,
-                        total_bytes: None,
-                        error: None,
-                    },
-                );
-            },
-        )
-        .await;
-
-    match result {
-        Ok(()) => {
-            *pending_update
-                .0
-                .lock()
-                .unwrap_or_else(|e| e.into_inner()) = None;
-            let _ = app.emit(
-                APP_UPDATE_STATUS_EVENT,
-                UpdateStatusPayload {
-                    phase: "restarting".into(),
-                    version: Some(version),
-                    message: Some("Restarting app...".into()),
-                    downloaded_bytes: None,
-                    total_bytes: None,
-                    error: None,
-                },
-            );
-            app.restart();
-        }
-        Err(err) => {
-            let message = err.to_string();
-            let _ = app.emit(
-                APP_UPDATE_STATUS_EVENT,
-                UpdateStatusPayload {
-                    phase: "error".into(),
-                    version: Some(version),
-                    message: Some("Update install failed.".into()),
-                    downloaded_bytes: None,
-                    total_bytes: None,
-                    error: Some(message.clone()),
-                },
-            );
-            Err(message)
-        }
+fn open_app_update_url(app: AppHandle, url: String) -> Result<(), String> {
+    let parsed = Url::parse(url.trim()).map_err(|err| format!("Invalid update URL: {err}"))?;
+    if parsed.scheme() != "https" {
+        return Err("Only https update URLs are allowed.".into());
     }
+    app.opener()
+        .open_url(parsed.to_string(), None::<&str>)
+        .map_err(|err| format!("Could not open update URL: {err}"))
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -3389,15 +3327,13 @@ pub fn run() {
 
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
-        .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(NwwsBridgeState::default())
-        .manage(PendingUpdate::default())
         .invoke_handler(tauri::generate_handler![
             l3_list_page,
             l3_resolve_selection,
             clear_decode_cache,
             check_for_app_update,
-            install_app_update,
+            open_app_update_url,
             fetch_url_base64,
             fetch_fl511_stream,
             fetch_pendot_stream,

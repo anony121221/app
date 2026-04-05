@@ -93,7 +93,6 @@ var levelII = false;
 const { invoke } = window.__TAURI__.core;
 const { listen, emit } = window.__TAURI__.event;
 let _l3TransportWarmed = false;
-const APP_UPDATE_EVENT = 'app-update-status';
 const APP_UPDATE_AUTO_CHECK_DELAY_MS = 4500;
 
 function warmL3TransportOnce() {
@@ -10412,6 +10411,7 @@ const appUpdateCheckBtn = document.getElementById('app-update-check');
 const appUpdateStatus = document.getElementById('app-update-status');
 const appUpdateOverlay = document.getElementById('app-update-overlay');
 const appUpdateClose = document.getElementById('app-update-close');
+const appUpdateCopyEl = document.getElementById('app-update-copy');
 const appUpdateCurrentVersionEl = document.getElementById('app-update-current-version');
 const appUpdateNextVersionEl = document.getElementById('app-update-next-version');
 const appUpdatePhaseEl = document.getElementById('app-update-phase');
@@ -10448,7 +10448,6 @@ const alertDetailsOverlay = document.getElementById('alert-details-overlay');
 const alertDetailsClose = document.getElementById('alert-details-close');
 const YOUTUBE_EMBED_NOTE = 'YouTube embeds only.';
 let appUpdateBusy = false;
-let appUpdateInstallInFlight = false;
 let appUpdateInfo = null;
 let appUpdateCurrentVersion = '';
 
@@ -10459,7 +10458,7 @@ alertDetailsOverlay?.addEventListener('click', e => {
 document.addEventListener('keydown', e => {
   if (e.key === 'Escape' && alertDetailsOverlay?.classList.contains('open')) closeAlertDetailsModal();
   if (e.key === 'Escape' && nwwsLoginOverlay?.classList.contains('open')) setNwwsLoginOpen(false);
-  if (e.key === 'Escape' && appUpdateOverlay?.classList.contains('open') && !appUpdateInstallInFlight) {
+  if (e.key === 'Escape' && appUpdateOverlay?.classList.contains('open') && !appUpdateBusy) {
     setAppUpdateModalOpen(false);
   }
 });
@@ -10473,10 +10472,10 @@ nwwsLoginOverlay?.addEventListener('click', e => {
   if (e.target === nwwsLoginOverlay) setNwwsLoginOpen(false);
 });
 appUpdateClose?.addEventListener('click', () => {
-  if (!appUpdateInstallInFlight) setAppUpdateModalOpen(false);
+  if (!appUpdateBusy) setAppUpdateModalOpen(false);
 });
 appUpdateOverlay?.addEventListener('click', e => {
-  if (e.target === appUpdateOverlay && !appUpdateInstallInFlight) setAppUpdateModalOpen(false);
+  if (e.target === appUpdateOverlay && !appUpdateBusy) setAppUpdateModalOpen(false);
 });
 nwwsLoginBtn?.addEventListener('click', e => {
   e.stopPropagation();
@@ -10590,23 +10589,30 @@ function syncAppUpdateUi() {
   if (appUpdateNextVersionEl) {
     appUpdateNextVersionEl.textContent = appUpdateInfo?.version || '--';
   }
+  if (appUpdateCopyEl) {
+    appUpdateCopyEl.textContent = appUpdateInfo
+      ? 'A newer version is available on GitHub Releases.'
+      : 'Check GitHub Releases for a newer version of the app.';
+  }
   if (appUpdateNotesEl) {
     const notes = String(appUpdateInfo?.body || '').trim();
     appUpdateNotesEl.textContent = notes || 'No release notes provided.';
   }
   if (appUpdateCheckBtn) {
-    appUpdateCheckBtn.disabled = appUpdateBusy || appUpdateInstallInFlight;
+    appUpdateCheckBtn.disabled = appUpdateBusy;
     appUpdateCheckBtn.textContent = appUpdateBusy ? 'Checking...' : 'Check';
   }
   if (appUpdateInstallBtn) {
-    appUpdateInstallBtn.disabled = !appUpdateInfo || appUpdateInstallInFlight;
-    appUpdateInstallBtn.textContent = appUpdateInstallInFlight ? 'Installing...' : 'Install';
+    appUpdateInstallBtn.disabled = !appUpdateInfo || appUpdateBusy;
+    appUpdateInstallBtn.textContent = appUpdateInfo
+      ? (appUpdateInfo.downloadUrl === appUpdateInfo.releaseUrl ? 'Open Release' : 'Download')
+      : 'Download';
   }
   if (appUpdateLaterBtn) {
-    appUpdateLaterBtn.disabled = appUpdateInstallInFlight;
-    appUpdateLaterBtn.textContent = appUpdateInstallInFlight ? 'Working...' : 'Later';
+    appUpdateLaterBtn.disabled = appUpdateBusy;
+    appUpdateLaterBtn.textContent = 'Later';
   }
-  if (!appUpdateInstallInFlight && !appUpdateInfo && appUpdateProgressEl) {
+  if (!appUpdateInfo && appUpdateProgressEl) {
     appUpdateProgressEl.hidden = true;
     if (appUpdateProgressBarEl) appUpdateProgressBarEl.style.width = '0%';
   }
@@ -10618,8 +10624,10 @@ function applyAppUpdateCheckResponse(res, { openModalOnAvailable = true } = {}) 
   if (res?.status === 'available' && res.update) {
     appUpdateInfo = res.update;
     setAppUpdateStatus(`Update ${res.update.version} available`, 'success');
-    setAppUpdatePhase('Ready to install');
-    setAppUpdateProgress(null, null, 'A newer version is available.');
+    setAppUpdatePhase('Available on GitHub');
+    setAppUpdateProgress(null, null, res.update.downloadUrl === res.update.releaseUrl
+      ? 'Open the release page to download the installer.'
+      : 'Download the latest installer from GitHub Releases.');
     if (openModalOnAvailable) {
       setSettingsOpen(false);
       setInfoPopupOpen(false);
@@ -10632,7 +10640,7 @@ function applyAppUpdateCheckResponse(res, { openModalOnAvailable = true } = {}) 
     setAppUpdateProgress(null, null, res?.message || '');
   } else if (res?.status === 'disabled') {
     appUpdateInfo = null;
-    setAppUpdateStatus('Auto-update not configured', '');
+    setAppUpdateStatus('Update checks not configured', '');
     setAppUpdatePhase('Disabled');
     setAppUpdateProgress(null, null, res?.message || '');
   } else {
@@ -10645,7 +10653,7 @@ function applyAppUpdateCheckResponse(res, { openModalOnAvailable = true } = {}) 
 }
 
 async function checkForAppUpdate({ openModalOnAvailable = true } = {}) {
-  if (appUpdateBusy || appUpdateInstallInFlight) return;
+  if (appUpdateBusy) return;
   appUpdateBusy = true;
   setAppUpdateStatus('Checking for updates...', '');
   setAppUpdatePhase('Checking');
@@ -10667,69 +10675,42 @@ async function checkForAppUpdate({ openModalOnAvailable = true } = {}) {
   }
 }
 
-async function installAppUpdate() {
-  if (appUpdateInstallInFlight || !appUpdateInfo) return;
-  appUpdateInstallInFlight = true;
-  setAppUpdateModalOpen(true);
-  setAppUpdateStatus(`Installing ${appUpdateInfo.version}...`, '');
-  setAppUpdatePhase('Starting');
-  setAppUpdateProgress(0, null, 'Preparing update download...');
+async function openAppUpdateDownload() {
+  if (appUpdateBusy || !appUpdateInfo) return;
+  const targetUrl = String(appUpdateInfo.downloadUrl || appUpdateInfo.releaseUrl || '').trim();
+  if (!targetUrl) {
+    setAppUpdateStatus('No download URL available', 'error');
+    setAppUpdatePhase('Unavailable');
+    setAppUpdateProgress(null, null, 'This release does not include a downloadable installer.');
+    syncAppUpdateUi();
+    return;
+  }
+
+  appUpdateBusy = true;
+  setAppUpdateStatus(`Opening ${appUpdateInfo.version}...`, 'success');
+  setAppUpdatePhase(appUpdateInfo.downloadUrl === appUpdateInfo.releaseUrl ? 'Opening release' : 'Opening download');
+  setAppUpdateProgress(null, null, 'Opening GitHub in your browser...');
   syncAppUpdateUi();
 
   try {
-    await invoke('install_app_update');
+    await invoke('open_app_update_url', { url: targetUrl });
+    setAppUpdateModalOpen(false);
   } catch (err) {
-    appUpdateInstallInFlight = false;
-    setAppUpdateStatus('Update install failed', 'error');
-    setAppUpdatePhase('Install failed');
+    setAppUpdateStatus('Could not open download', 'error');
+    setAppUpdatePhase('Open failed');
     setAppUpdateProgress(null, null, err?.message || String(err));
+  } finally {
+    appUpdateBusy = false;
     syncAppUpdateUi();
   }
 }
 
-listen(APP_UPDATE_EVENT, evt => {
-  const payload = evt?.payload || {};
-  const phase = String(payload.phase || '').trim();
-  if (!phase) return;
-
-  if (payload.version && appUpdateInfo) {
-    appUpdateInfo = { ...appUpdateInfo, version: payload.version };
-  }
-
-  if (phase === 'starting') {
-    appUpdateInstallInFlight = true;
-    setAppUpdatePhase('Starting');
-    setAppUpdateProgress(0, null, payload.message || 'Preparing update...');
-    setAppUpdateModalOpen(true);
-  } else if (phase === 'downloading') {
-    appUpdateInstallInFlight = true;
-    setAppUpdatePhase('Downloading');
-    setAppUpdateProgress(payload.downloadedBytes, payload.totalBytes, payload.message || 'Downloading update...');
-    setAppUpdateModalOpen(true);
-  } else if (phase === 'installing') {
-    appUpdateInstallInFlight = true;
-    setAppUpdatePhase('Installing');
-    setAppUpdateProgress(payload.downloadedBytes, payload.totalBytes, payload.message || 'Installing update...');
-    setAppUpdateModalOpen(true);
-  } else if (phase === 'restarting') {
-    setAppUpdatePhase('Restarting');
-    setAppUpdateProgress(null, null, payload.message || 'Restarting app...');
-  } else if (phase === 'error') {
-    appUpdateInstallInFlight = false;
-    setAppUpdateStatus('Update install failed', 'error');
-    setAppUpdatePhase('Install failed');
-    setAppUpdateProgress(null, null, payload.error || payload.message || 'Update install failed.');
-  }
-
-  syncAppUpdateUi();
-});
-
 appUpdateCheckBtn?.addEventListener('click', () => {
   void checkForAppUpdate({ openModalOnAvailable: true });
 });
-appUpdateInstallBtn?.addEventListener('click', () => { void installAppUpdate(); });
+appUpdateInstallBtn?.addEventListener('click', () => { void openAppUpdateDownload(); });
 appUpdateLaterBtn?.addEventListener('click', () => {
-  if (!appUpdateInstallInFlight) setAppUpdateModalOpen(false);
+  if (!appUpdateBusy) setAppUpdateModalOpen(false);
 });
 
 function setNwwsCredentialsStatus(text = '', isError = false) {
