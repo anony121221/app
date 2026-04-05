@@ -9,7 +9,6 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
 use reqwest::Url;
-use semver::Version;
 use tauri::path::BaseDirectory;
 use tauri::webview::PageLoadEvent;
 use tauri::{AppHandle, Emitter, Manager, State, WebviewUrl, WebviewWindowBuilder};
@@ -49,7 +48,6 @@ enum BackendState {
 // decode at a time; additional workers increase parallelism but also RAM usage.
 const DEFAULT_BACKEND_POOL_SIZE: usize = 1;
 const BACKEND_LAZY_INIT_MESSAGE: &str = "Backend not started yet (lazy init)";
-const APP_UPDATE_CHECK_TIMEOUT_SECS: u64 = 10;
 
 fn backend_pool_size() -> usize {
     std::env::var("RADAR_BACKEND_POOL_SIZE")
@@ -64,41 +62,6 @@ struct Backend(Arc<Vec<Mutex<BackendState>>>);
 #[derive(Default)]
 struct NwwsBridgeState {
     child: Mutex<Option<Child>>,
-}
-
-#[derive(serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-struct UpdateInfo {
-    version: String,
-    current_version: String,
-    body: Option<String>,
-    date: Option<String>,
-    download_url: String,
-    release_url: String,
-}
-
-#[derive(serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-struct UpdateCheckResponse {
-    status: String,
-    current_version: String,
-    update: Option<UpdateInfo>,
-    message: Option<String>,
-}
-
-#[derive(serde::Deserialize)]
-struct GitHubReleaseAsset {
-    name: String,
-    browser_download_url: String,
-}
-
-#[derive(serde::Deserialize)]
-struct GitHubLatestRelease {
-    tag_name: String,
-    body: Option<String>,
-    html_url: String,
-    published_at: Option<String>,
-    assets: Vec<GitHubReleaseAsset>,
 }
 
 fn terminate_child_process(child: &mut Child) {
@@ -230,80 +193,6 @@ fn newest_existing_path(paths: Vec<PathBuf>) -> Option<PathBuf> {
                 .and_then(|m| m.modified())
                 .unwrap_or(UNIX_EPOCH)
         })
-}
-
-fn normalize_release_endpoint(raw: &str) -> Option<String> {
-    raw.lines()
-        .map(str::trim)
-        .find(|line| !line.is_empty() && !line.starts_with('#'))
-        .map(str::to_string)
-        .filter(|line| line.starts_with("https://"))
-}
-
-fn resolve_release_endpoint(app: &AppHandle) -> Option<String> {
-    if let Ok(value) = std::env::var("RADAR_RELEASE_ENDPOINT") {
-        if let Some(endpoint) = normalize_release_endpoint(&value) {
-            return Some(endpoint);
-        }
-    }
-
-    if let Ok(value) = std::env::var("RADAR_UPDATER_ENDPOINT") {
-        if let Some(endpoint) = normalize_release_endpoint(&value) {
-            return Some(endpoint);
-        }
-    }
-
-    if let Ok(path) = app.path().resolve("updater-endpoint.txt", BaseDirectory::Resource) {
-        if let Ok(contents) = fs::read_to_string(path) {
-            if let Some(endpoint) = normalize_release_endpoint(&contents) {
-                return Some(endpoint);
-            }
-        }
-    }
-
-    if let Ok(manifest_dir) = std::env::var("CARGO_MANIFEST_DIR") {
-        let path = PathBuf::from(manifest_dir).join("updater-endpoint.txt");
-        if let Ok(contents) = fs::read_to_string(path) {
-            if let Some(endpoint) = normalize_release_endpoint(&contents) {
-                return Some(endpoint);
-            }
-        }
-    }
-
-    None
-}
-
-fn release_version_label(raw: &str) -> String {
-    raw.trim()
-        .strip_prefix('v')
-        .unwrap_or(raw.trim())
-        .trim()
-        .to_string()
-}
-
-fn parse_release_version(raw: &str) -> Result<Version, String> {
-    Version::parse(&release_version_label(raw))
-        .map_err(|err| format!("Release tag `{raw}` is not valid semver: {err}"))
-}
-
-fn pick_release_download_url(release: &GitHubLatestRelease) -> String {
-    release
-        .assets
-        .iter()
-        .min_by_key(|asset| {
-            let name = asset.name.to_ascii_lowercase();
-            if name.ends_with("-setup.exe") {
-                0u8
-            } else if name.ends_with(".msi") {
-                1u8
-            } else if name.ends_with(".exe") {
-                2u8
-            } else {
-                3u8
-            }
-        })
-        .map(|asset| asset.browser_download_url.clone())
-        .unwrap_or_else(|| release.html_url.clone())
 }
 
 fn command_exists(program: &str) -> bool {
@@ -3237,70 +3126,8 @@ async fn clear_decode_cache(app: AppHandle) -> Result<ClearDecodeCacheResponse, 
 }
 
 #[tauri::command]
-async fn check_for_app_update(app: AppHandle) -> Result<UpdateCheckResponse, String> {
-    let current_version = app.package_info().version.to_string();
-    let endpoint = match resolve_release_endpoint(&app) {
-        Some(endpoint) => endpoint,
-        None => {
-            return Ok(UpdateCheckResponse {
-                status: "disabled".into(),
-                current_version,
-                update: None,
-                message: Some("Release check endpoint not configured.".into()),
-            });
-        }
-    };
-
-    tauri::async_runtime::spawn_blocking(move || {
-        let latest_release_url = Url::parse(&endpoint)
-            .map_err(|err| format!("Invalid release endpoint: {err}"))?;
-        let client = reqwest::blocking::Client::builder()
-            .timeout(Duration::from_secs(APP_UPDATE_CHECK_TIMEOUT_SECS))
-            .user_agent(format!("RadarApp/{current_version}"))
-            .build()
-            .map_err(|err| format!("Could not create release-check client: {err}"))?;
-        let release = client
-            .get(latest_release_url)
-            .header("Accept", "application/vnd.github+json")
-            .send()
-            .and_then(|resp| resp.error_for_status())
-            .map_err(|err| format!("GitHub release check failed: {err}"))?
-            .text()
-            .map_err(|err| format!("Could not read GitHub release response: {err}"))
-            .and_then(|body| {
-                serde_json::from_str::<GitHubLatestRelease>(&body)
-                    .map_err(|err| format!("Could not parse GitHub release response: {err}"))
-            })?;
-
-        let current = Version::parse(&current_version)
-            .map_err(|err| format!("Current app version is invalid: {err}"))?;
-        let latest = parse_release_version(&release.tag_name)?;
-
-        if latest <= current {
-            return Ok(UpdateCheckResponse {
-                status: "upToDate".into(),
-                current_version,
-                update: None,
-                message: Some("You already have the latest version.".into()),
-            });
-        }
-
-        Ok(UpdateCheckResponse {
-            status: "available".into(),
-            current_version: current_version.clone(),
-            update: Some(UpdateInfo {
-                version: release_version_label(&release.tag_name),
-                current_version,
-                body: release.body.clone(),
-                date: release.published_at.clone(),
-                download_url: pick_release_download_url(&release),
-                release_url: release.html_url,
-            }),
-            message: None,
-        })
-    })
-    .await
-    .map_err(|err| err.to_string())?
+fn get_app_version(app: AppHandle) -> String {
+    app.package_info().version.to_string()
 }
 
 #[tauri::command]
@@ -3332,7 +3159,7 @@ pub fn run() {
             l3_list_page,
             l3_resolve_selection,
             clear_decode_cache,
-            check_for_app_update,
+            get_app_version,
             open_app_update_url,
             fetch_url_base64,
             fetch_fl511_stream,

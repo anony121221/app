@@ -94,12 +94,78 @@ const { invoke } = window.__TAURI__.core;
 const { listen, emit } = window.__TAURI__.event;
 let _l3TransportWarmed = false;
 const APP_UPDATE_AUTO_CHECK_DELAY_MS = 4500;
+const APP_UPDATE_RETRY_DELAY_MS = 20000;
+const APP_UPDATE_LATEST_API_URL = 'https://api.github.com/repos/anony121221/app/releases/latest';
 
 function warmL3TransportOnce() {
   if (_l3TransportWarmed) return;
   _l3TransportWarmed = true;
   // Warm IPC + DNS + TLS to the L3 bucket before first station click.
   invoke('l3_list_page', { prefix: 'KTLX_', maxKeys: 1 }).catch(() => {});
+}
+
+function normalizeVersionLabel(raw) {
+  return String(raw || '').trim().replace(/^v/i, '');
+}
+
+function parseVersionParts(raw) {
+  const normalized = normalizeVersionLabel(raw);
+  const match = normalized.match(/^(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?$/);
+  if (!match) return null;
+  return {
+    major: Number(match[1]),
+    minor: Number(match[2]),
+    patch: Number(match[3]),
+    prerelease: match[4] ? match[4].split('.') : [],
+  };
+}
+
+function comparePrereleaseParts(a = [], b = []) {
+  if (!a.length && !b.length) return 0;
+  if (!a.length) return 1;
+  if (!b.length) return -1;
+  const len = Math.max(a.length, b.length);
+  for (let i = 0; i < len; i += 1) {
+    const left = a[i];
+    const right = b[i];
+    if (left == null) return -1;
+    if (right == null) return 1;
+    const leftNum = /^\d+$/.test(left) ? Number(left) : null;
+    const rightNum = /^\d+$/.test(right) ? Number(right) : null;
+    if (leftNum != null && rightNum != null) {
+      if (leftNum !== rightNum) return leftNum > rightNum ? 1 : -1;
+      continue;
+    }
+    if (leftNum != null) return -1;
+    if (rightNum != null) return 1;
+    if (left !== right) return left > right ? 1 : -1;
+  }
+  return 0;
+}
+
+function compareVersionLabels(a, b) {
+  const left = parseVersionParts(a);
+  const right = parseVersionParts(b);
+  if (!left || !right) return 0;
+  if (left.major !== right.major) return left.major > right.major ? 1 : -1;
+  if (left.minor !== right.minor) return left.minor > right.minor ? 1 : -1;
+  if (left.patch !== right.patch) return left.patch > right.patch ? 1 : -1;
+  return comparePrereleaseParts(left.prerelease, right.prerelease);
+}
+
+function pickReleaseDownloadUrl(release) {
+  const assets = Array.isArray(release?.assets) ? release.assets.slice() : [];
+  assets.sort((a, b) => {
+    const rank = item => {
+      const name = String(item?.name || '').toLowerCase();
+      if (name.endsWith('-setup.exe')) return 0;
+      if (name.endsWith('.msi')) return 1;
+      if (name.endsWith('.exe')) return 2;
+      return 3;
+    };
+    return rank(a) - rank(b);
+  });
+  return String(assets[0]?.browser_download_url || release?.html_url || '').trim();
 }
 
 // DevTools: Ctrl+Shift+I
@@ -10652,6 +10718,40 @@ function applyAppUpdateCheckResponse(res, { openModalOnAvailable = true } = {}) 
   syncAppUpdateUi();
 }
 
+function buildAppUpdateResponse(currentVersion, release) {
+  const latestVersion = normalizeVersionLabel(release?.tag_name);
+  if (!latestVersion) {
+    throw new Error('GitHub release is missing a valid tag name.');
+  }
+  if (!parseVersionParts(currentVersion)) {
+    throw new Error(`Current app version is invalid: ${currentVersion}`);
+  }
+  if (!parseVersionParts(latestVersion)) {
+    throw new Error(`Latest release version is invalid: ${latestVersion}`);
+  }
+  if (compareVersionLabels(latestVersion, currentVersion) <= 0) {
+    return {
+      status: 'upToDate',
+      currentVersion,
+      update: null,
+      message: 'You already have the latest version.',
+    };
+  }
+  return {
+    status: 'available',
+    currentVersion,
+    update: {
+      version: latestVersion,
+      currentVersion,
+      body: release?.body || '',
+      date: release?.published_at || '',
+      downloadUrl: pickReleaseDownloadUrl(release),
+      releaseUrl: String(release?.html_url || '').trim(),
+    },
+    message: null,
+  };
+}
+
 async function checkForAppUpdate({ openModalOnAvailable = true } = {}) {
   if (appUpdateBusy) return;
   appUpdateBusy = true;
@@ -10661,12 +10761,24 @@ async function checkForAppUpdate({ openModalOnAvailable = true } = {}) {
   syncAppUpdateUi();
 
   try {
-    const res = await invoke('check_for_app_update');
+    const currentVersion = String(await invoke('get_app_version'));
+    const resp = await fetch(APP_UPDATE_LATEST_API_URL, {
+      headers: {
+        Accept: 'application/vnd.github+json',
+      },
+      cache: 'no-store',
+    });
+    if (!resp.ok) {
+      throw new Error(`GitHub release check failed: HTTP ${resp.status}`);
+    }
+    const release = await resp.json();
+    const res = buildAppUpdateResponse(currentVersion, release);
     applyAppUpdateCheckResponse(res, { openModalOnAvailable });
   } catch (err) {
     appUpdateInfo = null;
     setAppUpdateStatus('Update check failed', 'error');
     setAppUpdatePhase('Check failed');
+    console.warn('app update check failed:', err);
     setAppUpdateProgress(null, null, err?.message || String(err));
     syncAppUpdateUi();
   } finally {
@@ -15786,9 +15898,16 @@ document.getElementById('ct-file-input')?.addEventListener('change', async e => 
 loadSettings();
 syncDataLevelAvailability();
 syncAppUpdateUi();
-setTimeout(() => {
-  void checkForAppUpdate({ openModalOnAvailable: true });
-}, APP_UPDATE_AUTO_CHECK_DELAY_MS);
+window.addEventListener('load', () => {
+  setTimeout(() => {
+    void checkForAppUpdate({ openModalOnAvailable: true });
+  }, APP_UPDATE_AUTO_CHECK_DELAY_MS);
+  setTimeout(() => {
+    if (!appUpdateBusy && !appUpdateInfo) {
+      void checkForAppUpdate({ openModalOnAvailable: true });
+    }
+  }, APP_UPDATE_AUTO_CHECK_DELAY_MS + APP_UPDATE_RETRY_DELAY_MS);
+});
 
 // Refresh dynamic overlays in the background while enabled.
 setInterval(() => {
