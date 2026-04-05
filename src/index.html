@@ -1,0 +1,4571 @@
+<!DOCTYPE html>
+
+<html lang="en">
+
+<head>
+
+  <meta charset="UTF-8" />
+
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+
+  <title>NEXRAD Radar</title>
+
+  <link href="https://api.mapbox.com/mapbox-gl-js/v3.4.0/mapbox-gl.css" rel="stylesheet" />
+
+  <script src="https://api.mapbox.com/mapbox-gl-js/v3.4.0/mapbox-gl.js"></script>
+  <style>
+
+    *, *::before, *::after { box-sizing: border-box; }
+
+
+
+    html, body {
+
+      width: 100%; height: 100%;
+
+      margin: 0; padding: 0;
+
+      overflow: hidden;
+
+      background: #000; color: #fff;
+
+      font-family: "Segoe UI", sans-serif;
+
+    }
+
+
+
+    #map-grid {
+      position: fixed; inset: 0;
+      z-index: 1;
+      display: grid;
+      gap: 2px;
+      grid-template-columns: 1fr;
+      grid-template-rows: 1fr;
+      background: #000;
+    }
+
+    #map-grid.panes-1 {
+
+      grid-template-columns: 1fr;
+
+      grid-template-rows: 1fr;
+
+    }
+
+    #map-grid.panes-2 {
+
+      grid-template-columns: 1fr 1fr;
+
+      grid-template-rows: 1fr;
+
+    }
+
+    #map-grid.panes-3 {
+
+      grid-template-columns: 1fr 1fr;
+
+      grid-template-rows: 1fr 1fr;
+
+    }
+
+    #map-grid.panes-3 .map-cell[data-pane="1"] {
+
+      grid-column: 1 / span 2;
+
+    }
+
+    #map-grid.panes-4 {
+
+      grid-template-columns: 1fr 1fr;
+
+      grid-template-rows: 1fr 1fr;
+
+    }
+
+    .map-cell {
+
+      position: relative;
+
+      min-width: 0;
+
+      min-height: 0;
+
+      border: 1px solid rgba(255, 255, 255, 0.07);
+
+      overflow: hidden;
+
+    }
+
+    .map-cell.active {
+
+      border-color: rgba(255, 255, 255, 0.07);
+
+      box-shadow: none;
+
+    }
+
+    .map-pane {
+
+      position: absolute;
+
+      inset: 0;
+
+    }
+
+    .pane-tag {
+
+      position: absolute;
+
+      top: 8px;
+
+      left: 8px;
+
+      z-index: 3;
+
+      font-size: 10px;
+
+      font-weight: 700;
+
+      letter-spacing: 0.06em;
+
+      text-transform: uppercase;
+
+      color: #dfe8f5;
+
+      background: rgba(0, 0, 0, 0.55);
+
+      border: 1px solid rgba(255, 255, 255, 0.2);
+
+      border-radius: 3px;
+
+      padding: 2px 6px;
+
+      pointer-events: none;
+
+    }
+
+
+
+    /* ââ Settings button ââââââââââââââââââââââââââââââââââââââââââââââââ */
+
+    #top-left-controls {
+
+      position: fixed; top: 10px; left: 10px;
+
+      z-index: 35;
+
+      width: 66px; height: 30px;
+
+    }
+
+    #settings-btn,
+
+    #city-search-btn {
+
+      position: absolute;
+
+      top: 0;
+
+      width: 30px; height: 30px;
+
+      border: 1px solid #2a2a2a; border-radius: 4px;
+
+      background: #000; color: #fff;
+
+      line-height: 1;
+
+      cursor: pointer;
+
+      display: flex; align-items: center; justify-content: center;
+
+      transition: border-color 0.1s, background 0.1s;
+
+      flex-shrink: 0;
+
+    }
+
+    #settings-btn { left: 0; }
+
+    #city-search-btn { left: 0; }
+
+    #settings-btn:hover, #settings-btn.open,
+
+    #city-search-btn:hover, #city-search-btn.open {
+
+      border-color: #666;
+
+      background: #111;
+
+    }
+
+    .icon-gear,
+
+    .icon-search {
+
+      width: 15px;
+
+      height: 15px;
+
+      display: block;
+
+      pointer-events: none;
+
+    }
+
+    #city-search-wrap {
+
+      position: absolute;
+
+      top: 0;
+
+      left: 36px;
+
+      width: 30px;
+
+      height: 30px;
+
+    }
+
+    #city-search-panel {
+
+      position: absolute;
+
+      top: 0;
+
+      left: calc(100% + 6px);
+
+      width: min(330px, calc(100vw - 66px));
+
+      max-width: 0;
+
+      opacity: 0;
+
+      transform: translateX(-4px);
+
+      pointer-events: none;
+
+      overflow: hidden;
+
+      transition: max-width 0.14s ease, opacity 0.12s ease, transform 0.12s ease;
+
+    }
+
+    #city-search-wrap.open #city-search-panel {
+
+      max-width: min(330px, calc(100vw - 66px));
+
+      opacity: 1;
+
+      transform: translateX(0);
+
+      pointer-events: auto;
+
+    }
+
+    #city-search-box {
+
+      width: min(330px, calc(100vw - 66px));
+
+      border: 1px solid #2a2a2a;
+
+      border-radius: 4px;
+
+      background: #000;
+
+      overflow: hidden;
+
+      box-shadow: 0 8px 24px rgba(0,0,0,0.45);
+
+    }
+
+    #city-search-input {
+
+      width: 100%;
+
+      border: 0;
+
+      outline: none;
+
+      padding: 7px 9px;
+
+      font-size: 12px;
+
+      color: #e6e6e6;
+
+      background: #000;
+
+    }
+
+    #city-search-input::placeholder { color: #666; }
+
+    #city-search-results {
+
+      display: none;
+
+      max-height: 230px;
+
+      overflow-y: auto;
+
+      border-top: 1px solid #1f1f1f;
+
+      background: #050505;
+
+      color-scheme: dark;
+
+      scrollbar-gutter: stable;
+
+      scrollbar-width: thin;
+
+      scrollbar-color: #3a3a3a #0a0a0a;
+
+    }
+
+    #city-search-results.open { display: block; }
+
+    #city-search-results::-webkit-scrollbar {
+
+      width: 11px;
+
+    }
+
+    #city-search-results::-webkit-scrollbar-track {
+
+      background: #0a0a0a;
+
+      border-left: 1px solid #121212;
+
+    }
+
+    #city-search-results::-webkit-scrollbar-track-piece {
+
+      background: #0a0a0a;
+
+    }
+
+    #city-search-results::-webkit-scrollbar-thumb {
+
+      background: #3a3a3a;
+
+      border-radius: 8px;
+
+      border: 2px solid #0a0a0a;
+
+    }
+
+    #city-search-results::-webkit-scrollbar-thumb:hover {
+
+      background: #4a4a4a;
+
+    }
+
+    #city-search-results::-webkit-scrollbar-button:single-button {
+
+      background: #0a0a0a;
+
+      height: 11px;
+
+      border-left: 1px solid #121212;
+
+      border-top: 1px solid #121212;
+
+      border-bottom: 1px solid #121212;
+
+    }
+
+    #city-search-results::-webkit-scrollbar-corner {
+
+      background: #0a0a0a;
+
+    }
+
+    .city-search-item {
+
+      width: 100%;
+
+      border: 0;
+
+      border-top: 1px solid #151515;
+
+      background: #050505;
+
+      color: #d7d7d7;
+
+      text-align: left;
+
+      padding: 7px 9px;
+
+      font-size: 12px;
+
+      cursor: pointer;
+
+    }
+
+    .city-search-item:first-child { border-top: 0; }
+
+    .city-search-item:hover {
+
+      background: #121212;
+
+      color: #fff;
+
+    }
+
+    .city-search-item .city-main {
+
+      display: block;
+
+      font-weight: 600;
+
+      margin-bottom: 1px;
+
+    }
+
+    .city-search-item .city-sub {
+
+      display: block;
+
+      color: #8f8f8f;
+
+      font-size: 11px;
+
+    }
+
+    .city-search-empty {
+
+      padding: 8px 9px;
+
+      color: #7a7a7a;
+
+      font-size: 11px;
+
+    }
+
+
+
+    /* ââ Settings sidebar âââââââââââââââââââââââââââââââââââââââââââââ */
+
+    #settings-overlay {
+      position: fixed;
+      inset: 0;
+      z-index: 40;
+      display: block;
+      pointer-events: none;
+      background: rgba(0,0,0,0);
+      transition: background 0.22s ease;
+    }
+
+    #settings-overlay.open {
+      pointer-events: auto;
+      background: rgba(0,0,0,0.34);
+    }
+
+    #settings-modal {
+      position: fixed;
+      left: 0;
+      top: 0;
+      bottom: 0;
+      width: min(380px, calc(100vw - 18px));
+      display: flex;
+      flex-direction: column;
+      background:
+        linear-gradient(180deg, rgba(255,255,255,0.02), rgba(255,255,255,0)),
+        #0d0d0d;
+      border-right: 1px solid #232323;
+      box-shadow: 18px 0 48px rgba(0,0,0,0.55);
+      transform: translateX(calc(-100% - 12px));
+      transition: transform 0.24s ease;
+      overflow: hidden;
+    }
+
+    #settings-overlay.open #settings-modal {
+      transform: translateX(0);
+    }
+
+    #settings-modal-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      padding: 22px 22px 18px;
+      border-bottom: 1px solid #1c1c1c;
+      flex-shrink: 0;
+    }
+
+    .settings-title-wrap {
+      display: flex;
+      align-items: center;
+      min-width: 0;
+    }
+
+    .sp-title {
+      font-size: 12px;
+      font-weight: 700;
+      letter-spacing: 0.14em;
+      text-transform: uppercase;
+      color: #f4f4f4;
+    }
+
+    #settings-close {
+      width: 28px;
+      height: 28px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      padding: 0;
+      border: none;
+      background: none;
+      color: #7a7a7a;
+      cursor: pointer;
+      transition: color 0.16s ease, background 0.16s ease;
+      border-radius: 4px;
+      flex-shrink: 0;
+    }
+
+    #settings-close svg {
+      width: 16px;
+      height: 16px;
+    }
+
+    #settings-close:hover {
+      color: #f1f1f1;
+      background: rgba(255,255,255,0.04);
+    }
+
+    #settings-body {
+      flex: 1;
+      overflow-y: auto;
+      padding: 10px 0 26px;
+      overscroll-behavior: contain;
+      scrollbar-gutter: stable;
+    }
+
+    #settings-body::-webkit-scrollbar { width: 6px; }
+    #settings-body::-webkit-scrollbar-track { background: transparent; }
+    #settings-body::-webkit-scrollbar-thumb { background: #272727; border-radius: 4px; }
+
+    .settings-group {
+      border-top: 1px solid #161616;
+    }
+
+    .settings-group:first-child {
+      border-top: none;
+    }
+
+    .settings-group-head {
+      width: 100%;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      padding: 16px 22px 14px;
+      border: none;
+      background: none;
+      color: inherit;
+      cursor: pointer;
+      text-align: left;
+      transition: background 0.16s ease;
+    }
+
+    .settings-group-head:hover {
+      background: rgba(255,255,255,0.02);
+    }
+
+    .settings-group-title {
+      font-size: 11px;
+      font-weight: 700;
+      letter-spacing: 0.16em;
+      text-transform: uppercase;
+      color: #5f5f5f;
+    }
+
+    .settings-group-chevron {
+      width: 17px;
+      height: 17px;
+      color: #949494;
+      flex-shrink: 0;
+      transition: transform 0.18s ease, color 0.18s ease;
+    }
+
+    .settings-group.open .settings-group-chevron {
+      transform: rotate(90deg);
+      color: #f0f0f0;
+    }
+
+    .settings-group-body {
+      display: grid;
+      grid-template-rows: 0fr;
+      transition: grid-template-rows 0.2s ease;
+      overflow: hidden;
+      visibility: hidden;
+      pointer-events: none;
+      contain: layout paint;
+    }
+
+    .settings-group.open .settings-group-body {
+      grid-template-rows: 1fr;
+      visibility: visible;
+      pointer-events: auto;
+    }
+
+    .settings-group-inner {
+      overflow: hidden;
+      min-height: 0;
+      padding-bottom: 0;
+    }
+
+    .settings-group.open .settings-group-inner {
+      padding-bottom: 14px;
+    }
+
+    .sp-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      padding: 13px 22px;
+      border-bottom: 1px solid #181818;
+    }
+
+    .sp-row:last-child { border-bottom: none; }
+
+    .sp-row-label {
+      font-size: 14px;
+      color: #dddddd;
+      font-weight: 500;
+      letter-spacing: 0.01em;
+    }
+
+    .settings-row-left {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      min-width: 0;
+      flex: 1;
+    }
+
+    .settings-row-left .sp-row-label {
+      order: 1;
+      flex: 1;
+      min-width: 0;
+    }
+
+    .settings-row-left .settings-expander-btn {
+      order: 2;
+      margin-left: auto;
+    }
+
+    .settings-section {
+      border-bottom: 1px solid #181818;
+    }
+
+    .settings-section-head {
+      cursor: default;
+    }
+
+    .settings-section-body {
+      display: grid;
+      grid-template-rows: 0fr;
+      transition: grid-template-rows 0.2s ease;
+      background: rgba(255,255,255,0.02);
+      overflow: hidden;
+      visibility: hidden;
+      pointer-events: none;
+      contain: layout paint;
+    }
+
+    .settings-section.open .settings-section-body {
+      grid-template-rows: 1fr;
+      visibility: visible;
+      pointer-events: auto;
+    }
+
+    .settings-section-inner {
+      overflow: hidden;
+      min-height: 0;
+    }
+
+    .settings-subblock {
+      display: grid;
+      gap: 8px;
+      padding: 14px 22px;
+      border-top: 1px solid #171717;
+    }
+
+    .settings-sub-row {
+      padding-top: 11px;
+      padding-bottom: 11px;
+      padding-left: 22px;
+      padding-right: 22px;
+      background: transparent;
+    }
+
+    .settings-cache-row {
+      gap: 0;
+      align-items: center;
+    }
+
+    .toggle { position: relative; display: inline-block; width: 44px; height: 24px; flex-shrink: 0; }
+    .toggle input { opacity: 0; width: 0; height: 0; position: absolute; }
+
+    .toggle-track {
+      position: absolute;
+      cursor: pointer;
+      top: 0;
+      left: 0;
+      right: 0;
+      bottom: 0;
+      background: #333;
+      border-radius: 12px;
+      transition: background 0.2s;
+    }
+
+    .toggle-track::before {
+      position: absolute;
+      content: "";
+      height: 18px;
+      width: 18px;
+      left: 3px;
+      bottom: 3px;
+      background: #fff;
+      border-radius: 50%;
+      transition: transform 0.2s;
+    }
+
+    .toggle input:checked + .toggle-track { background: #1d6ef5; }
+    .toggle input:checked + .toggle-track::before { transform: translateX(20px); }
+
+    .sp-row-right {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      flex-shrink: 0;
+    }
+
+    .sp-row-right .sp-val {
+      font-size: 11px;
+      color: #888;
+      min-width: 28px;
+      text-align: right;
+      font-variant-numeric: tabular-nums;
+    }
+
+    .sp-slider {
+      -webkit-appearance: none;
+      appearance: none;
+      width: 110px;
+      height: 3px;
+      background: #2e2e2e;
+      border-radius: 2px;
+      outline: none;
+      cursor: pointer;
+    }
+
+    .sp-slider::-webkit-slider-thumb {
+      -webkit-appearance: none;
+      appearance: none;
+      width: 14px;
+      height: 14px;
+      border-radius: 50%;
+      background: #1d6ef5;
+      cursor: pointer;
+    }
+
+    .sp-slider::-moz-range-thumb {
+      width: 14px;
+      height: 14px;
+      border-radius: 50%;
+      background: #1d6ef5;
+      border: none;
+      cursor: pointer;
+    }
+
+    .sp-btn {
+      font-size: 9px;
+      font-weight: 600;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+      color: #888;
+      border: 1px solid #2a2a2a;
+      border-radius: 4px;
+      background: #000;
+      padding: 5px 8px;
+      cursor: pointer;
+      transition: border-color 0.1s, color 0.1s, background 0.1s;
+    }
+
+    .sp-btn:hover { border-color: #555; color: #ccc; }
+    .sp-lev-btn.active { border-color: #1d6ef5; color: #1d6ef5; background: #0a1830; }
+
+    .sp-filter-btn {
+      width: 26px;
+      height: 26px;
+      padding: 0;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      color: #9d9d9d;
+      border: none;
+      border-radius: 0;
+      background: none;
+      flex-shrink: 0;
+    }
+
+    .sp-filter-btn svg {
+      width: 18px;
+      height: 18px;
+      transition: transform 0.18s ease;
+      pointer-events: none;
+    }
+
+    .sp-filter-btn:hover {
+      border: none;
+      background: none;
+      color: #e2e2e2;
+    }
+
+    .sp-filter-btn.open {
+      border: none;
+      background: none;
+      color: #f0f0f0;
+    }
+
+    .sp-filter-btn.open svg {
+      transform: rotate(90deg);
+    }
+
+    .spc-filter-label {
+      font-size: 10px;
+      color: #777;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+    }
+
+    .spc-chip-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+    }
+
+    .spc-chip {
+      border: 1px solid #2a2a2a;
+      border-radius: 4px;
+      background: #000;
+      color: #aaa;
+      font-size: 10px;
+      font-weight: 600;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+      padding: 5px 8px;
+      cursor: pointer;
+    }
+
+    .spc-chip:hover { border-color: #555; color: #ddd; }
+    .spc-chip.active { border-color: #1d6ef5; color: #1d6ef5; background: #0a1830; }
+
+    .camera-filter-toggle-list {
+      border: 1px solid #1a1a1a;
+      border-radius: 6px;
+      overflow: hidden;
+      background: #080808;
+    }
+
+    .camera-filter-toggle-list .sp-row {
+      padding: 9px 12px;
+      border-bottom: 1px solid #1a1a1a;
+    }
+
+    .camera-filter-toggle-list .sp-row:last-child {
+      border-bottom: none;
+    }
+
+    .camera-filter-toggle-list .sp-row-label {
+      font-size: 12px;
+      color: #ddd;
+    }
+
+    .camera-filter-select {
+      width: 100%;
+      max-width: 100%;
+    }
+
+    .settings-colors-inner {
+      padding-bottom: 8px;
+    }
+
+    @media (max-width: 720px) {
+      #settings-modal {
+        width: min(360px, calc(100vw - 10px));
+      }
+    }
+
+
+    /* ââ Status island (top-right) ââââââââââââââââââââââââââââââââââââââ */
+
+    /* Storm report popup (dark card) */
+
+    .mapboxgl-popup.storm-popup .mapboxgl-popup-content {
+
+      background: #101318;
+
+      color: #e9edf3;
+
+      border: 1px solid #2a313c;
+
+      border-radius: 7px;
+
+      box-shadow: 0 12px 32px rgba(0, 0, 0, 0.55);
+
+      padding: 0;
+
+      min-width: 210px;
+
+    }
+
+    .mapboxgl-popup.storm-popup .mapboxgl-popup-tip {
+
+      border-top-color: #101318;
+
+      border-bottom-color: #101318;
+
+      border-left-color: #101318;
+
+      border-right-color: #101318;
+
+    }
+
+    .mapboxgl-popup.storm-popup .mapboxgl-popup-close-button {
+
+      color: #98a5b8;
+
+      font-size: 16px;
+
+      line-height: 1;
+
+      padding: 6px 8px 0 0;
+
+    }
+
+    .mapboxgl-popup.storm-popup .mapboxgl-popup-close-button:hover {
+
+      color: #ffffff;
+
+      background: transparent;
+
+    }
+
+    .storm-popup-card {
+
+      border-left: 3px solid var(--storm-accent, #4EA5FF);
+
+      padding: 8px 9px 9px 10px;
+
+      display: grid;
+
+      gap: 6px;
+
+    }
+
+    .storm-popup-title {
+
+      font-size: 12px;
+
+      font-weight: 700;
+
+      color: #f4f7fb;
+
+      line-height: 1.2;
+
+      letter-spacing: 0.01em;
+
+    }
+
+    .storm-popup-meta {
+
+      color: #8fa1b7;
+
+      font-size: 9px;
+
+      font-weight: 600;
+
+      letter-spacing: 0.08em;
+
+      text-transform: uppercase;
+
+    }
+
+    .storm-popup-time {
+
+      color: #8fa1b7;
+
+      font-size: 9px;
+
+      font-weight: 500;
+
+      line-height: 1.25;
+
+      letter-spacing: 0.01em;
+
+      text-transform: none;
+
+      font-variant-numeric: tabular-nums;
+
+    }
+
+    .storm-popup-grid {
+
+      display: grid;
+
+      grid-template-columns: 60px 1fr;
+
+      gap: 4px 7px;
+
+      align-items: start;
+
+    }
+
+    .storm-popup-k {
+
+      font-size: 9px;
+
+      color: #7f8ca2;
+
+      text-transform: uppercase;
+
+      letter-spacing: 0.05em;
+
+      line-height: 1.3;
+
+    }
+
+    .storm-popup-v {
+
+      font-size: 11px;
+
+      color: #e2e8f2;
+
+      line-height: 1.3;
+
+      word-break: break-word;
+
+    }
+
+    .storm-popup-remarks {
+
+      border-top: 1px solid #252d39;
+
+      padding-top: 6px;
+
+      font-size: 10px;
+
+      line-height: 1.3;
+
+      color: #b6c2d4;
+
+      max-height: 88px;
+
+      overflow: auto;
+
+    }
+
+
+
+    .alert-popup-card {
+
+      min-width: 176px;
+
+      gap: 8px;
+
+    }
+
+    .alert-popup-expiry {
+
+      color: #9aa8ba;
+
+      font-size: 10px;
+
+      font-weight: 500;
+
+      line-height: 1.25;
+
+      font-variant-numeric: tabular-nums;
+
+    }
+
+    .alert-popup-details-btn {
+
+      width: 100%;
+
+      height: 20px;
+
+      border: 1px solid #3a3a3a;
+
+      border-radius: 3px;
+
+      background: #2a2a2a;
+
+      color: #f4f7fb;
+
+      font-size: 10px;
+
+      font-weight: 700;
+
+      letter-spacing: 0.03em;
+
+      cursor: pointer;
+
+      transition: background 0.12s, border-color 0.12s, color 0.12s;
+
+    }
+
+    .alert-popup-details-btn:hover {
+
+      background: #353535;
+
+      border-color: #4b4b4b;
+
+      color: #ffffff;
+
+    }
+
+    #alert-details-overlay {
+
+      position: fixed;
+
+      inset: 0;
+
+      z-index: 46;
+
+      display: none;
+
+      align-items: center;
+
+      justify-content: center;
+
+      background: rgba(0,0,0,0.42);
+
+    }
+
+    #alert-details-overlay.open { display: flex; }
+
+    #alert-details-modal {
+
+      width: min(540px, calc(100vw - 28px));
+
+      max-height: min(78vh, calc(100vh - 32px));
+
+      background: #0d0d0d;
+
+      border: 1px solid #2a2a2a;
+
+      border-radius: 8px;
+
+      box-shadow: 0 10px 30px rgba(0,0,0,0.55);
+
+      overflow: hidden;
+
+      display: flex;
+
+      flex-direction: column;
+
+    }
+
+    #alert-details-header {
+
+      display: flex;
+
+      align-items: flex-start;
+
+      justify-content: space-between;
+
+      gap: 12px;
+
+      padding: 14px 16px 10px;
+
+      border-bottom: 1px solid #1d1d1d;
+
+    }
+
+    #alert-details-heading {
+
+      min-width: 0;
+
+      display: grid;
+
+      gap: 4px;
+
+    }
+
+    #alert-details-title {
+
+      font-size: 16px;
+
+      font-weight: 700;
+
+      line-height: 1.2;
+
+      color: #f4f7fb;
+
+    }
+
+    #alert-details-meta {
+
+      font-size: 10px;
+
+      font-weight: 700;
+
+      letter-spacing: 0.08em;
+
+      text-transform: uppercase;
+
+      color: #8fa1b7;
+
+    }
+
+    #alert-details-close {
+
+      border: none;
+
+      background: none;
+
+      color: #677488;
+
+      font-size: 19px;
+
+      line-height: 1;
+
+      cursor: pointer;
+
+      padding: 1px 0 0;
+
+      transition: color 0.12s;
+
+    }
+
+    #alert-details-close:hover { color: #ffffff; }
+
+    #alert-details-body {
+
+      padding: 14px 16px 16px;
+
+      overflow-y: auto;
+
+      overflow-x: hidden;
+
+      display: grid;
+
+      gap: 12px;
+
+      scrollbar-width: thin;
+
+      scrollbar-color: #5a5a5a #101010;
+
+    }
+
+    #alert-details-body::-webkit-scrollbar {
+
+      width: 10px;
+
+    }
+
+    #alert-details-body::-webkit-scrollbar-track {
+
+      background: #101010;
+
+    }
+
+    #alert-details-body::-webkit-scrollbar-thumb {
+
+      background: #595959;
+
+      border-radius: 999px;
+
+      border: 2px solid #101010;
+
+    }
+
+    .alert-details-time {
+
+      font-size: 11px;
+
+      line-height: 1.35;
+
+      color: #9aa8ba;
+
+      font-variant-numeric: tabular-nums;
+
+    }
+
+    .alert-details-grid {
+
+      display: grid;
+
+      grid-template-columns: 82px 1fr;
+
+      gap: 6px 10px;
+
+      align-items: start;
+
+    }
+
+    .alert-details-k {
+
+      font-size: 10px;
+
+      line-height: 1.3;
+
+      color: #7f8ca2;
+
+      text-transform: uppercase;
+
+      letter-spacing: 0.05em;
+
+    }
+
+    .alert-details-v {
+
+      font-size: 12px;
+
+      line-height: 1.35;
+
+      color: #e2e8f2;
+
+      word-break: break-word;
+
+    }
+
+    .alert-details-block {
+
+      display: grid;
+
+      gap: 6px;
+
+      padding-top: 10px;
+
+      border-top: 1px solid #1d2430;
+
+    }
+
+    .alert-details-block-title {
+
+      font-size: 10px;
+
+      font-weight: 700;
+
+      letter-spacing: 0.08em;
+
+      text-transform: uppercase;
+
+      color: #8fa1b7;
+
+    }
+
+    .alert-details-block-text {
+
+      font-size: 12px;
+
+      line-height: 1.45;
+
+      color: #ced7e5;
+
+      white-space: pre-wrap;
+
+      word-break: break-word;
+
+    }
+
+    .alert-details-disclosure {
+
+      border-top: 1px solid #1d2430;
+
+      padding-top: 10px;
+
+    }
+
+    .alert-details-disclosure > summary {
+
+      list-style: none;
+
+      display: flex;
+
+      align-items: center;
+
+      justify-content: space-between;
+
+      gap: 12px;
+
+      cursor: pointer;
+
+      color: #dbe3ef;
+
+      font-size: 11px;
+
+      font-weight: 700;
+
+      letter-spacing: 0.08em;
+
+      text-transform: uppercase;
+
+      user-select: none;
+
+    }
+
+    .alert-details-disclosure > summary::-webkit-details-marker {
+
+      display: none;
+
+    }
+
+    .alert-details-disclosure > summary::after {
+
+      content: '+';
+
+      color: #8fa1b7;
+
+      font-size: 16px;
+
+      line-height: 1;
+
+    }
+
+    .alert-details-disclosure[open] > summary::after {
+
+      content: '-';
+
+    }
+
+    .alert-details-disclosure-body {
+
+      display: grid;
+
+      gap: 12px;
+
+      padding-top: 10px;
+
+    }
+
+    #status-island {
+      position: fixed; right: 10px; top: 10px;
+
+      z-index: 22; pointer-events: auto;
+
+    }
+
+
+
+    #status-main {
+
+      border-radius: 4px; border: 1px solid #2a2a2a;
+
+      background: #000; display: flex; align-items: center; gap: 6px;
+
+      padding: 5px 6px;
+
+    }
+
+
+
+    #info-popup {
+
+      position: absolute; right: 0; top: calc(100% + 4px);
+
+      width: min(300px, calc(100vw - 16px));
+
+      border: 1px solid #2a2a2a; border-radius: 4px;
+
+      background: #000; display: none; z-index: 21;
+
+    }
+
+    #status-island.info-open #info-popup { display: block; }
+
+    #warnings-dropdown {
+
+      position: absolute; right: 0; top: calc(100% + 4px);
+
+      width: min(372px, calc(100vw - 16px));
+
+      max-height: min(68vh, calc(100vh - 70px));
+
+      display: none; grid-template-rows: auto 1fr;
+
+      overflow: hidden;
+
+      border: 1px solid #2a2a2a; border-radius: 4px;
+
+      background: #000; z-index: 23;
+
+      box-shadow: 0 14px 30px rgba(0,0,0,0.58);
+
+    }
+
+    #status-island.warnings-open #warnings-dropdown { display: grid; }
+
+    #warnings-dropdown-header {
+
+      display: flex; align-items: flex-start; justify-content: space-between; gap: 12px;
+
+      padding: 10px 10px 9px;
+
+      border-bottom: 1px solid #1c1c1c;
+
+    }
+
+    .warnings-dropdown-heading {
+
+      min-width: 0; display: grid; gap: 3px;
+
+    }
+
+    .warnings-dropdown-kicker {
+
+      font-size: 9px; font-weight: 700; letter-spacing: 0.12em; text-transform: uppercase;
+
+      color: #757575;
+
+    }
+
+    .warnings-dropdown-title {
+
+      font-size: 15px; font-weight: 700; line-height: 1.15;
+
+      color: #f1f4fa;
+
+    }
+
+    #warnings-dropdown-count {
+
+      font-size: 10px; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase;
+
+      color: #a3adb9; white-space: nowrap; padding-top: 2px;
+
+    }
+
+    #warnings-dropdown-list {
+
+      overflow: auto; padding: 8px; display: grid; gap: 7px;
+
+      scrollbar-width: thin; scrollbar-color: #373737 #080808;
+
+    }
+
+    #warnings-dropdown-list::-webkit-scrollbar { width: 8px; }
+
+    #warnings-dropdown-list::-webkit-scrollbar-track { background: #080808; }
+
+    #warnings-dropdown-list::-webkit-scrollbar-thumb {
+
+      background: #373737; border-radius: 4px;
+
+    }
+
+    .warning-drawer-empty {
+
+      display: none;
+
+      padding: 16px 12px 18px;
+
+      color: #8d95a1;
+
+      font-size: 12px;
+
+      text-align: center;
+
+    }
+
+    .warning-drawer-row {
+
+      display: grid; gap: 7px;
+
+      padding: 9px 10px;
+
+      border: 1px solid #1f232a; border-left: 3px solid var(--warning-color, #ffcc33);
+
+      border-radius: 4px;
+
+      background: #090909;
+
+    }
+
+    .warning-drawer-top {
+
+      display: flex; align-items: flex-start; justify-content: space-between; gap: 10px;
+
+    }
+
+    .warning-drawer-title-wrap {
+
+      min-width: 0; display: grid; gap: 3px; flex: 1 1 auto;
+
+    }
+
+    .warning-drawer-title {
+
+      color: #f1f4fa; font-size: 13px; font-weight: 700; line-height: 1.2;
+
+    }
+
+    .warning-drawer-code {
+
+      color: #808a96; font-size: 9px; font-weight: 700; letter-spacing: 0.12em; text-transform: uppercase;
+
+    }
+
+    .warning-drawer-time {
+
+      color: #aab4c1; font-size: 10px; font-weight: 600; letter-spacing: 0.03em;
+
+      white-space: nowrap; padding-top: 1px;
+
+    }
+
+    .warning-drawer-area {
+
+      color: #cfd7e4; font-size: 11px; line-height: 1.4;
+
+    }
+
+    .warning-drawer-hazards {
+
+      color: #9eabb9; font-size: 11px; line-height: 1.45;
+
+    }
+
+    .warning-drawer-actions {
+
+      display: flex; justify-content: flex-end; gap: 6px; flex-wrap: wrap;
+
+    }
+
+    .warning-drawer-btn {
+
+      min-width: 72px; height: 26px; padding: 0 10px;
+
+      border: 1px solid #262a31; border-radius: 4px;
+
+      background: #050505; color: #edf2fb;
+
+      font-size: 11px; font-weight: 700; letter-spacing: 0.03em;
+
+      cursor: pointer;
+
+      transition: border-color 0.14s ease, background 0.14s ease, color 0.14s ease;
+
+    }
+
+    .warning-drawer-btn:hover {
+
+      border-color: var(--warning-color, #ffcc33);
+
+      color: #fff; background: #101010;
+
+    }
+
+    .warning-drawer-btn.secondary { color: #c4cedb; }
+
+
+
+    /* ââ Control island âââââââââââââââââââââââââââââââââââââââââââââââââ */
+
+    #control-island {
+      position: fixed; right: 10px; bottom: 10px;
+      width: min(300px, calc(100vw - 16px));
+      z-index: 20; pointer-events: auto;
+    }
+
+    #recent-frames-progress {
+      position: absolute;
+      right: 0;
+      bottom: calc(100% + 8px);
+      display: none;
+      align-items: center;
+      gap: 7px;
+      min-width: 108px;
+      max-width: min(180px, calc(100vw - 20px));
+      padding: 7px 9px;
+      border: 1px solid #25292f;
+      border-radius: 4px;
+      background: rgba(0,0,0,0.94);
+      box-shadow: 0 8px 24px rgba(0,0,0,0.5);
+      pointer-events: none;
+    }
+
+    #control-island.recent-progress-active #recent-frames-progress {
+      display: flex;
+    }
+
+    #recent-frames-progress .loading-spinner {
+      width: 12px;
+      height: 12px;
+      border-width: 2px;
+    }
+
+    #recent-frames-progress-copy {
+      min-width: 0;
+      display: block;
+      flex: 1 1 auto;
+    }
+
+    #recent-frames-progress-title {
+      display: none;
+    }
+
+    #recent-frames-progress-detail {
+      color: #d8dfeb;
+      font-size: 12px;
+      font-weight: 700;
+      font-variant-numeric: tabular-nums;
+      line-height: 1;
+      white-space: nowrap;
+    }
+
+    #recent-frames-progress[data-state="complete"] {
+      border-color: #234331;
+      background: rgba(4, 16, 8, 0.96);
+    }
+
+    #recent-frames-progress[data-state="complete"] #recent-frames-progress-title {
+      color: #a9f0bf;
+    }
+
+    #recent-frames-progress[data-state="complete"] #recent-frames-progress-detail {
+      color: #d7f1df;
+    }
+
+    #recent-frames-progress[data-state="complete"] .loading-spinner {
+      border-color: rgba(169, 240, 191, 0.24);
+      border-top-color: #79d994;
+    }
+
+    #recent-frames-progress[data-state="error"] {
+      border-color: #5a2323;
+      background: rgba(20, 5, 5, 0.96);
+    }
+
+    #recent-frames-progress[data-state="error"] #recent-frames-progress-title {
+      color: #ffb0b0;
+    }
+
+    #recent-frames-progress[data-state="error"] #recent-frames-progress-detail {
+      color: #ffd0d0;
+    }
+
+    #recent-frames-progress[data-state="error"] .loading-spinner {
+      border-color: rgba(255, 176, 176, 0.2);
+      border-top-color: #ff9090;
+    }
+
+    #island-main {
+
+      border-radius: 4px; border: 1px solid #2a2a2a;
+
+      background: #000; overflow: visible;
+
+    }
+
+
+
+    /* ââ Island product row (top card) âââââââââââââââââââââââââââââââââ */
+
+    #island-product-row {
+      display: flex; align-items: flex-end; gap: 6px;
+      padding: 6px 7px;
+    }
+
+    #product-picker {
+      display: flex;
+      flex-direction: column;
+      gap: 3px;
+      min-width: 0;
+      flex: 1;
+      position: relative;
+    }
+
+    #tilt-picker {
+      display: flex;
+      flex-direction: column;
+      gap: 3px;
+      min-width: 66px;
+      flex: 0 0 auto;
+      position: relative;
+    }
+
+    .island-picker-label {
+      font-size: 9px;
+      font-weight: 700;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      color: #7f8691;
+      line-height: 1;
+    }
+
+    #product-picker select,
+    #tilt-picker select {
+      display: none;
+    }
+
+    .island-dropdown {
+      position: relative;
+      width: 100%;
+    }
+
+    .island-dropdown-btn {
+      width: 100%;
+      height: 26px;
+      padding: 0 32px 0 9px;
+      border: 1px solid #1f232a;
+      border-radius: 4px;
+      background: #000;
+      color: #f3f6fb;
+      text-align: left;
+      font-size: 11px;
+      line-height: 24px;
+      cursor: pointer;
+      box-shadow: inset 0 0 0 1px rgba(255,255,255,0.03);
+      transition: border-color 0.12s, box-shadow 0.12s, background 0.12s;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .island-dropdown-btn::after {
+      content: '';
+      position: absolute;
+      right: 11px;
+      top: 50%;
+      width: 7px;
+      height: 7px;
+      border-right: 1.5px solid #6f7b8d;
+      border-bottom: 1.5px solid #6f7b8d;
+      transform: translateY(-65%) rotate(45deg);
+      pointer-events: none;
+      opacity: 0.95;
+    }
+
+    .island-dropdown-btn:hover {
+      border-color: #353b45;
+      background: #000;
+    }
+
+    .island-dropdown-btn.open,
+    .island-dropdown-btn:focus {
+      outline: none;
+      border-color: #4f8df7;
+      box-shadow: 0 0 0 1px rgba(79,141,247,0.3);
+    }
+
+    .island-dropdown-btn.disabled,
+    .island-dropdown-btn:disabled {
+      color: #5b6470;
+      border-color: #1d2128;
+      background: #000;
+      cursor: default;
+    }
+
+    .island-dropdown-menu {
+      display: none;
+      position: absolute;
+      bottom: calc(100% + 6px);
+      left: 0;
+      right: 0;
+      max-height: min(220px, calc(100vh - 96px));
+      overflow-y: auto;
+      background: #000;
+      border: 1px solid #2a2a2a;
+      border-radius: 6px;
+      box-shadow: 0 12px 28px rgba(0,0,0,0.6);
+      z-index: 28;
+      scrollbar-gutter: stable;
+      scrollbar-width: thin;
+      scrollbar-color: #3a3a3a #0a0a0a;
+    }
+
+    .island-dropdown-menu::-webkit-scrollbar {
+      width: 11px;
+    }
+
+    .island-dropdown-menu::-webkit-scrollbar-track {
+      background: #0a0a0a;
+      border-left: 1px solid #121212;
+    }
+
+    .island-dropdown-menu::-webkit-scrollbar-track-piece {
+      background: #0a0a0a;
+    }
+
+    .island-dropdown-menu::-webkit-scrollbar-thumb {
+      background: #3a3a3a;
+      border-radius: 8px;
+      border: 2px solid #0a0a0a;
+    }
+
+    .island-dropdown-menu::-webkit-scrollbar-thumb:hover {
+      background: #4a4a4a;
+    }
+
+    .island-dropdown-menu::-webkit-scrollbar-button:single-button {
+      background: #0a0a0a;
+      height: 11px;
+      border-left: 1px solid #121212;
+      border-top: 1px solid #121212;
+      border-bottom: 1px solid #121212;
+    }
+
+    .island-dropdown-menu::-webkit-scrollbar-corner {
+      background: #0a0a0a;
+    }
+
+    .island-dropdown-menu.open {
+      display: block;
+    }
+
+    #tilt-picker .island-dropdown-menu {
+      min-width: 84px;
+      left: auto;
+      right: 0;
+    }
+
+
+    .island-dropdown-item {
+      width: 100%;
+      padding: 8px 10px;
+      border: 0;
+      border-top: 1px solid #14181e;
+      background: #000;
+      color: #dfe6f3;
+      text-align: left;
+      font-size: 11px;
+      cursor: pointer;
+    }
+
+    .island-dropdown-item:first-child {
+      border-top: 0;
+    }
+
+    .island-dropdown-item:hover:not(:disabled),
+    .island-dropdown-item.active {
+      background: #0d1626;
+      color: #fff;
+    }
+
+    .island-dropdown-item:disabled {
+      color: #4f5865;
+      background: #040507;
+      cursor: default;
+    }
+
+    #frame-label {
+      font-size: 10px; color: #555; white-space: nowrap;
+      font-variant-numeric: tabular-nums; line-height: 1; min-width: 62px;
+    }
+    #frame-label.ok      { color: #8ddbb0; }
+    #frame-label.loading { color: #f0c97a; }
+    #frame-label.error   { color: #ff8f8f; }
+
+
+    #warning-dashboard-btn {
+
+      border: 1px solid #2a2a2a; border-radius: 4px;
+
+      background: #000; color: #fff;
+
+      width: 22px; height: 22px;
+
+      display: inline-flex; align-items: center; justify-content: center;
+
+      cursor: pointer;
+
+      flex-shrink: 0;
+
+    }
+
+    #warning-dashboard-btn svg {
+
+      width: 12px; height: 12px; display: block;
+
+      pointer-events: none;
+
+    }
+
+    #warning-dashboard-btn:hover {
+
+      border-color: #ffcc33; color: #ffcc33; background: #111;
+
+    }
+
+
+    /* ââ Info popup âââââââââââââââââââââââââââââââââââââââââââââââââââââ */
+
+    #island-body {
+
+      padding: 6px 7px 7px; display: grid; gap: 2px;
+
+      border-top: 1px solid #1a1a1a;
+
+    }
+
+    #station-name {
+
+      font-size: 14px; font-weight: 700; letter-spacing: 0.02em;
+
+      line-height: 1; color: #fff; text-transform: uppercase;
+
+    }
+
+    #station-full {
+
+      font-size: 9px; color: #c2c2c2;
+
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+
+    }
+
+    #station-coords { font-size: 9px; color: #8d8d8d; font-variant-numeric: tabular-nums; }
+
+    #scan-row {
+
+      margin-top: 0; display: flex; align-items: center; gap: 4px;
+
+      flex-wrap: wrap; font-size: 9px; color: #b6b6b6; font-variant-numeric: tabular-nums;
+
+    }
+
+    #scan-row .k { color: #8f8f8f; text-transform: uppercase; letter-spacing: 0.04em; font-size: 8px; }
+
+    #scan-row .sep { color: #666; }
+
+
+
+    /* ââ Camera modal âââââââââââââââââââââââââââââââââââââââââââââââââââ */
+
+    #camera-modal {
+
+      position: fixed; inset: 0; z-index: 60;
+
+      display: none;
+
+      background: transparent;
+
+      backdrop-filter: none;
+
+      pointer-events: none;
+
+    }
+
+    #youtube-panel-host {
+
+      position: fixed;
+
+      inset: 0;
+
+      z-index: 52;
+
+      pointer-events: none;
+
+      display: none;
+
+    }
+
+    .pane-frame-time {
+
+      position: absolute;
+
+      top: 8px;
+
+      left: 8px;
+
+      z-index: 3;
+
+      font-size: 10px;
+
+      font-weight: 600;
+
+      letter-spacing: 0.02em;
+
+      color: #dfe8f5;
+
+      background: rgba(0, 0, 0, 0.52);
+
+      border: 1px solid rgba(255, 255, 255, 0.14);
+
+      border-radius: 3px;
+
+      padding: 2px 6px;
+
+      pointer-events: none;
+
+      backdrop-filter: blur(4px);
+
+      -webkit-backdrop-filter: blur(4px);
+
+      opacity: 0.96;
+
+    }
+
+    #camera-popup,
+    .youtube-panel {
+
+      width: min(680px, 92vw);
+
+      height: min(420px, calc(100vh - 24px));
+
+      min-width: 360px;
+
+      min-height: 250px;
+
+      max-width: calc(100vw - 24px);
+
+      max-height: calc(100vh - 24px);
+
+      background: #0d0d0d; border: 1px solid #2a2a2a; border-radius: 6px;
+
+      overflow: hidden; display: flex; flex-direction: column;
+
+      box-shadow: 0 8px 32px rgba(0,0,0,0.7);
+
+      position: fixed;
+
+      pointer-events: auto;
+
+    }
+
+    #camera-popup {
+
+      left: 12px;
+
+      bottom: 12px;
+
+    }
+
+    .youtube-panel {
+      left: 24px;
+      top: 24px;
+    }
+
+    .panel-resize-handle {
+      position: absolute;
+      top: 0;
+      left: 0;
+      width: 18px;
+      height: 18px;
+      cursor: nwse-resize;
+      background: transparent;
+      z-index: 5;
+    }
+
+
+
+    #camera-header,
+    .youtube-panel-header {
+
+      display: flex; align-items: center; justify-content: space-between;
+
+      padding: 9px 12px; background: #111; border-bottom: 1px solid #1e1e1e;
+
+      flex-shrink: 0;
+
+      cursor: move;
+
+      user-select: none;
+
+    }
+
+
+
+    #camera-title,
+    .youtube-panel-title {
+
+      font-size: 12px; font-weight: 600; color: #ddd;
+
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+
+    }
+
+
+
+    #camera-header-btns,
+    .youtube-panel-header-btns { display: flex; gap: 2px; flex-shrink: 0; }
+
+
+
+    #camera-header-btns button,
+    .youtube-panel-header-btns button {
+
+      background: none; border: none; color: #555;
+
+      width: 28px; height: 24px; padding: 0;
+
+      display: inline-flex; align-items: center; justify-content: center;
+
+      font-size: 14px; cursor: pointer; border-radius: 3px;
+
+      line-height: 1; transition: color 0.1s, background 0.1s;
+
+    }
+
+    #camera-header-btns button:hover,
+    .youtube-panel-header-btns button:hover { color: #fff; background: #1e1e1e; }
+
+    #camera-share svg,
+    #camera-fullscreen svg,
+    #camera-close svg,
+    .youtube-panel-share svg,
+    .youtube-panel-fullscreen svg,
+    .youtube-panel-close svg { display: block; width: 12px; height: 12px; }
+
+
+    #camera-dir-bar {
+
+      display: none; flex-wrap: wrap; gap: 4px;
+
+      padding: 5px 10px; background: #0a0a0a;
+
+      border-bottom: 1px solid #1e1e1e; flex-shrink: 0;
+
+    }
+
+    .dir-btn {
+
+      background: none; border: 1px solid #2a2a2a; border-radius: 3px;
+
+      color: #777; padding: 3px 12px;
+
+      font-size: 10px; font-weight: 700; letter-spacing: 0.06em;
+
+      cursor: pointer; transition: border-color 0.1s, color 0.1s, background 0.1s;
+
+    }
+
+    .dir-btn:hover { border-color: #555; color: #ddd; }
+
+    .dir-btn.active { border-color: #fff; color: #fff; background: #1a1a1a; }
+
+
+
+    #camera-content,
+    .youtube-panel-content {
+
+      width: 100%;
+
+      flex: 1 1 auto;
+
+      min-height: 180px;
+
+      background: #000;
+
+      overflow: hidden;
+
+    }
+
+
+
+    /* ââ Color table tab ââââââââââââââââââââââââââââââââââââââââââââââââ */
+
+    .ct-section { padding: 2px 0 6px; }
+
+    .ct-family-label { font-weight: 700; font-size: 12px; color: #fff; min-width: 28px; }
+
+    .ct-select {
+
+      flex: 1; min-width: 0; max-width: 130px;
+
+      border: 1px solid #2a2a2a; border-radius: 3px;
+
+      background: #000; color: #fff;
+
+      padding: 3px 6px; font-size: 11px; cursor: pointer; height: 22px;
+
+    }
+
+    .ct-select:focus { outline: none; border-color: #555; }
+
+    .sp-text {
+
+      width: 190px;
+
+      max-width: 100%;
+
+      border: 1px solid #2a2a2a;
+
+      border-radius: 3px;
+
+      background: #000;
+
+      color: #fff;
+
+      padding: 3px 6px;
+
+      font-size: 11px;
+
+      height: 22px;
+
+    }
+
+    .sp-text:focus {
+
+      outline: none;
+
+      border-color: #555;
+
+    }
+
+    .sp-note {
+
+      font-size: 10px;
+
+      color: #7d8ca3;
+
+      min-height: 12px;
+
+    }
+
+    .sp-note.error { color: #ff7f7f; }
+    .sp-note.success { color: #8ab4ff; }
+
+    .sp-textarea {
+
+      width: 100%;
+
+      min-height: 90px;
+
+      border: 1px solid #2a2a2a;
+
+      border-radius: 6px;
+
+      background: #000;
+
+      color: #fff;
+
+      padding: 8px 10px;
+
+      font-size: 11px;
+
+      line-height: 1.45;
+
+      font-family: Consolas, "SFMono-Regular", monospace;
+
+      resize: vertical;
+
+    }
+
+    .sp-textarea:focus {
+
+      outline: none;
+
+      border-color: #555;
+
+    }
+
+    .settings-action-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      flex-wrap: wrap;
+    }
+
+    .settings-action-row .sp-btn {
+      min-width: 96px;
+      min-height: 26px;
+      font-size: 10px;
+    }
+
+    .ct-del-btn { display: none; }
+
+    .ct-preview {
+
+      height: 14px; margin: 4px 16px 6px;
+
+      border-radius: 2px; border: 1px solid #2a2a2a;
+
+    }
+
+    .ct-sep { border-top: 1px solid #1a1a1a; }
+
+    #warning-prefs-overlay,
+    #nwws-login-overlay,
+    #app-update-overlay {
+      position: fixed;
+      inset: 0;
+      z-index: 54;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 18px;
+      background: rgba(0,0,0,0.62);
+      opacity: 0;
+      pointer-events: none;
+      transition: opacity 0.18s ease;
+      backdrop-filter: blur(2px);
+    }
+
+    #warning-prefs-overlay.open,
+    #nwws-login-overlay.open,
+    #app-update-overlay.open {
+      opacity: 1;
+      pointer-events: auto;
+    }
+
+    #warning-prefs-modal,
+    #nwws-login-modal,
+    #app-update-modal {
+      width: min(1120px, calc(100vw - 28px));
+      max-height: min(86vh, calc(100vh - 36px));
+      display: grid;
+      grid-template-rows: auto 1fr;
+      overflow: hidden;
+      border-radius: 10px;
+      border: 1px solid #232323;
+      background:
+        linear-gradient(180deg, rgba(255,255,255,0.02), rgba(255,255,255,0)),
+        #0b0b0b;
+      box-shadow: 0 18px 44px rgba(0,0,0,0.46);
+      transform: translateY(10px) scale(0.988);
+      transition: transform 0.18s ease;
+    }
+
+    #nwws-login-modal {
+      width: min(372px, calc(100vw - 28px));
+      max-height: min(320px, calc(100vh - 36px));
+      border-radius: 8px;
+    }
+
+    #app-update-modal {
+      width: min(460px, calc(100vw - 28px));
+      max-height: min(520px, calc(100vh - 36px));
+      border-radius: 10px;
+    }
+
+    #warning-prefs-overlay.open #warning-prefs-modal,
+    #nwws-login-overlay.open #nwws-login-modal,
+    #app-update-overlay.open #app-update-modal {
+      transform: translateY(0) scale(1);
+    }
+
+    #warning-prefs-header,
+    #nwws-login-header,
+    #app-update-header {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 18px;
+      padding: 18px 20px 16px;
+      border-bottom: 1px solid #1c1c1c;
+    }
+
+    #nwws-login-header {
+      align-items: center;
+      gap: 12px;
+      padding: 14px 16px 12px;
+    }
+
+    #app-update-header {
+      align-items: center;
+      gap: 12px;
+      padding: 16px 18px 14px;
+    }
+
+    .warning-prefs-title-wrap {
+      display: grid;
+      gap: 8px;
+      min-width: 0;
+    }
+
+    .warning-prefs-kicker {
+      font-size: 10px;
+      font-weight: 700;
+      letter-spacing: 0.14em;
+      text-transform: uppercase;
+      color: #7a7a7a;
+    }
+
+    .warning-prefs-title {
+      font-size: 24px;
+      font-weight: 800;
+      line-height: 1.05;
+      color: #f0f0f0;
+    }
+
+    #nwws-login-modal .warning-prefs-title-wrap {
+      gap: 0;
+    }
+
+    #nwws-login-modal .warning-prefs-title {
+      font-size: 19px;
+      letter-spacing: 0.04em;
+    }
+
+    #app-update-modal .warning-prefs-title-wrap {
+      gap: 4px;
+    }
+
+    #app-update-modal .warning-prefs-title {
+      font-size: 20px;
+      letter-spacing: 0.02em;
+    }
+
+    .warning-prefs-subtitle {
+      max-width: 760px;
+      font-size: 13px;
+      line-height: 1.5;
+      color: #9a9a9a;
+    }
+
+    #warning-prefs-close,
+    #nwws-login-close,
+    #app-update-close {
+      width: 28px;
+      height: 28px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      border: 1px solid #2a2a2a;
+      border-radius: 4px;
+      background: #111;
+      color: #aaa;
+      cursor: pointer;
+      transition: border-color 0.14s ease, background 0.14s ease, color 0.14s ease;
+      flex-shrink: 0;
+    }
+
+    #nwws-login-close {
+      width: 24px;
+      height: 24px;
+    }
+
+    #warning-prefs-close:hover,
+    #nwws-login-close:hover,
+    #app-update-close:hover {
+      border-color: #555;
+      background: #151515;
+      color: #eee;
+    }
+
+    #warning-prefs-close svg,
+    #nwws-login-close svg,
+    #app-update-close svg {
+      width: 16px;
+      height: 16px;
+      display: block;
+      pointer-events: none;
+    }
+
+    #warning-prefs-body,
+    #nwws-login-body,
+    #app-update-body {
+      overflow: auto;
+      padding: 14px;
+      scrollbar-gutter: stable;
+    }
+
+    #nwws-login-body {
+      padding: 12px 16px 14px;
+    }
+
+    #app-update-body {
+      padding: 14px 18px 18px;
+      display: grid;
+      gap: 14px;
+    }
+
+    #warning-prefs-body::-webkit-scrollbar,
+    #nwws-login-body::-webkit-scrollbar,
+    #app-update-body::-webkit-scrollbar {
+      width: 8px;
+    }
+
+    #warning-prefs-body::-webkit-scrollbar-thumb,
+    #nwws-login-body::-webkit-scrollbar-thumb,
+    #app-update-body::-webkit-scrollbar-thumb {
+      background: rgba(255,255,255,0.1);
+      border-radius: 4px;
+    }
+
+    .nwws-login-form {
+      display: grid;
+      gap: 10px;
+    }
+
+    #nwws-login-modal .settings-subblock {
+      gap: 6px;
+    }
+
+    #nwws-login-modal .spc-filter-label {
+      font-size: 10px;
+      letter-spacing: 0.08em;
+    }
+
+    #nwws-login-modal .sp-text {
+      width: 100%;
+      height: 32px;
+      padding: 6px 8px;
+      font-size: 12px;
+    }
+
+    #nwws-login-modal .settings-action-row {
+      gap: 8px;
+      justify-content: space-between;
+      align-items: center;
+      margin-top: 2px;
+    }
+
+    #nwws-login-modal .sp-btn {
+      min-width: 82px;
+      min-height: 24px;
+      padding-inline: 14px;
+    }
+
+    #nwws-login-modal .sp-note {
+      flex: 1;
+      min-height: 14px;
+      text-align: right;
+      font-size: 11px;
+    }
+
+    .app-update-card {
+      display: grid;
+      gap: 10px;
+      padding: 14px;
+      border-radius: 8px;
+      border: 1px solid #1d1d1d;
+      background: linear-gradient(180deg, rgba(255,255,255,0.012), rgba(255,255,255,0)), #101010;
+    }
+
+    .app-update-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      font-size: 12px;
+      color: #9b9b9b;
+    }
+
+    .app-update-row strong {
+      color: #f0f0f0;
+      font-size: 12px;
+      font-weight: 700;
+      text-align: right;
+    }
+
+    .app-update-progress {
+      height: 8px;
+      overflow: hidden;
+      border-radius: 999px;
+      border: 1px solid #1f1f1f;
+      background: #121212;
+    }
+
+    .app-update-progress[hidden] {
+      display: none;
+    }
+
+    #app-update-progress-bar {
+      width: 0%;
+      height: 100%;
+      border-radius: inherit;
+      background: linear-gradient(90deg, #2f78ff, #73a7ff);
+      transition: width 0.18s ease;
+    }
+
+    #app-update-progress-text {
+      min-height: 14px;
+      font-size: 11px;
+      line-height: 1.45;
+      color: #8f8f8f;
+    }
+
+    .app-update-notes {
+      min-height: 72px;
+      max-height: 150px;
+      overflow: auto;
+      padding: 12px;
+      border-radius: 8px;
+      border: 1px solid #1f1f1f;
+      background: #0e0e0e;
+      color: #c8c8c8;
+      font-size: 12px;
+      line-height: 1.5;
+      white-space: pre-wrap;
+    }
+
+    .app-update-actions {
+      justify-content: flex-end;
+      gap: 10px;
+      margin-top: 2px;
+    }
+
+    .app-update-actions .sp-btn {
+      min-width: 88px;
+    }
+
+    .warning-settings-note {
+      padding: 0 2px 10px;
+      font-size: 12px;
+      line-height: 1.5;
+      color: #7d7d7d;
+    }
+
+    .warning-settings-list {
+      display: grid;
+      gap: 14px;
+      padding: 0;
+    }
+
+    .warning-setting-card {
+      position: relative;
+      display: grid;
+      gap: 12px;
+      padding: 14px;
+      border-radius: 8px;
+      border: 1px solid #202020;
+      background: linear-gradient(180deg, rgba(255,255,255,0.012), rgba(255,255,255,0)), #101010;
+      box-shadow: none;
+      overflow: hidden;
+    }
+
+    .warning-setting-card::before {
+      display: none;
+    }
+
+    .warning-setting-top,
+    .warning-setting-bottom {
+      position: relative;
+      z-index: 1;
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 14px;
+      flex-wrap: wrap;
+    }
+
+    .warning-setting-title-wrap {
+      min-width: 0;
+      display: grid;
+      gap: 4px;
+      flex: 1 1 220px;
+    }
+
+    .warning-setting-title {
+      font-size: 14px;
+      font-weight: 700;
+      line-height: 1.3;
+      color: #f1f1f1;
+    }
+
+    .warning-setting-code {
+      font-size: 10px;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+      color: #777;
+    }
+
+    .warning-setting-top-actions,
+    .warning-setting-bottom-actions {
+      display: flex;
+      align-items: center;
+      justify-content: flex-end;
+      gap: 10px;
+      flex-wrap: wrap;
+      flex: 1 1 260px;
+    }
+
+    .warning-setting-chip,
+    .warning-setting-sound,
+    .warning-setting-color {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      min-height: 34px;
+      padding: 6px 10px;
+      border-radius: 6px;
+      border: 1px solid #262626;
+      background: #0a0a0a;
+    }
+
+    .warning-setting-color {
+      padding-right: 8px;
+    }
+
+    .warning-setting-chip-label,
+    .warning-setting-sound-label {
+      font-size: 10px;
+      font-weight: 700;
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+      color: #c8c8c8;
+      white-space: nowrap;
+    }
+
+    .warning-setting-color input[type="color"] {
+      width: 38px;
+      height: 24px;
+      border: 1px solid #323232;
+      border-radius: 4px;
+      padding: 0;
+      background: #000;
+      cursor: pointer;
+    }
+
+    .warning-setting-sound select {
+      min-width: 150px;
+      max-width: 220px;
+      height: 24px;
+      border: 1px solid #2a2a2a;
+      border-radius: 3px;
+      background: #000;
+      color: #fff;
+      padding: 2px 6px;
+      color-scheme: dark;
+      outline: none;
+      box-shadow: none;
+    }
+
+    .warning-setting-sound select:focus {
+      border-color: #555;
+    }
+
+    .warning-setting-sound select option {
+      background: #000;
+      color: #fff;
+    }
+
+    .warning-setting-preview {
+      min-width: 78px;
+    }
+
+    @media (max-width: 760px) {
+      #warning-prefs-overlay,
+      #nwws-login-overlay {
+        padding: 10px;
+      }
+
+      #warning-prefs-modal,
+      #nwws-login-modal {
+        width: min(100vw - 16px, 100%);
+        max-height: calc(100vh - 20px);
+        border-radius: 8px;
+      }
+
+      #warning-prefs-header,
+      #nwws-login-header {
+        padding: 16px 16px 14px;
+      }
+
+      .warning-prefs-title {
+        font-size: 22px;
+      }
+
+      #warning-prefs-body,
+      #nwws-login-body {
+        padding: 14px;
+      }
+
+      .warning-setting-top-actions,
+      .warning-setting-bottom-actions {
+        justify-content: flex-start;
+      }
+
+      .warning-setting-sound {
+        width: 100%;
+        justify-content: space-between;
+      }
+
+      .warning-setting-sound select {
+        flex: 1 1 auto;
+        min-width: 0;
+        max-width: none;
+      }
+    }
+
+
+
+    /* ââ Tools menu ââââââââââââââââââââââââââââââââââââââââââââââââââââ */
+
+    #tools-menu { position: relative; flex-shrink: 0; }
+
+
+
+    #tools-btn {
+      border: 1px solid #2a2a2a; border-radius: 4px;
+      background: #000; color: #888;
+      width: 26px; height: 26px;
+      display: flex; align-items: center; justify-content: center;
+      cursor: pointer;
+      transition: border-color 0.1s, background 0.1s, color 0.1s;
+    }
+    #tools-btn svg { display: block; width: 12px; height: 12px; }
+    #tools-btn:hover, #tools-btn.open { border-color: #5a5a5a; background: #101010; color: #ddd; }
+
+    #tools-btn.active { border-color: #ffcc00; background: #111; color: #ffcc00; }
+
+
+
+    #tools-dropdown {
+
+      display: none;
+
+      position: absolute; bottom: calc(100% + 6px); right: 0;
+
+      min-width: 160px;
+
+      background: #0d0d0d; border: 1px solid #2a2a2a; border-radius: 4px;
+
+      overflow: hidden;
+
+      box-shadow: 0 4px 16px rgba(0,0,0,0.7);
+
+      z-index: 25;
+
+    }
+
+    #tools-dropdown.open { display: block; }
+
+
+
+    .tools-item {
+
+      display: block; width: 100%;
+
+      padding: 8px 12px; text-align: left;
+
+      background: none; border: none; border-bottom: 1px solid #1a1a1a;
+
+      color: #ccc; font-size: 12px; cursor: pointer;
+
+      transition: background 0.1s, color 0.1s;
+
+    }
+
+    .tools-meta {
+
+      display: block;
+
+      width: 100%;
+
+      padding: 8px 12px;
+
+      border-bottom: 1px solid #1a1a1a;
+
+      color: #7f8691;
+
+      font-size: 10px;
+
+      font-weight: 700;
+
+      letter-spacing: 0.08em;
+
+      text-transform: uppercase;
+
+      pointer-events: none;
+
+    }
+
+    .tools-item:hover:not(:disabled) { background: #111; color: #fff; }
+
+    .tools-item:disabled { color: #3a3a3a; cursor: default; }
+
+    #multi-pane-btn.open {
+
+      background: #0f1928;
+
+      color: #1d6ef5;
+
+    }
+
+    #recent-frames-btn.open {
+      background: #0f1928;
+      color: #1d6ef5;
+    }
+
+    #pane-menu {
+
+      display: none;
+
+      position: absolute;
+
+      bottom: calc(100% + 6px);
+
+      right: 168px;
+
+      background: #0d0d0d;
+
+      border: 1px solid #2a2a2a;
+
+      border-radius: 4px;
+
+      box-shadow: 0 4px 16px rgba(0,0,0,0.7);
+
+      z-index: 26;
+
+      min-width: 96px;
+
+      overflow: hidden;
+
+    }
+
+    #pane-menu.open { display: block; }
+
+    #recent-frames-menu {
+      display: none;
+      position: absolute;
+      bottom: calc(100% + 6px);
+      right: 168px;
+      background: #0d0d0d;
+      border: 1px solid #2a2a2a;
+      border-radius: 4px;
+      box-shadow: 0 4px 16px rgba(0,0,0,0.7);
+      z-index: 26;
+      min-width: 124px;
+      overflow: hidden;
+    }
+
+    #recent-frames-menu.open { display: block; }
+
+    .recent-frames-meta {
+      display: block;
+      padding: 8px 10px 7px;
+      border-bottom: 1px solid #1a1a1a;
+      color: #7f8691;
+      font-size: 10px;
+      font-weight: 700;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      pointer-events: none;
+    }
+
+    .recent-frames-option {
+      width: 100%;
+      display: block;
+      padding: 7px 10px;
+      background: none;
+      border: none;
+      border-bottom: 1px solid #1a1a1a;
+      color: #ccc;
+      text-align: left;
+      font-size: 12px;
+      cursor: pointer;
+      transition: background 0.1s, color 0.1s;
+    }
+
+    .recent-frames-option:last-child { border-bottom: none; }
+
+    .recent-frames-option:hover,
+    .recent-frames-option.active {
+      background: #121212;
+      color: #fff;
+    }
+
+    .pane-option {
+
+      width: 100%;
+
+      display: block;
+
+      padding: 7px 10px;
+
+      background: none;
+
+      border: none;
+
+      border-bottom: 1px solid #1a1a1a;
+
+      color: #c3c3c3;
+
+      text-align: left;
+
+      font-size: 11px;
+
+      cursor: pointer;
+
+    }
+
+    .pane-option:last-child { border-bottom: none; }
+
+    .pane-option:hover { background: #121212; color: #fff; }
+
+    .pane-option.active {
+
+      background: #0f1928;
+
+      color: #6ea9ff;
+
+    }
+
+
+
+    /* ââ Drawing toolbar âââââââââââââââââââââââââââââââââââââââââââââââ */
+
+    #draw-toolbar {
+
+      position: fixed; bottom: 10px; left: 50%; transform: translateX(-50%);
+
+      z-index: 30; display: none; align-items: center; gap: 6px;
+
+      padding: 5px 10px;
+
+      background: #000; border: 1px solid #2a2a2a; border-radius: 4px;
+
+      box-shadow: 0 4px 16px rgba(0,0,0,0.7); white-space: nowrap;
+
+      pointer-events: auto;
+
+    }
+
+    .dt-label {
+
+      font-size: 10px; font-weight: 700; letter-spacing: 0.08em;
+
+      text-transform: uppercase; color: #666; flex-shrink: 0;
+
+    }
+
+    .dt-sep { width: 1px; height: 16px; background: #2a2a2a; flex-shrink: 0; margin: 0 2px; }
+
+    #dt-colors { display: flex; gap: 4px; align-items: center; }
+
+    .dt-color {
+
+      width: 16px; height: 16px; border-radius: 50%;
+
+      border: 2px solid transparent; box-sizing: border-box;
+
+      background: var(--c); cursor: pointer; flex-shrink: 0;
+
+      padding: 0; margin: 0; appearance: none; -webkit-appearance: none;
+
+      outline: none; line-height: 1;
+
+      transition: border-color 0.1s, transform 0.1s;
+
+    }
+
+    .dt-color:hover { transform: scale(1.15); }
+
+    .dt-color.active { border-color: #fff; }
+
+    #dt-custom-color {
+
+      width: 16px; height: 16px; border-radius: 50%;
+
+      border: 2px solid #2a2a2a; cursor: pointer; flex-shrink: 0;
+
+      padding: 0; appearance: none; -webkit-appearance: none;
+
+      background: none; overflow: hidden;
+
+      transition: border-color 0.1s;
+
+    }
+
+    #dt-custom-color::-webkit-color-swatch-wrapper { padding: 0; }
+
+    #dt-custom-color::-webkit-color-swatch { border: none; border-radius: 50%; }
+
+    #dt-custom-color.active { border-color: #fff; }
+
+    .dt-style {
+
+      background: none; border: 1px solid #2a2a2a; border-radius: 3px;
+
+      color: #888; font-size: 11px; padding: 2px 7px; cursor: pointer; flex-shrink: 0;
+
+      transition: border-color 0.1s, color 0.1s;
+
+    }
+
+    .dt-style:hover, .dt-style.active { border-color: #fff; color: #fff; }
+
+    #dt-width {
+
+      -webkit-appearance: none; appearance: none;
+
+      width: 70px; height: 3px; background: #2e2e2e; border-radius: 2px;
+
+      outline: none; cursor: pointer;
+
+    }
+
+    #dt-width::-webkit-slider-thumb {
+
+      -webkit-appearance: none; width: 12px; height: 12px;
+
+      border-radius: 50%; background: #fff; cursor: grab;
+
+    }
+
+    #dt-width-val { font-size: 10px; color: #888; min-width: 22px; font-variant-numeric: tabular-nums; }
+
+    #dt-undo, #dt-clear, #dt-done {
+
+      background: none; border: 1px solid #2a2a2a; border-radius: 3px;
+
+      color: #888; font-size: 10px; font-weight: 600;
+
+      padding: 2px 7px; cursor: pointer; flex-shrink: 0;
+
+      transition: border-color 0.1s, color 0.1s;
+
+    }
+
+    #dt-undo:hover, #dt-clear:hover { border-color: #555; color: #ccc; }
+
+    #dt-done:hover { border-color: #ff5555; color: #ff5555; }
+
+
+
+    /* ââ Corner decode toast (non-blocking, shown during initial station load) */
+
+    #decode-toast {
+
+      position: fixed; top: 10px; left: 50%; transform: translateX(-50%); z-index: 26;
+
+      display: none; align-items: center; gap: 7px;
+
+      background: rgba(0,0,0,0.75); border: 1px solid #333;
+
+      border-radius: 6px; padding: 6px 11px;
+
+      pointer-events: none; /* map stays fully interactive */
+
+    }
+
+    .loading-spinner {
+
+      width: 14px; height: 14px; flex-shrink: 0;
+
+      border: 2px solid rgba(255,255,255,0.15); border-top-color: #1d6ef5;
+
+      border-radius: 50%; animation: spin 0.8s linear infinite;
+
+    }
+
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    #decode-msg { font-size: 11px; color: #bbb; white-space: nowrap; }
+
+    #warning-toast-host {
+
+      position: fixed;
+
+      left: 14px;
+
+      bottom: 14px;
+
+      z-index: 68;
+
+      width: min(360px, calc(100vw - 20px));
+
+      display: flex;
+
+      flex-direction: column;
+
+      align-items: flex-start;
+
+      gap: 10px;
+
+      pointer-events: none;
+
+    }
+
+    .warning-toast {
+
+      position: relative;
+
+      width: 100%;
+
+      display: grid;
+
+      gap: 11px;
+
+      padding: 14px 14px 13px 16px;
+
+      border: 1px solid rgba(255,255,255,0.08);
+
+      border-radius: 14px;
+
+      background:
+        linear-gradient(180deg, rgba(255,255,255,0.03), rgba(255,255,255,0)),
+        rgba(8,8,8,0.96);
+
+      box-shadow: 0 16px 42px rgba(0,0,0,0.42);
+
+      overflow: hidden;
+
+      pointer-events: auto;
+
+      animation: warning-toast-in 0.18s ease;
+
+    }
+
+    .warning-toast::before {
+
+      content: "";
+
+      position: absolute;
+
+      inset: 0 auto 0 0;
+
+      width: 3px;
+
+      background: var(--toast-accent, #ffcc33);
+
+    }
+
+    .warning-toast.closing {
+
+      animation: warning-toast-out 0.18s ease forwards;
+
+    }
+
+    .warning-toast-header {
+
+      display: flex;
+
+      align-items: flex-start;
+
+      gap: 10px;
+
+      padding-right: 26px;
+
+    }
+
+    .warning-toast-icon {
+
+      width: 18px;
+
+      height: 18px;
+
+      flex-shrink: 0;
+
+      color: var(--toast-accent, #ffcc33);
+
+      opacity: 0.95;
+
+      margin-top: 1px;
+
+    }
+
+    .warning-toast-header-text {
+
+      min-width: 0;
+
+      display: grid;
+
+      gap: 3px;
+
+    }
+
+    .warning-toast-kicker {
+
+      font-size: 10px;
+
+      font-weight: 700;
+
+      letter-spacing: 0.11em;
+
+      text-transform: uppercase;
+
+      color: #f4f6fb;
+
+    }
+
+    .warning-toast-title {
+
+      font-size: 15px;
+
+      font-weight: 700;
+
+      line-height: 1.25;
+
+      color: #ffffff;
+
+    }
+
+    .warning-toast-subtitle,
+    .warning-toast-hazards {
+
+      font-size: 12px;
+
+      line-height: 1.45;
+
+      color: #c4cddd;
+
+    }
+
+    .warning-toast-hazards {
+
+      color: #f0f4ff;
+
+    }
+
+    .warning-toast-facts {
+
+      display: grid;
+
+      gap: 7px;
+
+      padding: 2px 0 0;
+
+    }
+
+    .warning-toast-fact {
+
+      display: grid;
+
+      grid-template-columns: minmax(84px, auto) 1fr;
+
+      gap: 10px;
+
+      align-items: baseline;
+
+    }
+
+    .warning-toast-fact-k {
+
+      font-size: 10px;
+
+      font-weight: 700;
+
+      letter-spacing: 0.1em;
+
+      text-transform: uppercase;
+
+      color: #7f8796;
+
+      white-space: nowrap;
+
+    }
+
+    .warning-toast-fact-v {
+
+      font-size: 13px;
+
+      line-height: 1.3;
+
+      color: #f6f9ff;
+
+      font-weight: 600;
+
+    }
+
+    .warning-toast-close {
+
+      position: absolute;
+
+      top: 9px;
+
+      right: 9px;
+
+      width: 24px;
+
+      height: 24px;
+
+      display: inline-flex;
+
+      align-items: center;
+
+      justify-content: center;
+
+      border: none;
+
+      border-radius: 8px;
+
+      background: transparent;
+
+      color: #7f8797;
+
+      cursor: pointer;
+
+      transition: color 0.14s ease, background 0.14s ease;
+
+    }
+
+    .warning-toast-close:hover {
+
+      color: #ffffff;
+
+      background: rgba(255,255,255,0.06);
+
+    }
+
+    .warning-toast-close svg {
+
+      width: 12px;
+
+      height: 12px;
+
+      display: block;
+
+      pointer-events: none;
+
+    }
+
+    .warning-toast-actions {
+
+      display: flex;
+
+      align-items: center;
+
+      gap: 8px;
+
+      flex-wrap: wrap;
+
+    }
+
+    .warning-toast-btn {
+
+      min-width: 124px;
+
+      min-height: 34px;
+
+      padding: 0 12px;
+
+      display: inline-flex;
+
+      align-items: center;
+
+      justify-content: center;
+
+      border: 1px solid rgba(255,255,255,0.14);
+
+      border-radius: 10px;
+
+      background: rgba(255,255,255,0.03);
+
+      color: #f4f7ff;
+
+      font-size: 12px;
+
+      font-weight: 600;
+
+      cursor: pointer;
+
+      transition: border-color 0.14s ease, background 0.14s ease, color 0.14s ease;
+
+      flex: 1 1 132px;
+
+    }
+
+    .warning-toast-btn:hover {
+
+      border-color: var(--toast-accent, #ffcc33);
+
+      background: rgba(255,255,255,0.06);
+
+    }
+
+    .warning-toast-btn.secondary {
+
+      color: #d6deed;
+
+    }
+
+    @keyframes warning-toast-in {
+      from { opacity: 0; transform: translateY(10px) scale(0.985); }
+      to { opacity: 1; transform: translateY(0) scale(1); }
+    }
+
+    @keyframes warning-toast-out {
+      from { opacity: 1; transform: translateY(0) scale(1); }
+      to { opacity: 0; transform: translateY(8px) scale(0.985); }
+    }
+
+
+
+    /* Hover value inspector (toggle with keyboard "I") */
+
+    #inspect-panel {
+
+      position: fixed; left: 0; top: 0; z-index: 60;
+
+      display: none;
+
+      background: rgba(0,0,0,0.84); border: 1px solid #383838;
+
+      border-radius: 5px; padding: 6px 8px;
+
+      pointer-events: none;
+
+      font-size: 11px; font-variant-numeric: tabular-nums;
+
+      color: #e5e5e5;
+
+      white-space: nowrap;
+
+      box-shadow: 0 8px 24px rgba(0,0,0,0.45);
+
+    }
+
+
+
+    /* ââ Level II warning dialog âââââââââââââââââââââââââââââââââââââââ */
+
+    #l2-warning {
+
+      position: fixed; inset: 0; z-index: 55;
+
+      display: none; align-items: center; justify-content: center;
+
+      background: rgba(0,0,0,0.6);
+
+    }
+
+    #l2-warning.open { display: flex; }
+
+    #l2-warning-box {
+
+      width: min(320px, calc(100vw - 32px));
+
+      background: #0d0d0d; border: 1px solid #2a2a2a; border-radius: 6px;
+
+      padding: 18px 18px 14px; display: flex; flex-direction: column; gap: 10px;
+
+      box-shadow: 0 8px 32px rgba(0,0,0,0.8);
+
+    }
+
+    #l2-warning-box .sp-title { margin-bottom: 2px; }
+
+    #l2-warning-box p { font-size: 12px; color: #aaa; margin: 0; line-height: 1.6; }
+
+    #l2-warning-actions { display: flex; gap: 6px; justify-content: flex-end; margin-top: 4px; }
+
+
+
+
+    /* ââ Mapbox overrides âââââââââââââââââââââââââââââââââââââââââââââââ */
+
+    .mapboxgl-ctrl-logo, .mapboxgl-ctrl-attrib { display: none !important; }
+
+    .mapboxgl-ctrl-group { display: none !important; }
+
+
+
+    @media (max-width: 720px) {
+      #control-island { right: 8px; bottom: 8px; width: min(260px, calc(100vw - 16px)); }
+      #status-island { right: 8px; top: 8px; }
+      #info-popup { width: min(260px, calc(100vw - 16px)); }
+      #warnings-dropdown { width: min(320px, calc(100vw - 16px)); }
+      #warning-toast-host { left: 8px; right: 8px; width: auto; }
+    }
+  </style>
+
+</head>
+
+<body>
+
+  <div id="map-grid" class="panes-1">
+
+    <div class="map-cell active" id="map-cell-1" data-pane="1">
+
+      <div id="map" class="map-pane"></div>
+
+      <div class="pane-frame-time" id="pane-frame-time-1">--:--:--</div>
+
+    </div>
+
+  </div>
+
+
+
+  <!-- Top-left controls -->
+
+  <div id="top-left-controls">
+
+    <button id="settings-btn" type="button" title="Settings" aria-label="Settings">
+
+      <svg class="icon-gear" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+
+        <path d="M19.14 12.94c.04-.31.06-.63.06-.94s-.02-.63-.06-.94l2.03-1.58a.5.5 0 0 0 .12-.64l-1.92-3.32a.5.5 0 0 0-.6-.22l-2.39.96a7.18 7.18 0 0 0-1.63-.94l-.36-2.54a.5.5 0 0 0-.5-.42h-3.84a.5.5 0 0 0-.5.42l-.36 2.54c-.58.23-1.12.54-1.63.94l-2.39-.96a.5.5 0 0 0-.6.22L2.67 8.84a.5.5 0 0 0 .12.64l2.03 1.58c-.04.31-.06.63-.06.94s.02.63.06.94L2.79 14.52a.5.5 0 0 0-.12.64l1.92 3.32c.13.22.39.31.6.22l2.39-.96c.5.4 1.05.72 1.63.94l.36 2.54c.04.24.25.42.5.42h3.84c.25 0 .46-.18.5-.42l.36-2.54c.58-.23 1.13-.54 1.63-.94l2.39.96c.22.09.47 0 .6-.22l1.92-3.32a.5.5 0 0 0-.12-.64l-2.03-1.58ZM12 15.5A3.5 3.5 0 1 1 12 8a3.5 3.5 0 0 1 0 7.5Z"/>
+
+      </svg>
+
+    </button>
+
+    <div id="city-search-wrap">
+
+      <button id="city-search-btn" type="button" title="City Search" aria-label="City Search">
+
+        <svg class="icon-search" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+
+          <path d="M10.5 3a7.5 7.5 0 0 1 5.94 12.08l4.24 4.24-1.42 1.42-4.24-4.24A7.5 7.5 0 1 1 10.5 3Zm0 2A5.5 5.5 0 1 0 16 10.5 5.51 5.51 0 0 0 10.5 5Z"/>
+
+        </svg>
+
+      </button>
+
+      <div id="city-search-panel">
+
+        <div id="city-search-box">
+
+          <input id="city-search-input" type="text" autocomplete="off" placeholder="Search city...">
+
+          <div id="city-search-results"></div>
+
+        </div>
+
+      </div>
+
+    </div>
+
+  </div>
+
+
+
+  <!-- Settings sidebar -->
+
+  <div id="settings-overlay">
+
+    <aside id="settings-modal" aria-labelledby="settings-title">
+
+      <div id="settings-modal-header">
+
+        <div class="settings-title-wrap">
+          <span class="sp-title" id="settings-title">Settings</span>
+        </div>
+
+        <button id="settings-close" type="button" aria-label="Close">
+          <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+            <path d="M18.3 5.71 12 12l6.3 6.29-1.41 1.42L10.59 13.4 4.29 19.71 2.88 18.3 9.17 12 2.88 5.71 4.29 4.29l6.3 6.3 6.3-6.3 1.41 1.42Z"/>
+          </svg>
+        </button>
+      </div>
+
+      <div id="settings-body">
+
+        <div class="settings-group" id="settings-group-radar">
+          <button class="settings-group-head" id="settings-group-radar-btn" type="button" aria-expanded="false">
+            <span class="settings-group-title">Radar</span>
+            <svg class="settings-group-chevron" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+              <path d="m9 6 6 6-6 6-1.41-1.41L12.17 12 7.59 7.41 9 6Z"/>
+            </svg>
+          </button>
+          <div class="settings-group-body">
+            <div class="settings-group-inner">
+              <div class="sp-row">
+                <span class="sp-row-label">DBZ Filter</span>
+                <div class="sp-row-right">
+                  <input class="sp-slider" type="range" id="dbz-slider" min="-30" max="75" value="-30" step="1">
+                  <span class="sp-val" id="dbz-val">-30 dBZ</span>
+                </div>
+              </div>
+
+              <div class="sp-row">
+                <span class="sp-row-label">Data Level</span>
+                <div class="sp-row-right" style="gap:4px">
+                  <button class="sp-btn sp-lev-btn active" data-level="3">Level III</button>
+                </div>
+              </div>
+
+              <div class="sp-row">
+                <span class="sp-row-label">Live Sweep</span>
+                <label class="toggle">
+                  <input type="checkbox" id="toggle-sweep">
+                  <span class="toggle-track"></span>
+                </label>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="settings-group" id="settings-group-overlays">
+          <button class="settings-group-head" id="settings-group-overlays-btn" type="button" aria-expanded="false">
+            <span class="settings-group-title">Overlays</span>
+            <svg class="settings-group-chevron" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+              <path d="m9 6 6 6-6 6-1.41-1.41L12.17 12 7.59 7.41 9 6Z"/>
+            </svg>
+          </button>
+          <div class="settings-group-body">
+            <div class="settings-group-inner">
+              <div class="settings-section" id="settings-section-spc">
+                <div class="sp-row settings-section-head">
+                  <div class="settings-row-left">
+                    <button class="sp-btn sp-filter-btn settings-expander-btn" id="spc-filter-btn" type="button" title="SPC Options" aria-expanded="false">
+                      <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+                        <path d="m9 6 6 6-6 6-1.41-1.41L12.17 12 7.59 7.41 9 6Z"/>
+                      </svg>
+                    </button>
+                    <span class="sp-row-label">SPC Outlooks</span>
+                  </div>
+                  <label class="toggle">
+                    <input type="checkbox" id="toggle-spc">
+                    <span class="toggle-track"></span>
+                  </label>
+                </div>
+                <div class="settings-section-body">
+                  <div class="settings-section-inner">
+                    <div class="settings-subblock">
+                      <span class="spc-filter-label">Day</span>
+                      <div class="spc-chip-row" id="spc-day-buttons"></div>
+                    </div>
+                    <div class="settings-subblock">
+                      <span class="spc-filter-label">Outlook</span>
+                      <div class="spc-chip-row" id="spc-type-buttons"></div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <div class="sp-row">
+                <span class="sp-row-label">Mesoscale Discussions</span>
+                <label class="toggle">
+                  <input type="checkbox" id="toggle-meso">
+                  <span class="toggle-track"></span>
+                </label>
+              </div>
+
+              <div class="sp-row">
+                <span class="sp-row-label">Warnings</span>
+                <label class="toggle">
+                  <input type="checkbox" id="toggle-alerts">
+                  <span class="toggle-track"></span>
+                </label>
+              </div>
+
+              <div class="sp-row">
+                <span class="sp-row-label">Watches</span>
+                <label class="toggle">
+                  <input type="checkbox" id="toggle-watches">
+                  <span class="toggle-track"></span>
+                </label>
+              </div>
+
+              <div class="sp-row">
+                <span class="sp-row-label">Lightning</span>
+                <label class="toggle">
+                  <input type="checkbox" id="toggle-lightning">
+                  <span class="toggle-track"></span>
+                </label>
+              </div>
+
+              <div class="sp-row">
+                <span class="sp-row-label">TVS Icons</span>
+                <label class="toggle">
+                  <input type="checkbox" id="toggle-tvs">
+                  <span class="toggle-track"></span>
+                </label>
+              </div>
+
+              <div class="settings-section" id="settings-section-storm">
+                <div class="sp-row settings-section-head">
+                  <div class="settings-row-left">
+                    <button class="sp-btn sp-filter-btn settings-expander-btn" id="storm-filter-btn" type="button" title="Storm Report Options" aria-expanded="false">
+                      <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+                        <path d="m9 6 6 6-6 6-1.41-1.41L12.17 12 7.59 7.41 9 6Z"/>
+                      </svg>
+                    </button>
+                    <span class="sp-row-label">Storm Reports</span>
+                  </div>
+                </div>
+                <div class="settings-section-body">
+                  <div class="settings-section-inner">
+                    <div class="sp-row settings-sub-row">
+                      <span class="sp-row-label">NWS Local Storm Reports</span>
+                      <label class="toggle">
+                        <input type="checkbox" id="toggle-storm-reports-lsr">
+                        <span class="toggle-track"></span>
+                      </label>
+                    </div>
+
+                    <div class="sp-row settings-sub-row">
+                      <span class="sp-row-label">Spotter Network Reports</span>
+                      <label class="toggle">
+                        <input type="checkbox" id="toggle-storm-reports-spotter">
+                        <span class="toggle-track"></span>
+                      </label>
+                    </div>
+
+                    <div class="settings-subblock" id="storm-window-block">
+                      <span class="spc-filter-label">Local Report Window</span>
+                      <div class="spc-chip-row" id="storm-window-buttons"></div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <div class="settings-section" id="settings-section-camera">
+                <div class="sp-row settings-section-head">
+                  <div class="settings-row-left">
+                    <button class="sp-btn sp-filter-btn settings-expander-btn" id="camera-filter-btn" type="button" title="Camera Options" aria-expanded="false">
+                      <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+                        <path d="m9 6 6 6-6 6-1.41-1.41L12.17 12 7.59 7.41 9 6Z"/>
+                      </svg>
+                    </button>
+                    <span class="sp-row-label">Cameras / Chasers</span>
+                  </div>
+                  <label class="toggle">
+                    <input type="checkbox" id="toggle-cameras">
+                    <span class="toggle-track"></span>
+                  </label>
+                </div>
+                <div class="settings-section-body">
+                  <div class="settings-section-inner">
+                    <div class="settings-subblock">
+                      <span class="spc-filter-label">Feeds</span>
+                      <div class="camera-filter-toggle-list">
+                        <div class="sp-row settings-sub-row">
+                          <span class="sp-row-label">Traffic</span>
+                          <label class="toggle">
+                            <input type="checkbox" id="camera-filter-traffic">
+                            <span class="toggle-track"></span>
+                          </label>
+                        </div>
+                        <div class="sp-row settings-sub-row">
+                          <span class="sp-row-label">Weather</span>
+                          <label class="toggle">
+                            <input type="checkbox" id="camera-filter-weather">
+                            <span class="toggle-track"></span>
+                          </label>
+                        </div>
+                        <div class="sp-row settings-sub-row">
+                          <span class="sp-row-label">Chasers</span>
+                          <label class="toggle">
+                            <input type="checkbox" id="camera-filter-chasers">
+                            <span class="toggle-track"></span>
+                          </label>
+                        </div>
+                      </div>
+                    </div>
+
+                    <div class="settings-subblock">
+                      <span class="spc-filter-label">State</span>
+                      <select class="ct-select camera-filter-select" id="camera-state-select"></select>
+                    </div>
+
+                    <div class="settings-subblock">
+                      <span class="spc-filter-label">Mode</span>
+                      <div class="camera-filter-toggle-list">
+                        <div class="sp-row settings-sub-row">
+                          <span class="sp-row-label">Video Only</span>
+                          <label class="toggle">
+                            <input type="checkbox" id="camera-video-only-toggle">
+                            <span class="toggle-track"></span>
+                          </label>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="settings-group" id="settings-group-app">
+          <button class="settings-group-head" id="settings-group-app-btn" type="button" aria-expanded="false">
+            <span class="settings-group-title">App</span>
+            <svg class="settings-group-chevron" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+              <path d="m9 6 6 6-6 6-1.41-1.41L12.17 12 7.59 7.41 9 6Z"/>
+            </svg>
+          </button>
+          <div class="settings-group-body">
+            <div class="settings-group-inner">
+              <div class="sp-row">
+                <span class="sp-row-label">Map Style</span>
+                <div class="sp-row-right" style="flex:1;justify-content:flex-end;">
+                  <select class="ct-select" id="app-map-style" style="max-width:190px"></select>
+                </div>
+              </div>
+
+              <div class="sp-row">
+                <span class="sp-row-label">Radar Data Cache</span>
+                <div class="sp-row-right settings-cache-row">
+                  <button class="sp-btn" id="app-clear-cache" type="button">Delete Cache</button>
+                </div>
+              </div>
+
+              <div class="sp-row">
+                <span class="sp-row-label">App Updates</span>
+                <div class="sp-row-right" style="flex:1;justify-content:flex-end;gap:10px;">
+                  <span class="sp-note" id="app-update-status">Not checked</span>
+                  <button class="sp-btn" id="app-update-check" type="button">Check</button>
+                </div>
+              </div>
+
+              <div class="sp-row">
+                <span class="sp-row-label">Warnings</span>
+                <div class="sp-row-right">
+                  <button class="sp-btn" id="warning-prefs-btn" type="button" aria-expanded="false">Customize</button>
+                </div>
+              </div>
+
+              <div class="sp-row">
+                <span class="sp-row-label">NWWS</span>
+                <div class="sp-row-right" style="flex:1;justify-content:flex-end;gap:10px;">
+                  <span class="sp-note" id="nwws-credentials-status"></span>
+                  <button class="sp-btn" id="nwws-login-btn" type="button" aria-expanded="false">Login</button>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="settings-group" id="settings-group-colortables">
+          <button class="settings-group-head" id="settings-group-colortables-btn" type="button" aria-expanded="false">
+            <span class="settings-group-title">Color Tables</span>
+            <svg class="settings-group-chevron" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+              <path d="m9 6 6 6-6 6-1.41-1.41L12.17 12 7.59 7.41 9 6Z"/>
+            </svg>
+          </button>
+          <div class="settings-group-body">
+            <div class="settings-group-inner">
+              <div class="settings-section" id="settings-section-colortables">
+                <div class="sp-row settings-section-head">
+                  <div class="settings-row-left">
+                    <button class="sp-btn sp-filter-btn settings-expander-btn" id="colors-filter-btn" type="button" title="Color Table Options" aria-expanded="false">
+                      <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+                        <path d="m9 6 6 6-6 6-1.41-1.41L12.17 12 7.59 7.41 9 6Z"/>
+                      </svg>
+                    </button>
+                    <span class="sp-row-label">Palette Assignments</span>
+                  </div>
+                </div>
+                <div class="settings-section-body">
+                  <div class="settings-section-inner settings-colors-inner">
+                    <div class="ct-section">
+                      <div class="sp-row settings-sub-row">
+                        <span class="sp-row-label ct-family-label">REF</span>
+                        <div class="sp-row-right" style="flex:1;gap:4px;">
+                          <select class="ct-select" id="ct-select-REF"></select>
+                          <button class="sp-btn ct-del-btn" id="ct-del-REF" title="Delete table">&times;</button>
+                          <button class="sp-btn" id="ct-upload-REF" title="Upload .pal file">&uarr; .pal</button>
+                        </div>
+                      </div>
+                      <div class="ct-preview" id="ct-preview-REF"></div>
+                    </div>
+
+                    <div class="ct-sep"></div>
+
+                    <div class="ct-section">
+                      <div class="sp-row settings-sub-row">
+                        <span class="sp-row-label ct-family-label">VEL</span>
+                        <div class="sp-row-right" style="flex:1;gap:4px;">
+                          <select class="ct-select" id="ct-select-VEL"></select>
+                          <button class="sp-btn ct-del-btn" id="ct-del-VEL" title="Delete table">&times;</button>
+                          <button class="sp-btn" id="ct-upload-VEL" title="Upload .pal file">&uarr; .pal</button>
+                        </div>
+                      </div>
+                      <div class="ct-preview" id="ct-preview-VEL"></div>
+                    </div>
+
+                    <div class="ct-sep"></div>
+
+                    <div class="ct-section">
+                      <div class="sp-row settings-sub-row">
+                        <span class="sp-row-label ct-family-label">CC</span>
+                        <div class="sp-row-right" style="flex:1;gap:4px;">
+                          <select class="ct-select" id="ct-select-CC"></select>
+                          <button class="sp-btn ct-del-btn" id="ct-del-CC" title="Delete table">&times;</button>
+                          <button class="sp-btn" id="ct-upload-CC" title="Upload .pal file">&uarr; .pal</button>
+                        </div>
+                      </div>
+                      <div class="ct-preview" id="ct-preview-CC"></div>
+                    </div>
+
+                    <div class="ct-sep"></div>
+
+                    <div class="ct-section">
+                      <div class="sp-row settings-sub-row">
+                        <span class="sp-row-label ct-family-label">ZDR</span>
+                        <div class="sp-row-right" style="flex:1;gap:4px;">
+                          <select class="ct-select" id="ct-select-ZDR"></select>
+                          <button class="sp-btn ct-del-btn" id="ct-del-ZDR" title="Delete table">&times;</button>
+                          <button class="sp-btn" id="ct-upload-ZDR" title="Upload .pal file">&uarr; .pal</button>
+                        </div>
+                      </div>
+                      <div class="ct-preview" id="ct-preview-ZDR"></div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="settings-group" id="settings-group-others">
+          <button class="settings-group-head" id="settings-group-others-btn" type="button" aria-expanded="false">
+            <span class="settings-group-title">Others</span>
+            <svg class="settings-group-chevron" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+              <path d="m9 6 6 6-6 6-1.41-1.41L12.17 12 7.59 7.41 9 6Z"/>
+            </svg>
+          </button>
+          <div class="settings-group-body">
+            <div class="settings-group-inner">
+              <div class="settings-section" id="settings-section-youtube">
+                <div class="sp-row settings-section-head">
+                  <div class="settings-row-left">
+                    <button class="sp-btn sp-filter-btn settings-expander-btn" id="youtube-embed-btn" type="button" title="YouTube Embed" aria-expanded="false">
+                      <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+                        <path d="m9 6 6 6-6 6-1.41-1.41L12.17 12 7.59 7.41 9 6Z"/>
+                      </svg>
+                    </button>
+                    <span class="sp-row-label">YouTube Embed</span>
+                  </div>
+                </div>
+                <div class="settings-section-body">
+                  <div class="settings-section-inner">
+                    <div class="settings-subblock">
+                      <span class="spc-filter-label">Paste Embed</span>
+                      <textarea class="sp-textarea" id="youtube-embed-input" rows="4" placeholder="Paste a YouTube embed iframe or YouTube URL"></textarea>
+                      <div class="settings-action-row">
+                        <button class="sp-btn" id="youtube-embed-open" type="button">Open Panel</button>
+                        <span class="sp-note" id="youtube-embed-status">YouTube embeds only.</span>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <input type="file" id="ct-file-input" accept=".pal" style="display:none">
+
+      </div>
+
+    </aside>
+
+  </div>
+
+  <div id="warning-prefs-overlay" aria-hidden="true">
+    <section id="warning-prefs-modal" aria-labelledby="warning-prefs-title">
+      <div id="warning-prefs-header">
+        <div class="warning-prefs-title-wrap">
+          <div class="warning-prefs-title" id="warning-prefs-title">Warning Preferences</div>
+        </div>
+        <button id="warning-prefs-close" type="button" aria-label="Close warning preferences">
+          <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+            <path d="M18.3 5.71 12 12l6.3 6.29-1.41 1.42L10.59 13.4 4.29 19.71 2.88 18.3 9.17 12 2.88 5.71 4.29 4.29l6.3 6.3 6.3-6.3 1.41 1.42Z"/>
+          </svg>
+        </button>
+      </div>
+      <div id="warning-prefs-body">
+        <div class="warning-settings-list" id="warning-settings-list"></div>
+      </div>
+    </section>
+  </div>
+
+  <div id="nwws-login-overlay" aria-hidden="true">
+    <section id="nwws-login-modal" aria-labelledby="nwws-login-title">
+      <div id="nwws-login-header">
+        <div class="warning-prefs-title-wrap">
+          <div class="warning-prefs-title" id="nwws-login-title">NWWS</div>
+        </div>
+        <button id="nwws-login-close" type="button" aria-label="Close NWWS login">
+          <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+            <path d="M18.3 5.71 12 12l6.3 6.29-1.41 1.42L10.59 13.4 4.29 19.71 2.88 18.3 9.17 12 2.88 5.71 4.29 4.29l6.3 6.3 6.3-6.3 1.41 1.42Z"/>
+          </svg>
+        </button>
+      </div>
+      <div id="nwws-login-body">
+        <div class="nwws-login-form">
+          <div class="settings-subblock">
+            <span class="spc-filter-label">Username</span>
+            <input class="sp-text" id="nwws-username" type="text" placeholder="Enter NWWS username" autocomplete="username" spellcheck="false">
+          </div>
+          <div class="settings-subblock">
+            <span class="spc-filter-label">Password</span>
+            <input class="sp-text" id="nwws-password" type="password" placeholder="Enter NWWS password" autocomplete="current-password" spellcheck="false">
+          </div>
+          <div class="settings-action-row">
+            <button class="sp-btn" id="nwws-credentials-save" type="button">Login</button>
+            <span class="sp-note" id="nwws-login-status"></span>
+          </div>
+        </div>
+      </div>
+    </section>
+  </div>
+
+  <div id="app-update-overlay" aria-hidden="true">
+    <section id="app-update-modal" aria-labelledby="app-update-title">
+      <div id="app-update-header">
+        <div class="warning-prefs-title-wrap">
+          <div class="warning-prefs-kicker">Update Available</div>
+          <div class="warning-prefs-title" id="app-update-title">RadarApp Update</div>
+          <div class="warning-prefs-subtitle" id="app-update-copy">A newer version is ready to download and install.</div>
+        </div>
+        <button id="app-update-close" type="button" aria-label="Close app update dialog">
+          <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+            <path d="M18.3 5.71 12 12l6.3 6.29-1.41 1.42L10.59 13.4 4.29 19.71 2.88 18.3 9.17 12 2.88 5.71 4.29 4.29l6.3 6.3 6.3-6.3 1.41 1.42Z"/>
+          </svg>
+        </button>
+      </div>
+      <div id="app-update-body">
+        <div class="app-update-card">
+          <div class="app-update-row">
+            <span>Current Version</span>
+            <strong id="app-update-current-version">--</strong>
+          </div>
+          <div class="app-update-row">
+            <span>Available Version</span>
+            <strong id="app-update-next-version">--</strong>
+          </div>
+          <div class="app-update-row">
+            <span>Status</span>
+            <strong id="app-update-phase">Ready</strong>
+          </div>
+        </div>
+        <div class="app-update-progress" id="app-update-progress" hidden>
+          <div id="app-update-progress-bar"></div>
+        </div>
+        <div class="sp-note" id="app-update-progress-text"></div>
+        <div class="settings-subblock">
+          <span class="spc-filter-label">Release Notes</span>
+          <div class="app-update-notes" id="app-update-notes">No release notes provided.</div>
+        </div>
+        <div class="settings-action-row app-update-actions">
+          <button class="sp-btn" id="app-update-later" type="button">Later</button>
+          <button class="sp-btn" id="app-update-install" type="button">Install</button>
+        </div>
+      </div>
+    </section>
+  </div>
+
+
+  <!-- Status island -->
+
+  <div id="status-island">
+
+    <div id="info-popup">
+
+      <div id="island-body">
+
+        <div id="station-name">--</div>
+
+        <div id="station-full">Select a station</div>
+
+        <div id="station-coords">--</div>
+
+        <div id="scan-row">
+
+          <span class="k">UTC</span>
+
+          <span id="info-time">--</span>
+
+          <span class="sep">|</span>
+
+          <span class="k">Elev</span>
+
+          <span id="info-elev">--</span>
+
+          <span class="sep">|</span>
+
+          <span class="k">Code</span>
+
+          <span id="info-code">--</span>
+
+        </div>
+
+      </div>
+
+    </div>
+
+    <div id="status-main">
+
+      <div id="frame-label">--:--</div>
+
+      <button id="warning-dashboard-btn" type="button" aria-label="Toggle active warnings" aria-expanded="false" aria-controls="warnings-dropdown" title="Active warnings">
+        <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+          <path d="M12 3 2 21h20L12 3Zm0 5.2 5.14 10.3H6.86L12 8.2Zm-1 3.05v3.85h2v-3.85h-2Zm0 5.2v1.55h2v-1.55h-2Z"/>
+        </svg>
+      </button>
+    </div>
+
+    <div id="warnings-dropdown" aria-hidden="true">
+      <div id="warnings-dropdown-header">
+        <div class="warnings-dropdown-heading">
+          <div class="warnings-dropdown-kicker">Alerts</div>
+          <div class="warnings-dropdown-title">Active Warnings</div>
+        </div>
+        <div id="warnings-dropdown-count">0 active</div>
+      </div>
+      <div id="warnings-dropdown-list"></div>
+      <div id="warnings-dropdown-empty" class="warning-drawer-empty">No active warnings.</div>
+    </div>
+
+  </div>
+
+  <!-- Control island -->
+  <div id="control-island">
+      <div id="recent-frames-progress" data-state="loading" aria-live="polite" aria-atomic="true">
+        <div class="loading-spinner"></div>
+        <div id="recent-frames-progress-copy">
+          <div id="recent-frames-progress-title">Downloading Recent Frames</div>
+          <div id="recent-frames-progress-detail">0/0 frames</div>
+        </div>
+      </div>
+      <div id="island-main">
+        <div id="island-product-row">
+        <div id="product-picker">
+          <span class="island-picker-label">Product</span>
+          <div class="island-dropdown">
+            <button id="family-dropdown-btn" class="island-dropdown-btn" type="button" aria-haspopup="listbox" aria-expanded="false"></button>
+            <div id="family-dropdown-menu" class="island-dropdown-menu" role="listbox"></div>
+          </div>
+          <select id="family-select" title="Product">
+            <option value="REF">Super-Res Reflectivity</option>
+            <option value="VEL">Velocity</option>
+            <option value="CC">Correlation Coefficient</option>
+          </select>
+        </div>
+        <div id="tilt-picker">
+          <span class="island-picker-label">Tilt</span>
+          <div class="island-dropdown">
+            <button id="tilt-dropdown-btn" class="island-dropdown-btn" type="button" aria-haspopup="listbox" aria-expanded="false"></button>
+            <div id="tilt-dropdown-menu" class="island-dropdown-menu" role="listbox"></div>
+          </div>
+          <select id="tilt-select" title="Tilt">
+            <option value="0.5">0.5&deg;</option>
+            <option value="1.5">1.5&deg;</option>
+            <option value="2.4">2.4&deg;</option>
+            <option value="3.1">3.1&deg;</option>
+          </select>
+        </div>
+        <div id="tools-menu">
+          <button id="tools-btn" type="button" title="Tools">
+
+            <svg width="11" height="11" viewBox="0 0 24 24" fill="currentColor" style="pointer-events:none"><path d="M22.7 19l-9.1-9.1c.9-2.3.4-5-1.5-6.9-2-2-5-2.4-7.4-1.3L9 6 6 9 1.6 4.7C.4 7.1.9 10.1 2.9 12.1c1.9 1.9 4.6 2.4 6.9 1.5l9.1 9.1c.4.4 1 .4 1.4 0l2.3-2.3c.5-.4.5-1.1.1-1.4z"/></svg>
+
+          </button>
+
+          <div id="tools-dropdown">
+            <div id="tools-level-label" class="tools-meta">Data: L3</div>
+            <button id="recent-frames-btn" class="tools-item" type="button">Download Recent Frames</button>
+            <button id="draw-btn" class="tools-item" type="button">Drawing</button>
+            <button id="multi-pane-btn" class="tools-item" type="button">Multi Pane</button>
+          </div>
+          <div id="recent-frames-menu">
+            <div class="recent-frames-meta">Recent Frames</div>
+            <button class="recent-frames-option" data-count="6" type="button">6 Frames</button>
+            <button class="recent-frames-option" data-count="12" type="button">12 Frames</button>
+            <button class="recent-frames-option" data-count="24" type="button">24 Frames</button>
+            <button class="recent-frames-option" data-count="36" type="button">36 Frames</button>
+            <button class="recent-frames-option" data-count="50" type="button">50 Frames</button>
+          </div>
+          <div id="pane-menu">
+
+            <button class="pane-option active" data-count="1" type="button">1 Pane</button>
+
+            <button class="pane-option" data-count="2" type="button">2 Panes</button>
+
+            <button class="pane-option" data-count="3" type="button">3 Panes</button>
+
+            <button class="pane-option" data-count="4" type="button">4 Panes</button>
+
+          </div>
+
+        </div>
+
+      </div>
+
+    </div>
+  </div>
+
+
+  <!-- Camera viewer modal -->
+  <div id="camera-modal">
+    <div id="camera-popup">
+      <div class="panel-resize-handle" id="camera-resize-handle" aria-hidden="true"></div>
+
+      <div id="camera-header">
+
+        <span id="camera-title">Camera</span>
+
+        <div id="camera-header-btns">
+
+          <button id="camera-share" title="Share Link" aria-label="Share Link">
+
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+
+              <path d="M18 16a3 3 0 0 0-2.39 1.2L9.91 13.9a3.1 3.1 0 0 0 0-3.8l5.7-3.3A3 3 0 1 0 15 5a3.1 3.1 0 0 0 .08.69l-5.67 3.28a3 3 0 1 0 0 6.06l5.67 3.28A3.1 3.1 0 0 0 15 19a3 3 0 1 0 3-3Z"/>
+
+            </svg>
+
+          </button>
+          <button id="camera-fullscreen" title="Fullscreen" aria-label="Fullscreen">
+            <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+              <path d="M4 9V4h5v2H6v3H4Zm10-5h6v6h-2V6h-4V4ZM4 15h2v3h3v2H4v-5Zm14 3v-3h2v5h-5v-2h3Z"/>
+            </svg>
+          </button>
+          <button id="camera-close" title="Close" aria-label="Close">
+            <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+              <path d="M18.3 5.71 12 12l6.3 6.29-1.41 1.42L10.59 13.4 4.29 19.71 2.88 18.3 9.17 12 2.88 5.71 4.29 4.29l6.3 6.3 6.3-6.3 1.41 1.42Z"/>
+            </svg>
+          </button>
+        </div>
+
+      </div>
+
+      <div id="camera-dir-bar"></div>
+
+      <div id="camera-content"></div>
+
+    </div>
+
+  </div>
+
+  <div id="youtube-panel-host"></div>
+
+
+
+  <!-- Drawing toolbar (shown when draw mode is active) -->
+
+  <div id="draw-toolbar">
+
+    <span class="dt-label">Draw</span>
+
+    <div class="dt-sep"></div>
+
+    <div id="dt-colors">
+
+      <button class="dt-color active" data-color="#ff3b3b" style="--c:#ff3b3b" title="Red"></button>
+
+      <button class="dt-color" data-color="#ffcc00" style="--c:#ffcc00" title="Yellow"></button>
+
+      <button class="dt-color" data-color="#ffffff" style="--c:#ffffff" title="White"></button>
+
+      <input type="color" id="dt-custom-color" value="#4db8ff" title="Custom color">
+
+    </div>
+
+    <div class="dt-sep"></div>
+
+    <button class="dt-style active" data-style="solid">&mdash;</button>
+
+    <button class="dt-style" data-style="dashed">&ndash; &ndash;</button>
+
+    <div class="dt-sep"></div>
+
+    <input type="range" id="dt-width" min="1" max="8" value="2">
+
+    <span id="dt-width-val">2px</span>
+
+    <div class="dt-sep"></div>
+
+    <button id="dt-undo">&larr; Undo</button>
+
+    <button id="dt-clear">CLR</button>
+
+    <button id="dt-done">&times; Done</button>
+
+  </div>
+
+
+
+  <!-- Corner decode toast (shown during initial station load, non-blocking) -->
+
+  <div id="decode-toast">
+
+    <div class="loading-spinner"></div>
+
+    <span id="decode-msg">Decoding...</span>
+
+  </div>
+
+  <div id="warning-toast-host" aria-live="polite" aria-atomic="false"></div>
+
+
+
+  <!-- Hover value inspector (toggle with keyboard "I") -->
+
+  <div id="inspect-panel">
+
+    <span id="inspect-value">--</span>
+
+  </div>
+
+
+
+  <!-- Level II one-time warning dialog -->
+
+  <div id="l2-warning">
+
+    <div id="l2-warning-box">
+
+      <span class="sp-title">Level II Notice</span>
+
+      <p>Level II data downloads several MB per scan instead of a few KB for Level III. Expect:<br>
+
+        &bull; 10â30 second load times per frame<br>
+
+        &bull; Higher memory usage<br>
+
+        &bull; Available products: REF, VEL, CC, ZDR, PHI, SW, NROT, PTDS
+      </p>
+
+      <div id="l2-warning-actions">
+
+        <button id="l2-warning-cancel" class="sp-btn">Cancel</button>
+
+        <button id="l2-warning-confirm" class="sp-btn" style="border-color:#1d6ef5;color:#1d6ef5">Enable Level II</button>
+
+      </div>
+
+    </div>
+
+  </div>
+
+
+
+  <div id="alert-details-overlay">
+
+    <div id="alert-details-modal">
+
+      <div id="alert-details-header">
+
+        <div id="alert-details-heading">
+
+          <div id="alert-details-title">Alert Details</div>
+
+          <div id="alert-details-meta">Warning</div>
+
+        </div>
+
+        <button id="alert-details-close" type="button" aria-label="Close">&times;</button>
+
+      </div>
+
+      <div id="alert-details-body"></div>
+
+    </div>
+
+  </div>
+
+  <script>
+    (function () {
+      const dashboardMode = !!window.__RADAR_DASHBOARD_MODE__;
+      const scriptQueue = dashboardMode
+        ? ['dashboard-app.js']
+        : [
+            'hls.min.js',
+            'https://ajax.googleapis.com/ajax/libs/shaka-player/4.15.14/shaka-player.compiled.js',
+            'radar.js',
+          ];
+
+      if (dashboardMode) {
+        document.title = 'Warning Dashboard';
+        document.body.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;min-height:100vh;background:#000000;color:#eef3ff;font:600 14px Segoe UI,sans-serif;letter-spacing:.04em;">Launching Warning Dashboard...</div>';
+      }
+
+      function loadNext(index) {
+        if (index >= scriptQueue.length) return;
+        const script = document.createElement('script');
+        script.src = scriptQueue[index];
+        script.onload = function () { loadNext(index + 1); };
+        script.onerror = function () {
+          if (dashboardMode) {
+            document.body.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;min-height:100vh;background:#000000;color:#ff7b7b;font:600 14px Segoe UI,sans-serif;letter-spacing:.04em;">Warning Dashboard failed to load script: ' + String(scriptQueue[index]) + '</div>';
+          }
+        };
+        document.body.appendChild(script);
+      }
+
+      loadNext(0);
+    })();
+  </script>
+</body>
+</html>
+
+
+
+
