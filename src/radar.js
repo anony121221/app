@@ -10762,16 +10762,8 @@ async function checkForAppUpdate({ openModalOnAvailable = true } = {}) {
 
   try {
     const currentVersion = String(await invoke('get_app_version'));
-    const resp = await fetch(APP_UPDATE_LATEST_API_URL, {
-      headers: {
-        Accept: 'application/vnd.github+json',
-      },
-      cache: 'no-store',
-    });
-    if (!resp.ok) {
-      throw new Error(`GitHub release check failed: HTTP ${resp.status}`);
-    }
-    const release = await resp.json();
+    const raw = await _fetchTextViaTauri(APP_UPDATE_LATEST_API_URL, { timeoutMs: 10000 });
+    const release = JSON.parse(raw);
     const res = buildAppUpdateResponse(currentVersion, release);
     applyAppUpdateCheckResponse(res, { openModalOnAvailable });
   } catch (err) {
@@ -15898,16 +15890,14 @@ document.getElementById('ct-file-input')?.addEventListener('change', async e => 
 loadSettings();
 syncDataLevelAvailability();
 syncAppUpdateUi();
-window.addEventListener('load', () => {
-  setTimeout(() => {
+setTimeout(() => {
+  void checkForAppUpdate({ openModalOnAvailable: true });
+}, APP_UPDATE_AUTO_CHECK_DELAY_MS);
+setTimeout(() => {
+  if (!appUpdateBusy && !appUpdateInfo) {
     void checkForAppUpdate({ openModalOnAvailable: true });
-  }, APP_UPDATE_AUTO_CHECK_DELAY_MS);
-  setTimeout(() => {
-    if (!appUpdateBusy && !appUpdateInfo) {
-      void checkForAppUpdate({ openModalOnAvailable: true });
-    }
-  }, APP_UPDATE_AUTO_CHECK_DELAY_MS + APP_UPDATE_RETRY_DELAY_MS);
-});
+  }
+}, APP_UPDATE_AUTO_CHECK_DELAY_MS + APP_UPDATE_RETRY_DELAY_MS);
 
 // Refresh dynamic overlays in the background while enabled.
 setInterval(() => {
