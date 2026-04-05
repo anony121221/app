@@ -1,1 +1,0 @@
-https://api.github.com/repos/anony121221/app/releases/latest
