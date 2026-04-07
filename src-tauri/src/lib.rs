@@ -8,11 +8,10 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
-use reqwest::Url;
+use reqwest::header::{ACCEPT, AUTHORIZATION, USER_AGENT};
 use tauri::path::BaseDirectory;
 use tauri::webview::PageLoadEvent;
 use tauri::{AppHandle, Emitter, Manager, State, WebviewUrl, WebviewWindowBuilder};
-use tauri_plugin_opener::OpenerExt;
 
 #[cfg(target_os = "windows")]
 use std::os::windows::process::CommandExt;
@@ -26,6 +25,10 @@ const BACKEND_EXE_NAME: &str = if cfg!(target_os = "windows") {
 };
 const S3_LEVEL3_LIST_URL: &str = "https://unidata-nexrad-level3.s3.amazonaws.com/";
 const TGFTP_LEVEL3_BASE_URL: &str = "https://tgftp.nws.noaa.gov/SL.us008001/DF.of/DC.radar";
+const APP_UPDATE_GITHUB_OWNER: &str = "anony121221";
+const APP_UPDATE_GITHUB_REPO: &str = "app";
+const APP_UPDATE_GITHUB_TOKEN: &str = "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";
+const APP_UPDATE_USER_AGENT: &str = "RadarApp-Updater";
 const DECODE_CACHE_VERSION: u32 = 1;
 const DECODE_CACHE_MAX_FILES: usize = 384;
 const DECODE_CACHE_MAX_BYTES: u64 = 768 * 1024 * 1024;
@@ -1672,8 +1675,8 @@ async fn l3_resolve_selection(
 }
 
 #[tauri::command]
-fn l3_warm_keys(
-    state: tauri::State<Backend>,
+async fn l3_warm_keys(
+    state: tauri::State<'_, Backend>,
     keys: Vec<String>,
     palettes: Option<serde_json::Value>,
 ) -> Result<serde_json::Value, String> {
@@ -1689,54 +1692,59 @@ fn l3_warm_keys(
         return Ok(serde_json::json!({ "ok": true, "warmed": 0 }));
     }
 
-    let mut guard = acquire_backend(&state.0);
+    let pool = state.0.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut guard = acquire_backend(&pool);
 
-    if let BackendState::Failed(prev_err) = &*guard {
-        match spawn_backend() {
-            Ok(inner) => *guard = BackendState::Ready(inner),
-            Err(new_err) => {
-                return Err(format!(
-                    "Backend unavailable.\nPrevious error: {}\nRestart error: {}",
-                    prev_err, new_err
-                ))
+        if let BackendState::Failed(prev_err) = &*guard {
+            match spawn_backend() {
+                Ok(inner) => *guard = BackendState::Ready(inner),
+                Err(new_err) => {
+                    return Err(format!(
+                        "Backend unavailable.\nPrevious error: {}\nRestart error: {}",
+                        prev_err, new_err
+                    ))
+                }
             }
         }
-    }
 
-    let inner = match &mut *guard {
-        BackendState::Ready(inner) => inner,
-        BackendState::Failed(err) => return Err(err.clone()),
-    };
+        let inner = match &mut *guard {
+            BackendState::Ready(inner) => inner,
+            BackendState::Failed(err) => return Err(err.clone()),
+        };
 
-    let mut req_obj = serde_json::json!({
-        "cmd": "warm_l3",
-        "keys": keys,
-    });
-    if let Some(p) = palettes {
-        req_obj["palettes"] = p;
-    }
-
-    match request_backend(inner, req_obj.clone()) {
-        Ok(val) => Ok(val),
-        Err(first_err) => {
-            if !should_restart_backend(&first_err) {
-                return Err(first_err);
-            }
-            let restarted = spawn_backend().map_err(|restart_err| {
-                format!(
-                    "Backend request failed: {}\nBackend restart failed: {}",
-                    first_err, restart_err
-                )
-            })?;
-            *inner = restarted;
-            request_backend(inner, req_obj).map_err(|retry_err| {
-                format!(
-                    "Backend request failed: {}\nBackend restarted but retry failed: {}",
-                    first_err, retry_err
-                )
-            })
+        let mut req_obj = serde_json::json!({
+            "cmd": "warm_l3",
+            "keys": keys,
+        });
+        if let Some(p) = palettes {
+            req_obj["palettes"] = p;
         }
-    }
+
+        match request_backend(inner, req_obj.clone()) {
+            Ok(val) => Ok(val),
+            Err(first_err) => {
+                if !should_restart_backend(&first_err) {
+                    return Err(first_err);
+                }
+                let restarted = spawn_backend().map_err(|restart_err| {
+                    format!(
+                        "Backend request failed: {}\nBackend restart failed: {}",
+                        first_err, restart_err
+                    )
+                })?;
+                *inner = restarted;
+                request_backend(inner, req_obj).map_err(|retry_err| {
+                    format!(
+                        "Backend request failed: {}\nBackend restarted but retry failed: {}",
+                        first_err, retry_err
+                    )
+                })
+            }
+        }
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 fn local_nwws_bridge_script_path() -> PathBuf {
@@ -3130,15 +3138,335 @@ fn get_app_version(app: AppHandle) -> String {
     app.package_info().version.to_string()
 }
 
-#[tauri::command]
-fn open_app_update_url(app: AppHandle, url: String) -> Result<(), String> {
-    let parsed = Url::parse(url.trim()).map_err(|err| format!("Invalid update URL: {err}"))?;
-    if parsed.scheme() != "https" {
-        return Err("Only https update URLs are allowed.".into());
+fn sanitize_update_filename(name: &str) -> String {
+    let cleaned: String = name
+        .chars()
+        .map(|ch| match ch {
+            'A'..='Z' | 'a'..='z' | '0'..='9' | '.' | '_' | '-' => ch,
+            _ => '_',
+        })
+        .collect();
+    let trimmed = cleaned.trim_matches('.').trim_matches('_').trim_matches('-');
+    if trimmed.is_empty() {
+        "RadarAppUpdateInstaller.exe".to_string()
+    } else {
+        trimmed.to_string()
     }
-    app.opener()
-        .open_url(parsed.to_string(), None::<&str>)
-        .map_err(|err| format!("Could not open update URL: {err}"))
+}
+
+fn github_api_base() -> String {
+    format!(
+        "https://api.github.com/repos/{APP_UPDATE_GITHUB_OWNER}/{APP_UPDATE_GITHUB_REPO}"
+    )
+}
+
+fn github_api_client(timeout_secs: u64) -> Result<reqwest::blocking::Client, String> {
+    reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(timeout_secs))
+        .build()
+        .map_err(|err| format!("Could not create GitHub client: {err}"))
+}
+
+fn github_request(
+    client: &reqwest::blocking::Client,
+    url: &str,
+    accept: &str,
+) -> reqwest::blocking::RequestBuilder {
+    client
+        .get(url)
+        .header(USER_AGENT, APP_UPDATE_USER_AGENT)
+        .header(AUTHORIZATION, format!("Bearer {APP_UPDATE_GITHUB_TOKEN}"))
+        .header(ACCEPT, accept)
+}
+
+#[derive(Clone)]
+struct VersionParts {
+    major: u64,
+    minor: u64,
+    patch: u64,
+    prerelease: Vec<String>,
+}
+
+fn normalize_version_label(raw: &str) -> String {
+    raw.trim().trim_start_matches('v').to_string()
+}
+
+fn parse_version_parts(raw: &str) -> Option<VersionParts> {
+    let normalized = normalize_version_label(raw);
+    let mut parts = normalized.splitn(2, '-');
+    let core = parts.next()?;
+    let prerelease = parts
+        .next()
+        .map(|value| value.split('.').map(|item| item.to_string()).collect())
+        .unwrap_or_default();
+    let mut nums = core.split('.');
+    Some(VersionParts {
+        major: nums.next()?.parse().ok()?,
+        minor: nums.next()?.parse().ok()?,
+        patch: nums.next()?.parse().ok()?,
+        prerelease,
+    })
+}
+
+fn compare_prerelease_parts(left: &[String], right: &[String]) -> i32 {
+    if left.is_empty() && right.is_empty() {
+        return 0;
+    }
+    if left.is_empty() {
+        return 1;
+    }
+    if right.is_empty() {
+        return -1;
+    }
+    let len = left.len().max(right.len());
+    for idx in 0..len {
+        let a = match left.get(idx) {
+            Some(value) => value,
+            None => return -1,
+        };
+        let b = match right.get(idx) {
+            Some(value) => value,
+            None => return 1,
+        };
+        let a_num = a.parse::<u64>().ok();
+        let b_num = b.parse::<u64>().ok();
+        match (a_num, b_num) {
+            (Some(x), Some(y)) => {
+                if x != y {
+                    return if x > y { 1 } else { -1 };
+                }
+            }
+            (Some(_), None) => return -1,
+            (None, Some(_)) => return 1,
+            (None, None) => {
+                if a != b {
+                    return if a > b { 1 } else { -1 };
+                }
+            }
+        }
+    }
+    0
+}
+
+fn compare_version_labels(left: &str, right: &str) -> Option<i32> {
+    let a = parse_version_parts(left)?;
+    let b = parse_version_parts(right)?;
+    if a.major != b.major {
+        return Some(if a.major > b.major { 1 } else { -1 });
+    }
+    if a.minor != b.minor {
+        return Some(if a.minor > b.minor { 1 } else { -1 });
+    }
+    if a.patch != b.patch {
+        return Some(if a.patch > b.patch { 1 } else { -1 });
+    }
+    Some(compare_prerelease_parts(&a.prerelease, &b.prerelease))
+}
+
+fn select_release_asset(release: &serde_json::Value) -> Option<(u64, String)> {
+    let mut assets = release
+        .get("assets")
+        .and_then(|value| value.as_array())
+        .cloned()
+        .unwrap_or_default();
+
+    assets.sort_by_key(|item| {
+        let name = item
+            .get("name")
+            .and_then(|value| value.as_str())
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        if name.ends_with("-setup.exe") {
+            0
+        } else if name.ends_with(".msi") {
+            1
+        } else if name.ends_with(".exe") {
+            2
+        } else {
+            3
+        }
+    });
+
+    assets.into_iter().find_map(|item| {
+        let id = item.get("id").and_then(|value| value.as_u64())?;
+        let name = item.get("name").and_then(|value| value.as_str())?;
+        let lower = name.to_ascii_lowercase();
+        if lower.ends_with(".exe") || lower.ends_with(".msi") {
+            Some((id, sanitize_update_filename(name)))
+        } else {
+            None
+        }
+    })
+}
+
+fn fetch_latest_release_json() -> Result<serde_json::Value, String> {
+    let client = github_api_client(30)?;
+    let url = format!("{}/releases/latest", github_api_base());
+    let body = github_request(&client, &url, "application/vnd.github+json")
+        .send()
+        .and_then(|res| res.error_for_status())
+        .map_err(|err| format!("Could not fetch latest private release: {err}"))?
+        .text()
+        .map_err(|err| format!("Could not read latest release response: {err}"))?;
+    serde_json::from_str::<serde_json::Value>(&body)
+        .map_err(|err| format!("Could not parse latest release response: {err}"))
+}
+
+#[tauri::command]
+async fn check_app_update(app: AppHandle) -> Result<serde_json::Value, String> {
+    let current_version = app.package_info().version.to_string();
+    tauri::async_runtime::spawn_blocking(move || {
+        let release = fetch_latest_release_json()?;
+        let latest_version = release
+            .get("tag_name")
+            .and_then(|value| value.as_str())
+            .unwrap_or_default()
+            .to_string();
+        let latest_version = normalize_version_label(&latest_version);
+
+        if latest_version.is_empty() {
+            return Err("GitHub release is missing a valid tag name.".into());
+        }
+
+        if compare_version_labels(&latest_version, &current_version).unwrap_or(0) <= 0 {
+            return Ok(serde_json::json!({
+                "status": "upToDate",
+                "currentVersion": current_version,
+                "update": serde_json::Value::Null,
+                "message": "You already have the latest version."
+            }));
+        }
+
+        let selected_asset = select_release_asset(&release);
+        let release_url = release
+            .get("html_url")
+            .and_then(|value| value.as_str())
+            .unwrap_or_default()
+            .trim()
+            .to_string();
+
+        Ok(serde_json::json!({
+            "status": "available",
+            "currentVersion": current_version,
+            "update": {
+                "version": latest_version,
+                "currentVersion": current_version,
+                "body": release.get("body").and_then(|value| value.as_str()).unwrap_or_default(),
+                "date": release.get("published_at").and_then(|value| value.as_str()).unwrap_or_default(),
+                "assetId": selected_asset.as_ref().map(|(id, _)| *id),
+                "assetName": selected_asset.as_ref().map(|(_, name)| name.clone()).unwrap_or_default(),
+                "releaseUrl": release_url
+            },
+            "message": serde_json::Value::Null
+        }))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+fn launch_windows_installer(installer_path: &Path) -> Result<(), String> {
+    let ext = installer_path
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+
+    if ext == "msi" {
+        let status = Command::new("msiexec")
+            .arg("/i")
+            .arg(installer_path)
+            .spawn()
+            .map_err(|err| format!("Could not launch MSI installer: {err}"))?;
+        drop(status);
+        return Ok(());
+    }
+
+    if ext != "exe" {
+        return Err("Only .exe or .msi installers are supported.".into());
+    }
+
+    let child = Command::new(installer_path)
+        .spawn()
+        .map_err(|err| format!("Could not launch installer: {err}"))?;
+    drop(child);
+    Ok(())
+}
+
+#[tauri::command]
+async fn install_app_update(app: AppHandle, url: String) -> Result<String, String> {
+    let payload: serde_json::Value =
+        serde_json::from_str(url.trim()).map_err(|err| format!("Invalid installer payload: {err}"))?;
+    let asset_id = payload
+        .get("assetId")
+        .and_then(|value| value.as_u64())
+        .ok_or_else(|| "Missing installer asset id.".to_string())?;
+    let installer_name = sanitize_update_filename(
+        payload
+            .get("assetName")
+            .and_then(|value| value.as_str())
+            .unwrap_or("RadarAppUpdateInstaller.exe"),
+    );
+    let lower_name = installer_name.to_ascii_lowercase();
+    if !lower_name.ends_with(".exe") && !lower_name.ends_with(".msi") {
+        return Err("Update URL must point directly to a Windows installer asset.".into());
+    }
+
+    let temp_path = tauri::async_runtime::spawn_blocking(move || {
+        let client = github_api_client(900)?;
+        let asset_url = format!("{}/releases/assets/{}", github_api_base(), asset_id);
+        let mut response = github_request(&client, &asset_url, "application/octet-stream")
+            .send()
+            .and_then(|res| res.error_for_status())
+            .map_err(|err| format!("Could not download update installer: {err}"))?;
+
+        let update_dir = std::env::temp_dir().join("RadarAppUpdates");
+        fs::create_dir_all(&update_dir)
+            .map_err(|err| format!("Could not create update temp directory: {err}"))?;
+
+        let timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|dur| dur.as_millis())
+            .unwrap_or(0);
+        let target_path = update_dir.join(format!("{timestamp}-{installer_name}"));
+        let partial_path = target_path.with_extension(format!(
+            "{}.part",
+            target_path
+                .extension()
+                .and_then(|value| value.to_str())
+                .unwrap_or("download")
+        ));
+
+        if partial_path.exists() {
+            let _ = fs::remove_file(&partial_path);
+        }
+        if target_path.exists() {
+            let _ = fs::remove_file(&target_path);
+        }
+
+        let mut file = fs::File::create(&partial_path)
+            .map_err(|err| format!("Could not create temp installer file: {err}"))?;
+        std::io::copy(&mut response, &mut file)
+            .map_err(|err| format!("Could not save update installer: {err}"))?;
+        file.flush()
+            .map_err(|err| format!("Could not finalize installer download: {err}"))?;
+        drop(file);
+
+        fs::rename(&partial_path, &target_path)
+            .map_err(|err| format!("Could not finalize installer file: {err}"))?;
+
+        launch_windows_installer(&target_path)?;
+        Ok::<PathBuf, String>(target_path)
+    })
+    .await
+    .map_err(|err| format!("Update task failed: {err}"))??;
+
+    let app_for_exit = app.clone();
+    std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(500));
+        app_for_exit.exit(0);
+    });
+
+    Ok(temp_path.to_string_lossy().into_owned())
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -3153,14 +3481,19 @@ pub fn run() {
     });
 
     let app = tauri::Builder::default()
-        .plugin(tauri_plugin_opener::init())
         .manage(NwwsBridgeState::default())
         .invoke_handler(tauri::generate_handler![
             l3_list_page,
             l3_resolve_selection,
+            l3_warm_keys,
+            decode_key,
+            decode_l2,
+            decode_local_file,
+            prepare_local_file,
             clear_decode_cache,
+            check_app_update,
             get_app_version,
-            open_app_update_url,
+            install_app_update,
             fetch_url_base64,
             fetch_fl511_stream,
             fetch_pendot_stream,

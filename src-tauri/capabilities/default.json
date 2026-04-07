@@ -5,7 +5,6 @@
   "windows": ["main", "warning-dashboard"],
   "permissions": [
     "core:default",
-    "core:webview:default",
-    "opener:default"
+    "core:webview:default"
   ]
 }

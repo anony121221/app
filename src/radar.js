@@ -32,6 +32,24 @@ const PROCESSED_WISE_FAMILY_TILTS = Object.freeze({
   PRT: PROCESSED_WISE_SINGLE_TILT,
   DTA: PROCESSED_WISE_SINGLE_TILT,
 });
+
+// TDWR (Terminal Doppler Weather Radar) uses different folder names
+const TDWR_WISE_FAMILIES = Object.freeze(['REF', 'VEL', 'PRT']);
+const TDWR_WISE_FAMILY_SET = new Set(TDWR_WISE_FAMILIES);
+const TDWR_WISE_SINGLE_TILT = Object.freeze(['0.5']);
+const TDWR_WISE_FAMILY_TILTS = Object.freeze({
+  REF: TDWR_WISE_SINGLE_TILT,
+  VEL: TDWR_WISE_SINGLE_TILT,
+  PRT: TDWR_WISE_SINGLE_TILT,
+});
+// TDWR folder name mapping: family -> folder name (no tilt index)
+const TDWR_WISE_FOLDER_MAP = Object.freeze({
+  REF: 'TZ0',      // Base reflectivity (0.5 degree)
+  VEL: 'TV0',      // Base velocity (0.5 degree)
+  PRT: 'PRT0',     // Precipitation type
+  // Long range reflectivity is a separate product
+  'REF-LR': 'TZL', // Long range reflectivity
+});
 const ALL_TILT_VALUES = Object.freeze([...new Set([...PROCESSED_WISE_TILTS, ...L3_TILTS])]);
 const WISE_MAGIC = 'WISE';
 const WISE_FIXED_HEADER_SIZE = 68;
@@ -95,7 +113,6 @@ const { listen, emit } = window.__TAURI__.event;
 let _l3TransportWarmed = false;
 const APP_UPDATE_AUTO_CHECK_DELAY_MS = 4500;
 const APP_UPDATE_RETRY_DELAY_MS = 20000;
-const APP_UPDATE_LATEST_API_URL = 'https://api.github.com/repos/anony121221/app/releases/latest';
 
 function warmL3TransportOnce() {
   if (_l3TransportWarmed) return;
@@ -165,7 +182,8 @@ function pickReleaseDownloadUrl(release) {
     };
     return rank(a) - rank(b);
   });
-  return String(assets[0]?.browser_download_url || release?.html_url || '').trim();
+  const url = String(assets[0]?.browser_download_url || '').trim();
+  return /\.(exe|msi)(?:$|\?)/i.test(url) ? url : '';
 }
 
 // DevTools: Ctrl+Shift+I
@@ -362,7 +380,8 @@ function isTerminalStation(id) {
 function _stationSupportsProcessedWise(id) {
   const sid = canonicalStationId(id);
   if (!sid) return false;
-  return stationSource(sid) === 's3' && !isTerminalStation(sid);
+  // Terminal stations (TDWR) now support WeatherWise processed data
+  return stationSource(sid) === 's3' || isTerminalStation(sid);
 }
 
 const VIEWABLE_STATION_IDS = Object.freeze(
@@ -377,7 +396,10 @@ function stationDotColor(id) {
 }
 
 function supportedL3FamiliesForStation(id) {
-  return _stationSupportsProcessedWise(id) ? [...PROCESSED_WISE_FAMILIES] : [];
+  if (!_stationSupportsProcessedWise(id)) return [];
+  // TDWR stations support a subset of families
+  if (isTerminalStation(id)) return [...TDWR_WISE_FAMILIES];
+  return [...PROCESSED_WISE_FAMILIES];
 }
 
 const TDWR_FAMILY_TILTS = Object.freeze({
@@ -392,15 +414,39 @@ function _processedWiseSupportedTilts(family) {
   return Array.isArray(tilts) && tilts.length ? [...tilts] : [];
 }
 
+function _tdwrWiseSupportedTilts(family) {
+  const f = String(family || '').trim().toUpperCase();
+  const tilts = TDWR_WISE_FAMILY_TILTS[f];
+  return Array.isArray(tilts) && tilts.length ? [...tilts] : ['0.5'];
+}
+
 function _normalizeProcessedWiseTilt(family, tilt) {
-  const allowed = _processedWiseSupportedTilts(family);
+  const f = String(family || '').trim().toUpperCase();
   const normalized = normalizeTilt(tilt || '0.5');
+  const allowed = _processedWiseSupportedTilts(f);
   return allowed.includes(normalized) ? normalized : (allowed[0] || '0.5');
+}
+
+function _normalizeProcessedWiseTiltForStation(stationId, family, tilt) {
+  if (isTerminalStation(stationId)) {
+    const f = String(family || '').trim().toUpperCase();
+    const normalized = normalizeTilt(tilt || '0.5');
+    const allowed = _tdwrWiseSupportedTilts(f);
+    return allowed.includes(normalized) ? normalized : (allowed[0] || '0.5');
+  }
+  return _normalizeProcessedWiseTilt(family, tilt);
 }
 
 function supportedL3TiltsForStationFamily(id, family) {
   const f = String(family || 'REF').toUpperCase();
-  if (_stationSupportsProcessedWise(id) && PROCESSED_WISE_FAMILY_SET.has(f)) {
+  if (!_stationSupportsProcessedWise(id)) return ['0.5'];
+  
+  // TDWR stations have different tilt options
+  if (isTerminalStation(id)) {
+    return _tdwrWiseSupportedTilts(f);
+  }
+  
+  if (PROCESSED_WISE_FAMILY_SET.has(f)) {
     return _processedWiseSupportedTilts(f);
   }
   return ['0.5'];
@@ -770,6 +816,31 @@ const ALERT_EVENT_COLOR_MAP = {
   TOWP: '#FF4DFF',
   SVW: '#FFE600',
   SVWP: '#C7A600',
+  // Winter warnings
+  WSW: '#6495ED',
+  BLW: '#5B8DD9',
+  ISW: '#8B7FD4',
+  SNQ: '#C0C0FF',
+  WCW: '#B0C4DE',
+  LESW: '#87CEEB',
+  FFZ: '#6495ED',
+  HFZ: '#4169E1',
+  FZW: '#4682B4',
+  // Winter watches/advisories
+  WSWA: '#4682B4',
+  ISWA: '#708090',
+  LESWA: '#87CEEB',
+  WWA: '#7B96C8',
+  FRA: '#8B9BCB',
+  WCVA: '#B0C4DE',
+  LESA: '#B0D4E8',
+  // Special event / other
+  DFA: '#708090',
+  HWW: '#DAA520',
+  WNDADV: '#D2B48C',
+  SPS: '#FFE680',
+  HWO: '#E0E080',
+  // Legacy event-name keys
   'Tornado Warning': '#FF2D2D',
   'Severe Thunderstorm Warning': '#FFE600',
   'Flash Flood Warning': '#35C759',
@@ -807,6 +878,31 @@ const WARNING_PREF_CONFIG = Object.freeze([
   { id: 'TOW', label: 'Tornado Watch' },
   { id: 'SVWP', label: 'PDS Severe Thunderstorm Watch' },
   { id: 'SVW', label: 'Severe Thunderstorm Watch' },
+  // Winter warnings
+  { id: 'BLW', label: 'Blizzard Warning' },
+  { id: 'WSW', label: 'Winter Storm Warning' },
+  { id: 'ISW', label: 'Ice Storm Warning' },
+  { id: 'SNQ', label: 'Snow Squall Warning' },
+  { id: 'WCW', label: 'Wind Chill Warning' },
+  { id: 'LESW', label: 'Lake Effect Snow Warning' },
+  { id: 'FFZ', label: 'Frost/Freeze Warning' },
+  { id: 'HFZ', label: 'Hard Freeze Warning' },
+  { id: 'FZW', label: 'Freeze Warning' },
+  // Winter watches
+  { id: 'WSWA', label: 'Winter Storm Watch' },
+  { id: 'ISWA', label: 'Ice Storm Watch' },
+  { id: 'LESWA', label: 'Lake Effect Snow Watch' },
+  // Winter advisories
+  { id: 'WWA', label: 'Winter Weather Advisory' },
+  { id: 'FRA', label: 'Freezing Rain Advisory' },
+  { id: 'WCVA', label: 'Wind Chill Advisory' },
+  { id: 'LESA', label: 'Lake Effect Snow Advisory' },
+  // Special event / other
+  { id: 'HWW', label: 'High Wind Warning' },
+  { id: 'WNDADV', label: 'Wind Advisory' },
+  { id: 'DFA', label: 'Dense Fog Advisory' },
+  { id: 'SPS', label: 'Special Weather Statement' },
+  { id: 'HWO', label: 'Hazardous Weather Outlook' },
 ]);
 const WARNING_PREF_ID_SET = new Set(WARNING_PREF_CONFIG.map(item => item.id));
 const ALERT_FALLBACK_COLOR = '#E6E6E6';
@@ -1421,10 +1517,146 @@ function initSpcOverlayLayers() {
     },
   }, 'stations-dot');
 
+  map.on('click', 'spc-base-fill', e => {
+    if (!e.features?.length) return;
+    openSpcViewer(spcDay, spcType);
+  });
+  map.on('click', 'spc-cig-fill', e => {
+    if (!e.features?.length) return;
+    openSpcViewer(spcDay, spcType);
+  });
+  map.on('mouseenter', 'spc-base-fill', () => { map.getCanvas().style.cursor = 'pointer'; });
+  map.on('mouseleave', 'spc-base-fill', () => { map.getCanvas().style.cursor = ''; });
+  map.on('mouseenter', 'spc-cig-fill', () => { map.getCanvas().style.cursor = 'pointer'; });
+  map.on('mouseleave', 'spc-cig-fill', () => { map.getCanvas().style.cursor = ''; });
+
   spcMapReady = true;
   syncSpcFilterUi();
   if (spcVisible) refreshSpcOverlay(true);
 }
+
+// ─── SPC Discussion / Image Viewer ───────────────────────────────────────────
+
+let _spcViewerDay = 'DAY1';
+let _spcViewerTypes = [];
+let _spcViewerIdx = 0;
+const _spcDiscussionCache = {};
+
+function _spcImageUrl(day, type) {
+  const d = day.replace('DAY', '');
+  if (+d >= 4) return `https://www.spc.noaa.gov/products/exper/day4-8/media/day${d}prob.png`;
+  return `https://www.spc.noaa.gov/products/outlook/day${d}otlk_${type.toLowerCase()}.gif`;
+}
+
+function _spcDiscussionUrl(day) {
+  const d = day.replace('DAY', '');
+  if (+d >= 4) return `https://www.spc.noaa.gov/products/exper/day4-8/day${d}prob.html`;
+  return `https://www.spc.noaa.gov/products/outlook/day${d}otlk.html`;
+}
+
+async function _fetchSpcDiscussion(day) {
+  if (_spcDiscussionCache[day]) return _spcDiscussionCache[day];
+  try {
+    const url = _spcDiscussionUrl(day);
+    // Use the same Rust fetch path as GeoJSON (works from tauri:// origin)
+    const res = await invoke('fetch_url_base64', { url });
+    if (!res || res.status < 200 || res.status >= 400 || !res.body_base64) {
+      throw new Error(`HTTP ${res?.status || 0}`);
+    }
+    const html = _decodeBase64Utf8(res.body_base64);
+    const parser = new DOMParser();
+    const doc = parser.parseFromString(html, 'text/html');
+    const pre = doc.querySelector('pre');
+    const text = pre ? pre.textContent.trim() : '(No discussion text found on this page.)';
+    _spcDiscussionCache[day] = text;
+    return text;
+  } catch (err) {
+    return `(Failed to load discussion: ${err?.message || err})`;
+  }
+}
+
+function _spcViewerUpdateImage() {
+  const overlay = document.getElementById('spc-viewer-overlay');
+  if (!overlay?.classList.contains('open')) return;
+  const type = _spcViewerTypes[_spcViewerIdx] || { id: 'CAT', label: 'Categorical' };
+  const d = _spcViewerDay.replace('DAY', '');
+  document.getElementById('spc-viewer-title').textContent = `SPC Day ${d} Outlook — ${type.label}`;
+  document.getElementById('spc-viewer-image-label').textContent = type.label;
+  const img = document.getElementById('spc-viewer-img');
+  const imgStatus = document.getElementById('spc-viewer-img-status');
+  if (img) {
+    img.src = '';
+    img.style.display = 'none';
+    if (imgStatus) { imgStatus.textContent = 'Loading…'; imgStatus.style.display = 'block'; }
+    const imageUrl = _spcImageUrl(_spcViewerDay, type.id);
+    const capturedDay = _spcViewerDay;
+    const capturedIdx = _spcViewerIdx;
+    invoke('fetch_url_base64', { url: imageUrl }).then(res => {
+      if (!overlay.classList.contains('open')) return;
+      if (_spcViewerDay !== capturedDay || _spcViewerIdx !== capturedIdx) return;
+      if (!res || res.status < 200 || res.status >= 400 || !res.body_base64) {
+        if (imgStatus) { imgStatus.textContent = `Image unavailable (HTTP ${res?.status ?? '?'})`; imgStatus.style.display = 'block'; }
+        return;
+      }
+      const mime = imageUrl.endsWith('.png') ? 'image/png' : 'image/gif';
+      const dataUrl = `data:${mime};base64,${res.body_base64}`;
+      // Set handlers BEFORE src so they fire even if load is synchronous
+      img.onload = () => {
+        img.style.display = 'block';
+        if (imgStatus) imgStatus.style.display = 'none';
+      };
+      img.onerror = () => {
+        img.style.display = 'none';
+        if (imgStatus) { imgStatus.textContent = 'Image could not be rendered.'; imgStatus.style.display = 'block'; }
+      };
+      img.src = dataUrl;
+    }).catch(err => {
+      if (!overlay.classList.contains('open')) return;
+      if (imgStatus) { imgStatus.textContent = `Failed to load: ${err?.message || err || 'unknown error'}`; imgStatus.style.display = 'block'; }
+    });
+  }
+  _updateSpcViewerNavButtons();
+}
+
+function _updateSpcViewerNavButtons() {
+  const prev = document.getElementById('spc-viewer-prev');
+  const next = document.getElementById('spc-viewer-next');
+  if (prev) prev.disabled = _spcViewerTypes.length <= 1;
+  if (next) next.disabled = _spcViewerTypes.length <= 1;
+}
+
+function openSpcViewer(day, type) {
+  const overlay = document.getElementById('spc-viewer-overlay');
+  if (!overlay) return;
+  _spcViewerDay = day || 'DAY1';
+  const dayOptions = SPC_TYPE_OPTIONS_BY_DAY[_spcViewerDay] || [{ id: 'CAT', label: 'Categorical' }];
+  _spcViewerTypes = dayOptions;
+  _spcViewerIdx = Math.max(0, dayOptions.findIndex(t => t.id === (type || 'CAT')));
+  overlay.classList.add('open');
+  _spcViewerUpdateImage();
+  // Load discussion text
+  const textEl = document.getElementById('spc-viewer-discussion-text');
+  if (textEl) {
+    textEl.textContent = 'Loading discussion...';
+    _fetchSpcDiscussion(_spcViewerDay).then(text => {
+      if (overlay.classList.contains('open') && _spcViewerDay === day) {
+        textEl.textContent = text;
+      }
+    });
+  }
+}
+
+function closeSpcViewer() {
+  document.getElementById('spc-viewer-overlay')?.classList.remove('open');
+}
+
+function _spcViewerNavigate(dir) {
+  if (_spcViewerTypes.length <= 1) return;
+  _spcViewerIdx = (_spcViewerIdx + dir + _spcViewerTypes.length) % _spcViewerTypes.length;
+  _spcViewerUpdateImage();
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 
 function _escapeHtml(value) {
   return String(value ?? '')
@@ -1568,10 +1800,8 @@ const _weatherWiseRelayState = {
   connectPromise: null,
   reconnectTimer: null,
   connectTimeoutTimer: null,
-  pollAbort: null,
-  pollLoopPromise: null,
-  sendChain: Promise.resolve(),
-  pollingSid: '',
+  ws: null,              // native WebSocket (replaces HTTP polling)
+  pollingSid: '',        // kept for compatibility checks
   flyForceInstanceId: '',
   namespaceReady: false,
   desiredRoom: '',
@@ -1590,9 +1820,16 @@ function _processedWiseTiltIndex(family, tilt) {
   return Number.isInteger(idx) ? idx : null;
 }
 
-function _processedWiseFolderName(family, tilt) {
+function _processedWiseFolderName(stationId, family, tilt) {
   const product = _processedWiseProductCodeForFamily(family);
   if (product === 'DTA') return 'DTA';
+  
+  // TDWR stations use different folder names (TZ0, TV0, PRT0, TZL)
+  if (isTerminalStation(stationId)) {
+    const f = String(family || '').trim().toUpperCase();
+    return TDWR_WISE_FOLDER_MAP[f] || null;
+  }
+  
   const idx = _processedWiseTiltIndex(family, tilt);
   if (!product || idx == null) return null;
   return `${product}${idx}`;
@@ -1601,21 +1838,29 @@ function _processedWiseFolderName(family, tilt) {
 function _canUseProcessedWise(stationId, family, tilt) {
   const f = String(family || '').trim().toUpperCase();
   if (levelII || isLocalRadarMode()) return false;
-  if (!PROCESSED_WISE_FAMILY_SET.has(f)) return false;
   if (!stationId) return false;
   if (!_stationSupportsProcessedWise(stationId)) return false;
+  
+  // TDWR stations support a subset of families
+  if (isTerminalStation(stationId)) {
+    const result = TDWR_WISE_FAMILY_SET.has(f);
+    return result;
+  }
+  
+  // WSR-88D stations use the standard family set
+  if (!PROCESSED_WISE_FAMILY_SET.has(f)) return false;
   return _processedWiseTiltIndex(f, tilt) != null;
 }
 
 function _processedWiseListUrl(stationId, family, tilt) {
   const sid = canonicalStationId(stationId);
-  const folder = _processedWiseFolderName(family, tilt);
+  const folder = _processedWiseFolderName(stationId, family, tilt);
   return `${PROCESSED_WISE_BASE_URL}/${sid}/${folder}/dir.list?_=${Date.now()}`;
 }
 
 function _processedWiseFileUrl(stationId, family, tilt, fileName) {
   const sid = canonicalStationId(stationId);
-  const folder = _processedWiseFolderName(family, tilt);
+  const folder = _processedWiseFolderName(stationId, family, tilt);
   return `${PROCESSED_WISE_BASE_URL}/${sid}/${folder}/${fileName}`;
 }
 
@@ -1696,6 +1941,54 @@ function _storeProcessedWisePrefetch(meta, bytes) {
   }
 }
 
+// Deduplication map: url → in-flight fetch Promise.  Multiple concurrent
+// callers for the same URL share one HTTP request rather than racing.
+const _pendingWiseFetches = new Map();
+
+// After successfully decoding a WISE file for time T, speculatively fetch
+// the file for T+1min so it's ready in the prefetch cache the moment the
+// relay fires for the next scan.
+function _schedulePredictiveWisePrefetch(stationId, family, tilt, fileName) {
+  const fileMs = _parseProcessedWiseFileTimestampMs(fileName);
+  if (!Number.isFinite(fileMs)) return;
+  const nextFileName = _formatProcessedWiseFileName(fileMs + 60_000);
+  const sid = canonicalStationId(stationId);
+  const nf = String(family || '').trim().toUpperCase();
+  const nt = _normalizeProcessedWiseTiltForStation(sid, nf, tilt);
+  const meta = _buildProcessedWiseMeta(sid, nf, nt, nextFileName);
+  if (!meta?.key) return;
+
+  let attempts = 0;
+  async function tryPrefetch() {
+    if (frameCache.has(meta.key) || _processedWisePrefetchBytes.has(meta.key)) return;
+    if (attempts >= 4) return;
+    attempts += 1;
+    _clearWiseNotFound(meta.url);
+    _clearWiseNotFound(meta.key);
+    try {
+      let fetchP = _pendingWiseFetches.get(meta.url);
+      if (!fetchP) {
+        fetchP = _fetchBytesViaTauri(meta.url, {
+          timeoutMs: WISE_PROBE_TIMEOUT_MS,
+          preferDirect: false,
+        }).finally(() => _pendingWiseFetches.delete(meta.url));
+        _pendingWiseFetches.set(meta.url, fetchP);
+      }
+      const bytes = await fetchP;
+      if (!(bytes instanceof Uint8Array) || bytes.byteLength < WISE_FIXED_HEADER_SIZE) return;
+      if (String.fromCharCode(bytes[0], bytes[1], bytes[2], bytes[3]) !== WISE_MAGIC) return;
+      _clearWiseNotFound(meta.url);
+      _clearWiseNotFound(meta.key);
+      _storeProcessedWisePrefetch(meta, bytes);
+    } catch (err) {
+      if ((err?.status === 404 || err?.isNotFound) && attempts < 4) {
+        setTimeout(tryPrefetch, 15_000);
+      }
+    }
+  }
+  setTimeout(tryPrefetch, 0);
+}
+
 function _weatherWiseRelayCurrentCountRoom() {
   if (!WEATHERWISE_RELAY_ENABLED) return '';
   if (!activeStation || isLocalRadarMode()) return '';
@@ -1730,29 +2023,9 @@ function _scheduleProcessedWiseImmediateRefresh(delayMs = 0) {
 }
 
 function _weatherWiseRelaySend(payload) {
-  if (!_weatherWiseRelayState.pollingSid || !_weatherWiseRelayState.flyForceInstanceId) return false;
-  const sid = String(_weatherWiseRelayState.pollingSid || '');
-  const flyForceInstanceId = String(_weatherWiseRelayState.flyForceInstanceId || '');
-  const body = String(payload || '');
-  _weatherWiseRelayState.sendChain = _weatherWiseRelayState.sendChain
-    .catch(() => {})
-    .then(async () => {
-      if (!body || _weatherWiseRelayState.pollingSid !== sid) return;
-      const params = new URLSearchParams({
-        'fly-force-instance-id': flyForceInstanceId,
-        EIO: '4',
-        transport: 'polling',
-        sid,
-        t: `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`,
-      });
-      await fetch(`${WEATHERWISE_RELAY_SOCKET_HTTP_URL}?${params.toString()}`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'text/plain;charset=UTF-8' },
-        body,
-        cache: 'no-store',
-        credentials: 'omit',
-      });
-    });
+  const ws = _weatherWiseRelayState.ws;
+  if (!ws || ws.readyState !== WebSocket.OPEN) return false;
+  try { ws.send(String(payload || '')); } catch (_) { return false; }
   return true;
 }
 
@@ -1788,14 +2061,16 @@ function _weatherWiseRelayClose(scheduleReconnect = false) {
     clearTimeout(_weatherWiseRelayState.connectTimeoutTimer);
     _weatherWiseRelayState.connectTimeoutTimer = null;
   }
-  const abort = _weatherWiseRelayState.pollAbort;
-  _weatherWiseRelayState.pollAbort = null;
-  _weatherWiseRelayState.pollLoopPromise = null;
+  const ws = _weatherWiseRelayState.ws;
+  _weatherWiseRelayState.ws = null;
   _weatherWiseRelayState.namespaceReady = false;
   _weatherWiseRelayState.joinedRoom = '';
   _weatherWiseRelayState.pollingSid = '';
-  if (abort) {
-    try { abort.abort(); } catch (_) {}
+  if (ws) {
+    ws.onmessage = null;
+    ws.onerror   = null;
+    ws.onclose   = null;
+    try { ws.close(); } catch (_) {}
   }
   if (scheduleReconnect) _weatherWiseRelayScheduleReconnect();
 }
@@ -1814,6 +2089,11 @@ function _weatherWiseRelayHandleEvent(eventName, payload) {
   if (!changed) return;
   if (stationId !== canonicalStationId(activeStation)) return;
   if (!_canUseProcessedWise(activeStation, activeFamily, activeTilt)) return;
+  // Start a background probe immediately so the file bytes are in-flight
+  // (and deduplicated) before _scheduleProcessedWiseImmediateRefresh fires.
+  void _probeLatestProcessedWiseMeta(
+    activeStation, activeFamily, activeTilt, null, { ignoreCooldown: true }
+  ).catch(() => {});
   _scheduleProcessedWiseImmediateRefresh(0);
 }
 
@@ -1841,48 +2121,19 @@ function _weatherWiseRelayHandleMessage(raw) {
   } catch (_) {}
 }
 
-function _weatherWiseRelayHandlePollingPayload(text) {
-  const raw = String(text || '');
-  if (!raw) return;
-  const packets = raw.split('\u001e').filter(Boolean);
-  for (const packet of packets) _weatherWiseRelayHandleMessage(packet);
-}
-
-async function _weatherWiseRelayPollLoop(sid, flyForceInstanceId) {
-  while (_weatherWiseRelayState.pollingSid === sid && _weatherWiseRelayState.desiredRoom) {
-    const abort = new AbortController();
-    _weatherWiseRelayState.pollAbort = abort;
-    const params = new URLSearchParams({
-      'fly-force-instance-id': flyForceInstanceId,
-      EIO: '4',
-      transport: 'polling',
-      sid,
-      t: `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`,
-    });
-    const res = await fetch(`${WEATHERWISE_RELAY_SOCKET_HTTP_URL}?${params.toString()}`, {
-      cache: 'no-store',
-      credentials: 'omit',
-      signal: abort.signal,
-    });
-    if (!res.ok) throw new Error(`relay poll HTTP ${res.status}`);
-    const text = await res.text();
-    if (_weatherWiseRelayState.pollingSid !== sid) return;
-    _weatherWiseRelayHandlePollingPayload(text);
-  }
-}
-
 async function _weatherWiseRelayEnsureConnected() {
   const desired = String(_weatherWiseRelayState.desiredRoom || '');
   if (!desired) {
     _weatherWiseRelayClose(false);
     return;
   }
-  if (_weatherWiseRelayState.namespaceReady && _weatherWiseRelayState.pollingSid) {
+  if (_weatherWiseRelayState.namespaceReady && _weatherWiseRelayState.ws?.readyState === WebSocket.OPEN) {
     _weatherWiseRelayJoinDesiredRoom();
     return;
   }
   if (_weatherWiseRelayState.connectPromise) return _weatherWiseRelayState.connectPromise;
   _weatherWiseRelayState.connectPromise = (async () => {
+    // Get the Fly.io instance ID from the preconnect endpoint.
     const preconnectRes = await fetch(`${WEATHERWISE_RELAY_PRECONNECT_URL}?_=${Date.now()}`, {
       cache: 'no-store',
       credentials: 'omit',
@@ -1895,37 +2146,55 @@ async function _weatherWiseRelayEnsureConnected() {
       || ''
     ).trim();
     if (!flyForceInstanceId) throw new Error('missing relay instance id');
-    const pollingParams = new URLSearchParams({
-      'fly-force-instance-id': flyForceInstanceId,
-      EIO: '4',
-      transport: 'polling',
-      t: `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`,
-    });
-    const openRes = await fetch(`${WEATHERWISE_RELAY_SOCKET_HTTP_URL}?${pollingParams.toString()}`, {
-      cache: 'no-store',
-      credentials: 'omit',
-    });
-    if (!openRes.ok) throw new Error(`relay polling HTTP ${openRes.status}`);
-    const openText = String(await openRes.text() || '').trim();
-    const jsonStart = openText.indexOf('{');
-    if (jsonStart < 0) throw new Error('bad relay open payload');
-    const openPayload = JSON.parse(openText.slice(jsonStart));
-    const pollingSid = String(openPayload?.sid || '').trim();
-    if (!pollingSid) throw new Error('missing relay sid');
-    _weatherWiseRelayState.pollingSid = pollingSid;
-    _weatherWiseRelayState.flyForceInstanceId = flyForceInstanceId;
-    _weatherWiseRelayState.connectTimeoutTimer = setTimeout(() => {
-      _weatherWiseRelayState.connectTimeoutTimer = null;
-      _weatherWiseRelayClose(true);
-    }, WEATHERWISE_RELAY_CONNECT_TIMEOUT_MS);
-    _weatherWiseRelayState.pollLoopPromise = _weatherWiseRelayPollLoop(pollingSid, flyForceInstanceId)
-      .catch(() => {
-        if (_weatherWiseRelayState.connectTimeoutTimer != null) {
-          clearTimeout(_weatherWiseRelayState.connectTimeoutTimer);
-          _weatherWiseRelayState.connectTimeoutTimer = null;
-        }
-        _weatherWiseRelayClose(true);
+
+    // Open a native WebSocket directly — WebSocket connections are not subject
+    // to CORS (no Access-Control-Allow-Origin check), so tauri.localhost origin
+    // is accepted by the server even without an explicit CORS header.
+    await new Promise((resolve, reject) => {
+      const params = new URLSearchParams({
+        'fly-force-instance-id': flyForceInstanceId,
+        EIO: '4',
+        transport: 'websocket',
       });
+      const ws = new WebSocket(`${WEATHERWISE_RELAY_SOCKET_WS_URL}?${params}`);
+      _weatherWiseRelayState.ws = ws;
+      _weatherWiseRelayState.flyForceInstanceId = flyForceInstanceId;
+
+      const connTimeout = setTimeout(() => {
+        ws.onmessage = ws.onerror = ws.onclose = null;
+        try { ws.close(); } catch (_) {}
+        reject(new Error('WebSocket connect timeout'));
+      }, WEATHERWISE_RELAY_CONNECT_TIMEOUT_MS);
+
+      ws.onmessage = (ev) => {
+        const msg = String(ev.data || '');
+        if (msg.startsWith('0')) {
+          // Engine.IO OPEN packet — send Socket.io namespace connect.
+          try {
+            const json = JSON.parse(msg.slice(1));
+            _weatherWiseRelayState.pollingSid = String(json?.sid || 'ws');
+          } catch (_) {
+            _weatherWiseRelayState.pollingSid = 'ws';
+          }
+          try { ws.send('40'); } catch (_) {}
+          return;
+        }
+        _weatherWiseRelayHandleMessage(msg);
+        // Socket.io namespace connect acknowledged → connected.
+        if (msg.startsWith('40') && !_weatherWiseRelayState.namespaceReady) {
+          clearTimeout(connTimeout);
+          resolve();
+        }
+      };
+      ws.onerror = () => {
+        clearTimeout(connTimeout);
+        reject(new Error('WebSocket error'));
+      };
+      ws.onclose = () => {
+        clearTimeout(connTimeout);
+        _weatherWiseRelayClose(true);
+      };
+    });
   })().catch(err => {
     _weatherWiseRelayClose(true);
     throw err;
@@ -1948,7 +2217,7 @@ function _syncProcessedWiseRealtime() {
 async function _probeLatestProcessedWiseMeta(stationId, family, tilt, lastFileName, opts = {}) {
   const sid = canonicalStationId(stationId);
   const normalizedFamily = String(family || '').trim().toUpperCase();
-  const normalizedTilt = _normalizeProcessedWiseTilt(normalizedFamily, tilt);
+  const normalizedTilt = _normalizeProcessedWiseTiltForStation(stationId, normalizedFamily, tilt);
   const candidates = _buildProcessedWiseProbeCandidates(lastFileName);
   const ignoreCooldown = opts?.ignoreCooldown === true;
   let tried = 0;
@@ -1961,10 +2230,15 @@ async function _probeLatestProcessedWiseMeta(stationId, family, tilt, lastFileNa
       return meta;
     }
     try {
-      const bytes = await _fetchBytesViaTauri(meta.url, {
-        timeoutMs: WISE_PROBE_TIMEOUT_MS,
-        preferDirect: false,
-      });
+      let fetchP = _pendingWiseFetches.get(meta.url);
+      if (!fetchP) {
+        fetchP = _fetchBytesViaTauri(meta.url, {
+          timeoutMs: WISE_PROBE_TIMEOUT_MS,
+          preferDirect: false,
+        }).finally(() => _pendingWiseFetches.delete(meta.url));
+        _pendingWiseFetches.set(meta.url, fetchP);
+      }
+      const bytes = await fetchP;
       if (!(bytes instanceof Uint8Array) || bytes.byteLength < WISE_FIXED_HEADER_SIZE) continue;
       const magic = String.fromCharCode(bytes[0], bytes[1], bytes[2], bytes[3]);
       if (magic !== WISE_MAGIC) continue;
@@ -2002,9 +2276,9 @@ function _parseProcessedWiseListing(text) {
 
 function _buildProcessedWiseMeta(stationId, family, tilt, fileName) {
   const sid = canonicalStationId(stationId);
-  const productCode = _processedWiseFolderName(family, tilt);
+  const productCode = _processedWiseFolderName(stationId, family, tilt);
   const normalizedFamily = String(family || '').toUpperCase();
-  const normalizedTilt = _normalizeProcessedWiseTilt(normalizedFamily, tilt);
+  const normalizedTilt = _normalizeProcessedWiseTiltForStation(stationId, normalizedFamily, tilt);
   if (!sid || !productCode || !fileName) return null;
   return {
     key: `WISE:${sid}:${normalizedFamily}:${normalizedTilt}:${encodeURIComponent(fileName)}`,
@@ -2033,7 +2307,7 @@ async function _fetchLatestProcessedWiseMeta(stationId, family, tilt, opts = {})
   if (!_canUseProcessedWise(stationId, family, tilt)) return null;
   const sid = canonicalStationId(stationId);
   const normalizedFamily = String(family || '').trim().toUpperCase();
-  const normalizedTilt = _normalizeProcessedWiseTilt(normalizedFamily, tilt);
+  const normalizedTilt = _normalizeProcessedWiseTiltForStation(stationId, normalizedFamily, tilt);
   const cacheKey = `${sid}:${normalizedFamily}:${normalizedTilt}`;
   const cached = _processedWiseLatestCache.get(cacheKey);
   if (!opts.forceRefresh && cached && (Date.now() - cached.fetchedAt) < WISE_CACHE_TTL_MS) {
@@ -2085,7 +2359,7 @@ async function _fetchRecentProcessedWiseMetas(stationId, family, tilt, maxFrames
   if (!_canUseProcessedWise(stationId, family, tilt)) return [];
   const sid = canonicalStationId(stationId);
   const normalizedFamily = String(family || '').trim().toUpperCase();
-  const normalizedTilt = _normalizeProcessedWiseTilt(normalizedFamily, tilt);
+  const normalizedTilt = _normalizeProcessedWiseTiltForStation(stationId, normalizedFamily, tilt);
   const cacheKey = `${sid}:${normalizedFamily}:${normalizedTilt}`;
   const wanted = Math.max(1, Math.min(MAX_HISTORY_FRAMES, Math.round(Number(maxFrames) || 1)));
   let files = [];
@@ -3850,6 +4124,34 @@ function _alertsParamText(props, key) {
   return String(raw || '').trim().toUpperCase();
 }
 
+// Table-driven lookup for winter/special event types.
+// Entries are checked in order; first match wins.
+// Each entry: [eventNameSubstring, warnClass]
+const _WINTER_SPECIAL_CLASS_TABLE = [
+  ['blizzard warning',          'BLW'],
+  ['winter storm warning',      'WSW'],
+  ['ice storm warning',         'ISW'],
+  ['snow squall warning',       'SNQ'],
+  ['wind chill warning',        'WCW'],
+  ['lake effect snow warning',  'LESW'],
+  ['hard freeze warning',       'HFZ'],
+  ['frost/freeze warning',      'FFZ'],
+  ['freeze warning',            'FZW'],
+  ['frost advisory',            'FFZ'],
+  ['winter storm watch',        'WSWA'],
+  ['ice storm watch',           'ISWA'],
+  ['lake effect snow watch',    'LESWA'],
+  ['winter weather advisory',   'WWA'],
+  ['freezing rain advisory',    'FRA'],
+  ['wind chill advisory',       'WCVA'],
+  ['lake effect snow advisory', 'LESA'],
+  ['high wind warning',         'HWW'],
+  ['wind advisory',             'WNDADV'],
+  ['dense fog advisory',        'DFA'],
+  ['special weather statement', 'SPS'],
+  ['hazardous weather outlook', 'HWO'],
+];
+
 function _alertsWarnClass(eventName, props = {}) {
   const e = String(eventName || '').toLowerCase();
   const headline = String(props?.headline || '').toUpperCase();
@@ -3857,6 +4159,11 @@ function _alertsWarnClass(eventName, props = {}) {
   const instruction = String(props?.instruction || '').toUpperCase();
   const fullText = `${headline} ${description} ${instruction}`;
   const isPds = fullText.includes('PARTICULARLY DANGEROUS SITUATION') || /\bPDS\b/.test(fullText);
+
+  // Check winter/special table first (before tornado/severe logic)
+  for (const [substr, code] of _WINTER_SPECIAL_CLASS_TABLE) {
+    if (e.includes(substr)) return code;
+  }
 
   if (e.includes('tornado warning')) {
     const detect = _alertsParamText(props, 'tornadoDetection');
@@ -3878,6 +4185,22 @@ function _alertsWarnClass(eventName, props = {}) {
   if (e.includes('tornado watch')) return isPds ? 'TOWP' : 'TOW';
   if (e.includes('severe thunderstorm watch')) return isPds ? 'SVWP' : 'SVW';
   return '';
+}
+
+const _WARN_CATEGORY_MAP = {
+  tornado: new Set(['TOR', 'TORR', 'TORP', 'TORE', 'TOW', 'TOWP']),
+  severe:  new Set(['SVR', 'SVRC', 'SVRD', 'SVW', 'SVWP']),
+  winter:  new Set(['WSW', 'BLW', 'ISW', 'SNQ', 'WCW', 'LESW', 'FFZ', 'HFZ', 'FZW', 'WSWA', 'ISWA', 'LESWA', 'WWA', 'FRA', 'WCVA', 'LESA']),
+  special: new Set(['SPS', 'HWO', 'DFA', 'HWW', 'WNDADV']),
+  flood:   new Set(['FFW']),
+};
+
+function _warningCategory(warnClass) {
+  const code = String(warnClass || '').trim().toUpperCase();
+  for (const [cat, codes] of Object.entries(_WARN_CATEGORY_MAP)) {
+    if (codes.has(code)) return cat;
+  }
+  return 'other';
 }
 
 function _alertsParseTimeMs(value) {
@@ -4181,6 +4504,29 @@ function _warningUrgencyScore(props = {}) {
     SVRC: 780,
     SVR: 740,
     FFW: 700,
+    // Winter warnings (high priority)
+    BLW: 750,
+    WSW: 720,
+    ISW: 700,
+    WCW: 680,
+    HFZ: 660,
+    FFZ: 660,
+    FZW: 660,
+    HWW: 640,
+    SNQ: 650,
+    LESW: 620,
+    // Winter watches/advisories
+    WSWA: 580,
+    ISWA: 580,
+    LESWA: 580,
+    WWA: 560,
+    FRA: 560,
+    WCVA: 560,
+    LESA: 520,
+    WNDADV: 500,
+    DFA: 480,
+    SPS: 440,
+    HWO: 420,
   })[warnClass] ?? ({
     'FLASH FLOOD WARNING': 700,
     'SNOW SQUALL WARNING': 650,
@@ -4470,7 +4816,9 @@ function _collectWarningDashboardSnapshot() {
     if (_alertsFeatureExpired(feature, nowMs)) continue;
     const props = feature?.properties || {};
     const event = String(props?.event || props?.eventRaw || '').trim();
-    if (!event || !/warning/i.test(event)) continue;
+    const warnClassVal = String(props?._warnClass || '').trim();
+    // Include any alert that has a recognized warnClass, or falls back to old "warning" name check
+    if (!event || (!warnClassVal && !/warning/i.test(event))) continue;
 
     const id = String(feature?.id || props?.id || '').trim();
     if (!id) continue;
@@ -4482,11 +4830,13 @@ function _collectWarningDashboardSnapshot() {
     const expiresMs = _warningExpiresMs(props);
     const urgencyScore = _warningUrgencyScore(props);
 
+    const wc = String(props?._warnClass || '').trim();
     warnings.push({
       id,
       title: _alertsDashboardTitle(props),
       event,
-      warnClass: String(props?._warnClass || '').trim(),
+      warnClass: wc,
+      category: _warningCategory(wc),
       color: _warningDisplayColor(props),
       area: String(props?.areaDesc || props?.area || '').trim(),
       headline: String(props?.headline || '').trim(),
@@ -4541,31 +4891,48 @@ function _renderWarningsDropdown(snapshot = null) {
 
   emptyEl.style.display = 'none';
   listEl.style.display = 'grid';
-  listEl.innerHTML = rows.map(row => {
-    const title = row?.title || row?.event || 'Warning';
-    const code = row?.warnClass || row?.event || '';
-    const area = row?.area || row?.where || 'Area not listed';
-    const hazards = row?.hazards || row?.headline || row?.description || '--';
-    const color = String(row?.color || '#ffcc33');
-    const expiresText = _popupExpiresText(Number(row?.expiresMs) || NaN);
-    return `
-      <article class="warning-drawer-row" style="--warning-color:${_escapeHtml(color)}">
-        <div class="warning-drawer-top">
-          <div class="warning-drawer-title-wrap">
-            <div class="warning-drawer-title">${_escapeHtml(title)}</div>
-            <div class="warning-drawer-code">${_escapeHtml(code)}</div>
+
+  const _DROPDOWN_CAT_ORDER = ['tornado', 'severe', 'winter', 'special', 'flood', 'other'];
+  const _DROPDOWN_CAT_LABELS = { tornado: 'Tornado', severe: 'Severe', winter: 'Winter', special: 'Special Event', flood: 'Flood', other: 'Other' };
+  const grouped = {};
+  for (const cat of _DROPDOWN_CAT_ORDER) grouped[cat] = [];
+  for (const row of rows) {
+    const cat = row?.category || _warningCategory(row?.warnClass);
+    (grouped[cat] || grouped['other']).push(row);
+  }
+
+  const parts = [];
+  for (const cat of _DROPDOWN_CAT_ORDER) {
+    const catRows = grouped[cat];
+    if (!catRows || !catRows.length) continue;
+    parts.push(`<div class="warn-drop-cat-header">${_escapeHtml(_DROPDOWN_CAT_LABELS[cat])} <span class="warn-drop-cat-count">${catRows.length}</span></div>`);
+    for (const row of catRows) {
+      const title = row?.title || row?.event || 'Warning';
+      const code = row?.warnClass || row?.event || '';
+      const area = row?.area || row?.where || 'Area not listed';
+      const hazards = row?.hazards || row?.headline || row?.description || '--';
+      const color = String(row?.color || '#ffcc33');
+      const expiresText = _popupExpiresText(Number(row?.expiresMs) || NaN);
+      parts.push(`
+        <article class="warning-drawer-row" style="--warning-color:${_escapeHtml(color)}">
+          <div class="warning-drawer-top">
+            <div class="warning-drawer-title-wrap">
+              <div class="warning-drawer-title">${_escapeHtml(title)}</div>
+              <div class="warning-drawer-code">${_escapeHtml(code)}</div>
+            </div>
+            <div class="warning-drawer-time">${_escapeHtml(expiresText)}</div>
           </div>
-          <div class="warning-drawer-time">${_escapeHtml(expiresText)}</div>
-        </div>
-        <div class="warning-drawer-area">${_escapeHtml(area)}</div>
-        <div class="warning-drawer-hazards">${_escapeHtml(hazards)}</div>
-        <div class="warning-drawer-actions">
-          <button class="warning-drawer-btn secondary" type="button" data-warning-action="product" data-warning-id="${_escapeHtml(row.id)}">Product</button>
-          <button class="warning-drawer-btn" type="button" data-warning-action="goto" data-warning-id="${_escapeHtml(row.id)}">Go To</button>
-        </div>
-      </article>
-    `;
-  }).join('');
+          <div class="warning-drawer-area">${_escapeHtml(area)}</div>
+          <div class="warning-drawer-hazards">${_escapeHtml(hazards)}</div>
+          <div class="warning-drawer-actions">
+            <button class="warning-drawer-btn secondary" type="button" data-warning-action="product" data-warning-id="${_escapeHtml(row.id)}">Product</button>
+            <button class="warning-drawer-btn" type="button" data-warning-action="goto" data-warning-id="${_escapeHtml(row.id)}">Go To</button>
+          </div>
+        </article>
+      `);
+    }
+  }
+  listEl.innerHTML = parts.join('');
 }
 
 function _emitWarningDashboardSnapshot() {
@@ -6164,158 +6531,57 @@ function _getWiseGeometry(container) {
   return geometry;
 }
 
+// ---------------------------------------------------------------------------
+// Off-main-thread frame builder via Web Worker.
+// All CPU-intensive work (trig geometry, RLE decode, vertex loop) runs in
+// radar-worker.js so the main thread stays responsive during data load.
+// ---------------------------------------------------------------------------
+let _wiseWorker = null;
+const _wiseWorkerPending = new Map(); // id → {resolve, reject}
+let _wiseWorkerIdSeq = 0;
+
+function _ensureWiseWorker() {
+  if (_wiseWorker) return _wiseWorker;
+  _wiseWorker = new Worker('./radar-worker.js');
+  _wiseWorker.onmessage = (ev) => {
+    const { id, frame, error } = ev.data;
+    const cb = _wiseWorkerPending.get(id);
+    if (!cb) return;
+    _wiseWorkerPending.delete(id);
+    if (error) cb.reject(new Error(error));
+    else cb.resolve(frame);
+  };
+  _wiseWorker.onerror = (ev) => {
+    const msg = ev?.message || 'radar worker error';
+    for (const cb of _wiseWorkerPending.values()) cb.reject(new Error(msg));
+    _wiseWorkerPending.clear();
+    _wiseWorker = null; // will be recreated on next call
+  };
+  return _wiseWorker;
+}
+
 function _buildWiseFrame(container) {
   const isPrtMultiType = String(container?.family || '').trim().toUpperCase() === 'PRT'
     && Number(container?.multiTypeCount) > 0;
-  const decoded = isPrtMultiType
-    ? decodeWiseRadarMultitype(container, container.payloadData)
-    : decodeWiseRadar(container, container.payloadData);
-  const grid = decoded.grid;
-  const typeGrid = decoded.typeGrid || null;
-  const azimuthCount = decoded.azimuthCount;
-  const gateCount = decoded.gateCount;
-  const total = azimuthCount * gateCount;
-  const precision = Math.max(1, Number(container.precision) || 0);
-  const threshold = (1 << (precision - 1)) - 1;
-  const scalarValueDenom = Math.max(1, threshold - 1);
-  const multiTypeValueDenom = Math.max(1, (1 << precision) - 2);
-  const valueDenom = isPrtMultiType ? multiTypeValueDenom : scalarValueDenom;
-  const minValue = Number.isFinite(Number(container.minValue)) ? Number(container.minValue) : 0.0;
-  const maxValue = Number.isFinite(Number(container.maxValue)) ? Number(container.maxValue) : 1.0;
-
-  let validGateCount = 0;
-  for (let i = 0; i < total; i += 1) {
-    if (grid[i] > 0) validGateCount += 1;
-  }
-
-  if (!validGateCount) {
-    return {
-      vertex_count: 0,
-      gate_count: 0,
-      source_gate_count: 0,
-      elevation: Number(container.elevation) || 0,
-      station_lat: Number(container.stationLat) || 0,
-      station_lon: Number(container.stationLon) || 0,
-      scan_time: container.scanTime,
-      product_code: container.productCode || '--',
-      decimated: false,
-      field: container.field,
-      _bufXy: new Float32Array(0),
-      _bufColor: new Uint8Array(0),
-      _bufVals: new Float32Array(0),
-      _bufTypes: new Uint8Array(0),
-    };
-  }
-
-  const stride = validGateCount > WISE_MAX_RENDER_GATES
-    ? Math.max(1, Math.ceil(validGateCount / WISE_MAX_RENDER_GATES))
-    : 1;
-  const renderGateCount = Math.ceil(validGateCount / stride);
-  const vertexCapacity = renderGateCount * 6;
-  const xy = new Float32Array(vertexCapacity * 2);
-  const rgba = new Uint8Array(vertexCapacity * 4);
-  const vals = new Float32Array(vertexCapacity);
-  const types = isPrtMultiType ? new Uint8Array(vertexCapacity) : null;
-  const colorTmp = new Uint8Array(4);
   const palette = isPrtMultiType
     ? _prepareWisePrtPalette()
     : _prepareInlinePalette(ctGetEffectivePalette(container.family));
-  const geometry = _getWiseGeometry(container);
-  const rangeEdgeCount = geometry.rangeEdgeCount;
-  const edgeXs = geometry.edgeXs;
-  const edgeYs = geometry.edgeYs;
 
-  let seenValid = 0;
-  let outGateCount = 0;
-  let vertexIndex = 0;
-  for (let ray = 0; ray < azimuthCount; ray += 1) {
-    const rowBase = ray * gateCount;
-    const edgeBase0 = ray * rangeEdgeCount;
-    const edgeBase1 = (ray + 1) * rangeEdgeCount;
-    for (let gate = 0; gate < gateCount; gate += 1) {
-      const code = grid[rowBase + gate];
-      if (code <= 0) continue;
-      if ((seenValid % stride) !== 0) {
-        seenValid += 1;
-        continue;
-      }
-      seenValid += 1;
+  // Copy payloadData so the prefetch-cache buffer is not neutered on transfer.
+  const src = container.payloadData;
+  const payloadCopy = src instanceof Uint16Array
+    ? new Uint16Array(src)
+    : new Uint8Array(src);
+  const containerMsg = { ...container, payloadData: null };
 
-      const value = minValue + (((code - 1.0) / valueDenom) * (maxValue - minValue));
-      let colorValue = value;
-      let typeCode = 0;
-      if (isPrtMultiType) {
-        const typeMask = typeGrid?.[rowBase + gate] || 1;
-        const sectionIndex = Math.max(0, Math.min(WISE_PRT_SECTION_ORDER.length - 1, Number(typeMask) - 1));
-        typeCode = sectionIndex + 1;
-        colorValue = value + (sectionIndex * WISE_MULTI_TYPE_RANGE_SPAN);
-      }
-      _writePreparedPaletteColor(palette, colorValue, colorTmp, 0);
-
-      const p00 = edgeBase0 + gate;
-      const p10 = edgeBase0 + gate + 1;
-      const p11 = edgeBase1 + gate + 1;
-      const p01 = edgeBase1 + gate;
-
-      const x00 = edgeXs[p00], y00 = edgeYs[p00];
-      const x10 = edgeXs[p10], y10 = edgeYs[p10];
-      const x11 = edgeXs[p11], y11 = edgeYs[p11];
-      const x01 = edgeXs[p01], y01 = edgeYs[p01];
-
-      const posBase = vertexIndex * 2;
-      xy[posBase + 0] = x00; xy[posBase + 1] = y00;
-      xy[posBase + 2] = x10; xy[posBase + 3] = y10;
-      xy[posBase + 4] = x11; xy[posBase + 5] = y11;
-      xy[posBase + 6] = x00; xy[posBase + 7] = y00;
-      xy[posBase + 8] = x11; xy[posBase + 9] = y11;
-      xy[posBase + 10] = x01; xy[posBase + 11] = y01;
-
-      vals[vertexIndex + 0] = value;
-      vals[vertexIndex + 1] = value;
-      vals[vertexIndex + 2] = value;
-      vals[vertexIndex + 3] = value;
-      vals[vertexIndex + 4] = value;
-      vals[vertexIndex + 5] = value;
-      if (types) {
-        types[vertexIndex + 0] = typeCode;
-        types[vertexIndex + 1] = typeCode;
-        types[vertexIndex + 2] = typeCode;
-        types[vertexIndex + 3] = typeCode;
-        types[vertexIndex + 4] = typeCode;
-        types[vertexIndex + 5] = typeCode;
-      }
-
-      const colorBase = vertexIndex * 4;
-      for (let i = 0; i < 6; i += 1) {
-        const off = colorBase + (i * 4);
-        rgba[off + 0] = colorTmp[0];
-        rgba[off + 1] = colorTmp[1];
-        rgba[off + 2] = colorTmp[2];
-        rgba[off + 3] = colorTmp[3];
-      }
-
-      vertexIndex += 6;
-      outGateCount += 1;
-    }
-  }
-
-  const usedVertexCount = vertexIndex;
-  return {
-    vertex_count: usedVertexCount,
-    gate_count: outGateCount,
-    source_gate_count: validGateCount,
-    elevation: Number(container.elevation) || 0,
-    station_lat: Number(container.stationLat) || 0,
-    station_lon: Number(container.stationLon) || 0,
-    scan_time: container.scanTime,
-    product_code: container.productCode || '--',
-    decimated: stride > 1,
-    field: container.field,
-    _bufXy: usedVertexCount === vertexCapacity ? xy : xy.slice(0, usedVertexCount * 2),
-    _bufColor: usedVertexCount === vertexCapacity ? rgba : rgba.slice(0, usedVertexCount * 4),
-    _bufVals: usedVertexCount === vertexCapacity ? vals : vals.slice(0, usedVertexCount),
-    _bufTypes: !types ? null : (usedVertexCount === vertexCapacity ? types : types.slice(0, usedVertexCount)),
-  };
+  const id = ++_wiseWorkerIdSeq;
+  return new Promise((resolve, reject) => {
+    _wiseWorkerPending.set(id, { resolve, reject });
+    _ensureWiseWorker().postMessage(
+      { id, container: containerMsg, payloadData: payloadCopy, palette },
+      [payloadCopy.buffer],  // transfer the copy — zero-copy into worker
+    );
+  });
 }
 
 async function _decodeWiseKey(key, opts = {}) {
@@ -6357,7 +6623,8 @@ async function _decodeWiseKey(key, opts = {}) {
   _clearWiseNotFound(key);
   _clearWiseNotFound(url);
   const container = parseWiseContainer(bytes, stationId, family, fileName);
-  const frame = _buildWiseFrame(container);
+  const frame = await _buildWiseFrame(container);
+  _schedulePredictiveWisePrefetch(stationId, family, tilt, fileName);
   if (!opts?.priority) {
     await new Promise(resolve => requestAnimationFrame(resolve));
   }
@@ -6410,8 +6677,8 @@ let _rgProgAttribs = null;
 
 // Maximum vertices to upload per render frame for the chunked GPU upload path.
 // Keeps each bufferSubData call well within the 16 ms frame budget even on
-// slow integrated graphics (~6.4 MB per chunk across all three buffers).
-const _UPLOAD_CHUNK_VERTS = 40_000;
+// slow integrated graphics (~320 KB per chunk across all three buffers).
+const _UPLOAD_CHUNK_VERTS = 20_000;
 
 class RadarGateLayer {
   // u_sweep_mode: 0=normal, 1=reveal new scan (discard az>sweep_deg), 2=erase old scan (discard az<=sweep_deg)
@@ -6428,12 +6695,25 @@ class RadarGateLayer {
     this.posBuffer = null;
     this.colorBuffer = null;
     this.valBuffer = null;
+    this._posByteLen = 0;
+    this._colorByteLen = 0;
+    this._valByteLen = 0;
     this._minValue = -9999.0;
     this._sweepDeg = 0;      // current sweep angle (0–360)
     this._stationX = 0;      // station Mercator x
     this._stationY = 0;      // station Mercator y
     this._visible = false;   // controlled by setVisible(); hidden pool layers still upload to GPU
     this._loadedData = null; // reference to the frame object currently in GPU buffers
+    this._onSwap = null;     // fired once when the next back→front swap completes
+
+    // Back buffers: new frame data uploads here while front buffers keep drawing
+    // the current frame uninterrupted.  Swapped atomically when upload completes.
+    this._posBufferBack   = null;
+    this._colorBufferBack = null;
+    this._valBufferBack   = null;
+    this._posByteLenBack   = 0;
+    this._colorByteLenBack = 0;
+    this._valByteLenBack   = 0;
   }
 
   onAdd(map, gl) {
@@ -6518,30 +6798,39 @@ class RadarGateLayer {
     this.posBuffer   = gl.createBuffer();
     this.colorBuffer = gl.createBuffer();
     this.valBuffer   = gl.createBuffer();
+    this._posBufferBack   = gl.createBuffer();
+    this._colorBufferBack = gl.createBuffer();
+    this._valBufferBack   = gl.createBuffer();
   }
 
   onRemove(_map, gl) {
-    if (this.posBuffer)   gl.deleteBuffer(this.posBuffer);
-    if (this.colorBuffer) gl.deleteBuffer(this.colorBuffer);
-    if (this.valBuffer)   gl.deleteBuffer(this.valBuffer);
+    if (this.posBuffer)        gl.deleteBuffer(this.posBuffer);
+    if (this.colorBuffer)      gl.deleteBuffer(this.colorBuffer);
+    if (this.valBuffer)        gl.deleteBuffer(this.valBuffer);
+    if (this._posBufferBack)   gl.deleteBuffer(this._posBufferBack);
+    if (this._colorBufferBack) gl.deleteBuffer(this._colorBufferBack);
+    if (this._valBufferBack)   gl.deleteBuffer(this._valBufferBack);
     // Do NOT delete this.program — it is the shared module-level _rgProg
     // and must outlive this individual layer instance.
     this.vertexCount = 0;
   }
 
-  setFrame(frame) {
-    // If this exact frame object is already in GPU, nothing to do.
+  setFrame(frame, onReady = null) {
+    // If this exact frame object is already in GPU, fire callback immediately.
     if (frame && this._loadedData === frame) {
       if (this._visible) this.map?.triggerRepaint();
+      if (onReady) onReady();
       return;
     }
     this._loadedData = frame || null;
+    this._onSwap = null; // cancel any pending swap callback for the previous upload
 
     const vertexCount = Number(frame?.vertex_count || 0);
     if (!vertexCount) {
       this._pending = null;
       this.vertexCount = 0;
       this.map?.triggerRepaint();
+      if (onReady) onReady();
       return;
     }
 
@@ -6553,14 +6842,16 @@ class RadarGateLayer {
     if (xy.length !== vertexCount * 2) throw new Error('Backend triangle position payload mismatch');
     if (colors.length !== vertexCount * 4) throw new Error('Backend triangle color payload mismatch');
 
-    const replaceVisibleFrame = this._visible && this.vertexCount > 0;
+    const replaceVisibleFrame = false; // Always use chunked upload to prevent main thread lag
     this._pending = { vertexCount, xy, colors, valData, _offset: 0, _immediate: replaceVisibleFrame };
+    this._onSwap = onReady || null;
     this.map?.triggerRepaint();
   }
 
   clearFrame() {
     this._pending = null;
     this._loadedData = null;
+    this._onSwap = null;
     this.vertexCount = 0;
     this.map?.triggerRepaint();
   }
@@ -6601,60 +6892,89 @@ class RadarGateLayer {
     return (this._loadedData === frame) && !this._pending;
   }
 
+  // Atomically promote back buffers to front.  Called once per frame when the
+  // last upload chunk completes — the old scan is visible right up to this point.
+  _swapBuffers(vertexCount) {
+    [this.posBuffer,   this._posBufferBack]   = [this._posBufferBack,   this.posBuffer];
+    [this.colorBuffer, this._colorBufferBack] = [this._colorBufferBack, this.colorBuffer];
+    [this.valBuffer,   this._valBufferBack]   = [this._valBufferBack,   this.valBuffer];
+    [this._posByteLen,   this._posByteLenBack]   = [this._posByteLenBack,   this._posByteLen];
+    [this._colorByteLen, this._colorByteLenBack] = [this._colorByteLenBack, this._colorByteLen];
+    [this._valByteLen,   this._valByteLenBack]   = [this._valByteLenBack,   this._valByteLen];
+    this.vertexCount = vertexCount;
+    const cb = this._onSwap;
+    this._onSwap = null;
+    this.map?.triggerRepaint();
+    if (cb) cb();
+  }
+
   render(gl, matrix) {
     // Upload pending frame data to GPU in fixed-size chunks spread across
     // multiple render frames.  This prevents the monolithic gl.bufferData()
     // call from stalling the render thread for 2–3 s when a large frame
     // (~40 MB across three buffers) arrives for a new product combo.
     //
-    // On the first chunk we allocate GPU memory via bufferData(size) which is
-    // fast (no data copy).  Subsequent chunks use bufferSubData() which avoids
-    // the GPU synchronization stall that bufferData(data) would cause.
-    // vertexCount stays at 0 while the upload is in progress so we never
-    // attempt to draw with a partially-filled buffer.
+    // New data is uploaded to the BACK buffers while the FRONT buffers keep
+    // serving the previous frame uninterrupted — vertexCount is never zeroed
+    // during an upload.  When the last chunk lands, _swapBuffers() promotes
+    // back → front atomically so the new scan appears in one render tick.
     if (this._pending) {
       const { vertexCount, xy, colors, valData, _immediate } = this._pending;
       const offset = this._pending._offset;
       const end    = Math.min(offset + _UPLOAD_CHUNK_VERTS, vertexCount);
 
       if (_immediate) {
-        gl.bindBuffer(gl.ARRAY_BUFFER, this.posBuffer);
+        // Full immediate upload to back buffer, then swap.
+        gl.bindBuffer(gl.ARRAY_BUFFER, this._posBufferBack);
         gl.bufferData(gl.ARRAY_BUFFER, xy, gl.DYNAMIC_DRAW);
-        gl.bindBuffer(gl.ARRAY_BUFFER, this.colorBuffer);
+        this._posByteLenBack = xy.byteLength;
+        gl.bindBuffer(gl.ARRAY_BUFFER, this._colorBufferBack);
         gl.bufferData(gl.ARRAY_BUFFER, colors, gl.DYNAMIC_DRAW);
-        gl.bindBuffer(gl.ARRAY_BUFFER, this.valBuffer);
+        this._colorByteLenBack = colors.byteLength;
+        gl.bindBuffer(gl.ARRAY_BUFFER, this._valBufferBack);
         gl.bufferData(gl.ARRAY_BUFFER, valData, gl.DYNAMIC_DRAW);
+        this._valByteLenBack = valData.byteLength;
         this._pending = null;
-        this.vertexCount = vertexCount;
-      } else if (offset === 0) {
-        // First chunk: allocate full-size GPU buffers (zeroed, no data copy).
-        this.vertexCount = 0;
-        gl.bindBuffer(gl.ARRAY_BUFFER, this.posBuffer);
-        gl.bufferData(gl.ARRAY_BUFFER, xy.byteLength, gl.DYNAMIC_DRAW);
-        gl.bindBuffer(gl.ARRAY_BUFFER, this.colorBuffer);
-        gl.bufferData(gl.ARRAY_BUFFER, colors.byteLength, gl.DYNAMIC_DRAW);
-        gl.bindBuffer(gl.ARRAY_BUFFER, this.valBuffer);
-        gl.bufferData(gl.ARRAY_BUFFER, valData.byteLength, gl.DYNAMIC_DRAW);
-      }
+        this._swapBuffers(vertexCount);
+      } else {
+        if (offset === 0) {
+          // First chunk: size the back buffers.  Front buffers are untouched
+          // so the current scan keeps drawing without interruption.
+          if (this._posByteLenBack !== xy.byteLength) {
+            gl.bindBuffer(gl.ARRAY_BUFFER, this._posBufferBack);
+            gl.bufferData(gl.ARRAY_BUFFER, xy.byteLength, gl.DYNAMIC_DRAW);
+            this._posByteLenBack = xy.byteLength;
+          }
+          if (this._colorByteLenBack !== colors.byteLength) {
+            gl.bindBuffer(gl.ARRAY_BUFFER, this._colorBufferBack);
+            gl.bufferData(gl.ARRAY_BUFFER, colors.byteLength, gl.DYNAMIC_DRAW);
+            this._colorByteLenBack = colors.byteLength;
+          }
+          if (this._valByteLenBack !== valData.byteLength) {
+            gl.bindBuffer(gl.ARRAY_BUFFER, this._valBufferBack);
+            gl.bufferData(gl.ARRAY_BUFFER, valData.byteLength, gl.DYNAMIC_DRAW);
+            this._valByteLenBack = valData.byteLength;
+          }
+        }
 
-      // Transfer this chunk.  Byte offsets:
-      //   posBuffer   — 2 float32 per vertex ? 8 bytes/vertex
-      //   colorBuffer — 4 uint8  per vertex ? 4 bytes/vertex
-      //   valBuffer   — 1 float32 per vertex ? 4 bytes/vertex
-      if (!_immediate) {
-        gl.bindBuffer(gl.ARRAY_BUFFER, this.posBuffer);
+        // Transfer this chunk to back buffers.  Byte offsets:
+        //   posBuffer   — 2 float32 per vertex → 8 bytes/vertex
+        //   colorBuffer — 4 uint8  per vertex → 4 bytes/vertex
+        //   valBuffer   — 1 float32 per vertex → 4 bytes/vertex
+        gl.bindBuffer(gl.ARRAY_BUFFER, this._posBufferBack);
         gl.bufferSubData(gl.ARRAY_BUFFER, offset * 8, xy.subarray(offset * 2, end * 2));
-        gl.bindBuffer(gl.ARRAY_BUFFER, this.colorBuffer);
+        gl.bindBuffer(gl.ARRAY_BUFFER, this._colorBufferBack);
         gl.bufferSubData(gl.ARRAY_BUFFER, offset * 4, colors.subarray(offset * 4, end * 4));
-        gl.bindBuffer(gl.ARRAY_BUFFER, this.valBuffer);
+        gl.bindBuffer(gl.ARRAY_BUFFER, this._valBufferBack);
         gl.bufferSubData(gl.ARRAY_BUFFER, offset * 4, valData.subarray(offset, end));
 
         if (end < vertexCount) {
           this._pending._offset = end;
           this.map?.triggerRepaint(); // schedule next chunk
         } else {
+          // Upload complete — swap back → front.  Old scan displayed right up to this tick.
           this._pending = null;
-          this.vertexCount = vertexCount; // upload complete — arm the draw
+          this._swapBuffers(vertexCount);
         }
       }
     }
@@ -6795,7 +7115,7 @@ class SweepLayer {
   }
 }
 
-function applyRadarFrame(data, frameKey = '') {
+function applyRadarFrame(data, frameKey = '', onFrameVisible = null) {
   if (!('vertex_count' in data)) {
     throw new Error('Backend payload mismatch. Rebuild backend and app together.');
   }
@@ -6810,7 +7130,7 @@ function applyRadarFrame(data, frameKey = '') {
   const minVal = _paneMinValue(family);
   radarLayer.setMinValue(minVal);
   radarLayerSweep?.setMinValue(minVal);
-  radarLayer.setFrame(data);
+  radarLayer.setFrame(data, onFrameVisible);
   displayedPrimaryComboKey = ck;
   displayedPrimaryFamily = family;
 }
@@ -8542,7 +8862,13 @@ map.on('load', () => {
 
   map.on('click', 'stations-dot', e => {
     if (drawMode) return;
-    selectStation(e.features[0].properties.id);
+    const stationId = e.features[0].properties.id;
+    selectStation(stationId);
+    // If SPC overlay is visible and the click falls within an SPC polygon, also open the viewer
+    if (spcVisible) {
+      const spcHit = map.queryRenderedFeatures(e.point, { layers: ['spc-base-fill'] });
+      if (spcHit.length > 0) openSpcViewer(spcDay, spcType);
+    }
   });
 
   map.on('mousemove', e => _updateInspectorPointer(map, e, 1));
@@ -9483,9 +9809,8 @@ function showFrame(s3key) {
   if (!data) return;
   if (String(s3key || '').startsWith('L2:')) _setActiveL2AvailableProducts(data?.l2_available_products);
   else _setActiveL2AvailableProducts(null);
-  applyRadarFrame(data, s3key);
+  applyRadarFrame(data, s3key, () => showFrameMeta(s3key, data));
   applyFilter();
-  showFrameMeta(s3key, data);
   updateInspectorReadout();
   if (_stationLoadActive) {
     const vk = viewedKey();
@@ -10320,7 +10645,34 @@ function syncWarningPrefsUi() {
     return { label, input };
   };
 
-  WARNING_PREF_CONFIG.forEach(meta => {
+  const _PREF_CATEGORY_ORDER = ['tornado', 'severe', 'winter', 'special', 'flood', 'other'];
+  const _PREF_CATEGORY_LABELS = { tornado: 'Tornado', severe: 'Severe', winter: 'Winter', special: 'Special Event', flood: 'Flood', other: 'Other' };
+
+  // Group config items by category, preserving within-group order
+  const _prefGroups = {};
+  for (const cat of _PREF_CATEGORY_ORDER) _prefGroups[cat] = [];
+  for (const meta of WARNING_PREF_CONFIG) {
+    const cat = _warningCategory(meta.id);
+    (_prefGroups[cat] || _prefGroups['other']).push(meta);
+  }
+
+  const _orderedPrefItems = [];
+  for (const cat of _PREF_CATEGORY_ORDER) {
+    const items = _prefGroups[cat];
+    if (!items || !items.length) continue;
+    _orderedPrefItems.push({ _isCatHeader: true, cat });
+    for (const meta of items) _orderedPrefItems.push(meta);
+  }
+
+  for (const item of _orderedPrefItems) {
+    if (item._isCatHeader) {
+      const header = document.createElement('div');
+      header.className = 'warning-pref-category-header';
+      header.textContent = _PREF_CATEGORY_LABELS[item.cat] || item.cat;
+      warningSettingsList.appendChild(header);
+      continue;
+    }
+    const meta = item;
     const pref = _warningPrefForClass(meta.id);
     const card = document.createElement('div');
     card.className = 'warning-setting-card';
@@ -10442,7 +10794,7 @@ function syncWarningPrefsUi() {
     card.appendChild(top);
     card.appendChild(bottom);
     warningSettingsList.appendChild(card);
-  });
+  }
 }
 
 if (cameraFilterBtn) {
@@ -10528,6 +10880,14 @@ document.addEventListener('keydown', e => {
     setAppUpdateModalOpen(false);
   }
 });
+
+// SPC viewer wiring
+document.getElementById('spc-viewer-close')?.addEventListener('click', closeSpcViewer);
+document.getElementById('spc-viewer-overlay')?.addEventListener('click', e => {
+  if (e.target === document.getElementById('spc-viewer-overlay')) closeSpcViewer();
+});
+document.getElementById('spc-viewer-prev')?.addEventListener('click', () => _spcViewerNavigate(-1));
+document.getElementById('spc-viewer-next')?.addEventListener('click', () => _spcViewerNavigate(1));
 
 warningPrefsClose?.addEventListener('click', () => setWarningPrefsOpen(false));
 warningPrefsOverlay?.addEventListener('click', e => {
@@ -10657,7 +11017,7 @@ function syncAppUpdateUi() {
   }
   if (appUpdateCopyEl) {
     appUpdateCopyEl.textContent = appUpdateInfo
-      ? 'A newer version is available on GitHub Releases.'
+      ? 'A newer version is available and can be installed now.'
       : 'Check GitHub Releases for a newer version of the app.';
   }
   if (appUpdateNotesEl) {
@@ -10669,10 +11029,8 @@ function syncAppUpdateUi() {
     appUpdateCheckBtn.textContent = appUpdateBusy ? 'Checking...' : 'Check';
   }
   if (appUpdateInstallBtn) {
-    appUpdateInstallBtn.disabled = !appUpdateInfo || appUpdateBusy;
-    appUpdateInstallBtn.textContent = appUpdateInfo
-      ? (appUpdateInfo.downloadUrl === appUpdateInfo.releaseUrl ? 'Open Release' : 'Download')
-      : 'Download';
+    appUpdateInstallBtn.disabled = !(Number(appUpdateInfo?.assetId || 0) > 0 && String(appUpdateInfo?.assetName || '').trim()) || appUpdateBusy;
+    appUpdateInstallBtn.textContent = 'Install';
   }
   if (appUpdateLaterBtn) {
     appUpdateLaterBtn.disabled = appUpdateBusy;
@@ -10690,10 +11048,11 @@ function applyAppUpdateCheckResponse(res, { openModalOnAvailable = true } = {}) 
   if (res?.status === 'available' && res.update) {
     appUpdateInfo = res.update;
     setAppUpdateStatus(`Update ${res.update.version} available`, 'success');
-    setAppUpdatePhase('Available on GitHub');
-    setAppUpdateProgress(null, null, res.update.downloadUrl === res.update.releaseUrl
-      ? 'Open the release page to download the installer.'
-      : 'Download the latest installer from GitHub Releases.');
+    const hasInstaller = Number(res.update.assetId || 0) > 0 && String(res.update.assetName || '').trim();
+    setAppUpdatePhase(hasInstaller ? 'Ready to install' : 'Installer unavailable');
+    setAppUpdateProgress(null, null, hasInstaller
+      ? 'Install downloads the latest Windows installer and closes the app.'
+      : 'This release does not include a direct Windows installer asset.');
     if (openModalOnAvailable) {
       setSettingsOpen(false);
       setInfoPopupOpen(false);
@@ -10761,10 +11120,7 @@ async function checkForAppUpdate({ openModalOnAvailable = true } = {}) {
   syncAppUpdateUi();
 
   try {
-    const currentVersion = String(await invoke('get_app_version'));
-    const raw = await _fetchTextViaTauri(APP_UPDATE_LATEST_API_URL, { timeoutMs: 10000 });
-    const release = JSON.parse(raw);
-    const res = buildAppUpdateResponse(currentVersion, release);
+    const res = await invoke('check_app_update');
     applyAppUpdateCheckResponse(res, { openModalOnAvailable });
   } catch (err) {
     appUpdateInfo = null;
@@ -10781,27 +11137,32 @@ async function checkForAppUpdate({ openModalOnAvailable = true } = {}) {
 
 async function openAppUpdateDownload() {
   if (appUpdateBusy || !appUpdateInfo) return;
-  const targetUrl = String(appUpdateInfo.downloadUrl || appUpdateInfo.releaseUrl || '').trim();
-  if (!targetUrl) {
-    setAppUpdateStatus('No download URL available', 'error');
+  const assetId = Number(appUpdateInfo.assetId || 0);
+  const assetName = String(appUpdateInfo.assetName || '').trim();
+  if (!assetId || !assetName) {
+    setAppUpdateStatus('No installer download available', 'error');
     setAppUpdatePhase('Unavailable');
-    setAppUpdateProgress(null, null, 'This release does not include a downloadable installer.');
+    setAppUpdateProgress(null, null, 'This private release does not include a direct Windows installer asset.');
     syncAppUpdateUi();
     return;
   }
 
   appUpdateBusy = true;
-  setAppUpdateStatus(`Opening ${appUpdateInfo.version}...`, 'success');
-  setAppUpdatePhase(appUpdateInfo.downloadUrl === appUpdateInfo.releaseUrl ? 'Opening release' : 'Opening download');
-  setAppUpdateProgress(null, null, 'Opening GitHub in your browser...');
+  setAppUpdateStatus(`Installing ${appUpdateInfo.version}...`, 'success');
+  setAppUpdatePhase('Downloading installer');
+  setAppUpdateProgress(0, 1, 'Downloading the installer to your temp folder...');
   syncAppUpdateUi();
 
   try {
-    await invoke('open_app_update_url', { url: targetUrl });
+    await invoke('install_app_update', {
+      url: JSON.stringify({ assetId, assetName }),
+    });
+    setAppUpdatePhase('Closing app');
+    setAppUpdateProgress(1, 1, 'Installer launched. Closing the app...');
     setAppUpdateModalOpen(false);
   } catch (err) {
-    setAppUpdateStatus('Could not open download', 'error');
-    setAppUpdatePhase('Open failed');
+    setAppUpdateStatus('Could not install update', 'error');
+    setAppUpdatePhase('Install failed');
     setAppUpdateProgress(null, null, err?.message || String(err));
   } finally {
     appUpdateBusy = false;
@@ -11823,12 +12184,20 @@ document.addEventListener('keydown', e => {
   }
   if (!typing && e.key === 'ArrowLeft') {
     e.preventDefault();
-    _startHistoryHold(-1);
+    if (document.getElementById('spc-viewer-overlay')?.classList.contains('open')) {
+      _spcViewerNavigate(-1);
+    } else {
+      _startHistoryHold(-1);
+    }
     return;
   }
   if (!typing && e.key === 'ArrowRight') {
     e.preventDefault();
-    _startHistoryHold(1);
+    if (document.getElementById('spc-viewer-overlay')?.classList.contains('open')) {
+      _spcViewerNavigate(1);
+    } else {
+      _startHistoryHold(1);
+    }
     return;
   }
   if (!typing && !e.ctrlKey && !e.metaKey && !e.altKey && (e.key === 'd' || e.key === 'D')) {
@@ -11842,6 +12211,10 @@ document.addEventListener('keydown', e => {
     return;
   }
   if (e.key === 'Escape') {
+    if (document.getElementById('spc-viewer-overlay')?.classList.contains('open')) {
+      closeSpcViewer();
+      return;
+    }
     if (warningPrefsOverlay?.classList.contains('open')) {
       setWarningPrefsOpen(false);
       return;
@@ -12166,6 +12539,7 @@ function selectStation(id, opts = {}) {
   }
 
   stopPolling();
+  _syncProcessedWiseRealtime(); // Ensure WeatherWise websocket connects for terminal radars
   requestAnimationFrame(() => {
     loadAll(stationId, true);
     pollTimer = setInterval(() => loadAll(stationId, false), activeRadarPollMs());

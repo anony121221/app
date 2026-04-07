@@ -152,6 +152,24 @@
     ].map(v => String(v || '')).join(' ').toLowerCase();
   }
 
+  const _DASH_CATEGORY_MAP = {
+    tornado: new Set(['TOR', 'TORR', 'TORP', 'TORE', 'TOW', 'TOWP']),
+    severe:  new Set(['SVR', 'SVRC', 'SVRD', 'SVW', 'SVWP']),
+    winter:  new Set(['WSW', 'BLW', 'ISW', 'SNQ', 'WCW', 'LESW', 'FFZ', 'HFZ', 'FZW', 'WSWA', 'ISWA', 'LESWA', 'WWA', 'FRA', 'WCVA', 'LESA']),
+    special: new Set(['SPS', 'HWO', 'DFA', 'HWW', 'WNDADV']),
+    flood:   new Set(['FFW']),
+  };
+
+  function warningCategory(row) {
+    return row?.category || (() => {
+      const code = String(row?.warnClass || '').trim().toUpperCase();
+      for (const [cat, codes] of Object.entries(_DASH_CATEGORY_MAP)) {
+        if (codes.has(code)) return cat;
+      }
+      return 'other';
+    })();
+  }
+
   function warningMatchesFilter(row) {
     if (filterMode === 'tornado') {
       return String(row?.warnClass || '').toUpperCase().startsWith('TOR')
@@ -161,6 +179,9 @@
       return String(row?.warnClass || '').toUpperCase().startsWith('SVR')
         || /severe thunderstorm warning/i.test(String(row?.event || ''));
     }
+    if (filterMode === 'winter') return warningCategory(row) === 'winter';
+    if (filterMode === 'special') return warningCategory(row) === 'special';
+    if (filterMode === 'flood') return warningCategory(row) === 'flood';
     return true;
   }
 
@@ -559,6 +580,29 @@
           min-height: 0;
         }
       }
+      .warning-category-header {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        padding: 12px 18px 4px;
+        list-style: none;
+      }
+      .warning-cat-label {
+        font-size: 10px;
+        font-weight: 700;
+        letter-spacing: 0.14em;
+        text-transform: uppercase;
+        color: #6a7585;
+      }
+      .warning-cat-count {
+        background: #1c2028;
+        color: #8a96a6;
+        font-size: 9px;
+        font-weight: 700;
+        padding: 1px 6px;
+        border-radius: 999px;
+        letter-spacing: 0.04em;
+      }
     `;
     document.head.appendChild(style);
   }
@@ -577,14 +621,33 @@
     if (warnClass === 'FFW' || event === 'FLASH FLOOD WARNING') return '#21c55d';
     if (event === 'FLOOD WARNING') return '#18a999';
     if (event === 'SPECIAL MARINE WARNING') return '#2cc6ff';
-    if (event === 'SNOW SQUALL WARNING') return '#7ccfff';
+    // Winter warnings
+    if (warnClass === 'BLW') return '#3a6abf';
+    if (warnClass === 'WSW') return '#4878c8';
+    if (warnClass === 'ISW') return '#5c4fa8';
+    if (warnClass === 'SNQ' || event === 'SNOW SQUALL WARNING') return '#7ccfff';
+    if (warnClass === 'WCW') return '#6a8fbb';
+    if (warnClass === 'LESW') return '#5aa8cc';
+    if (warnClass === 'HFZ') return '#2a5aad';
+    if (warnClass === 'FFZ' || warnClass === 'FZW') return '#3a6aad';
+    if (warnClass === 'WSWA' || warnClass === 'ISWA' || warnClass === 'LESWA') return '#335e94';
+    if (warnClass === 'WWA' || warnClass === 'FRA' || warnClass === 'WCVA' || warnClass === 'LESA') return '#3a5880';
+    // Special event
+    if (warnClass === 'HWW') return '#8a6400';
+    if (warnClass === 'WNDADV') return '#6e5830';
+    if (warnClass === 'DFA') return '#404040';
+    if (warnClass === 'SPS') return '#808000';
+    if (warnClass === 'HWO') return '#707020';
     return '#2a2a2a';
   }
 
   function filterLabel() {
-    if (filterMode === 'tornado') return 'Tornado Warnings';
-    if (filterMode === 'severe') return 'Severe Warnings';
-    return 'All Warnings';
+    if (filterMode === 'tornado') return 'Tornado';
+    if (filterMode === 'severe') return 'Severe';
+    if (filterMode === 'winter') return 'Winter';
+    if (filterMode === 'special') return 'Special Event';
+    if (filterMode === 'flood') return 'Flood';
+    return 'All';
   }
 
   function sortLabel() {
@@ -608,6 +671,27 @@
       SVRC: 780,
       SVR: 740,
       FFW: 700,
+      BLW: 750,
+      WSW: 720,
+      ISW: 700,
+      WCW: 680,
+      HFZ: 660,
+      FFZ: 660,
+      FZW: 660,
+      HWW: 640,
+      SNQ: 650,
+      LESW: 620,
+      WSWA: 580,
+      ISWA: 580,
+      LESWA: 580,
+      WWA: 560,
+      FRA: 560,
+      WCVA: 560,
+      LESA: 520,
+      WNDADV: 500,
+      DFA: 480,
+      SPS: 440,
+      HWO: 420,
     })[warnClass] ?? ({
       'FLASH FLOOD WARNING': 700,
       'SNOW SQUALL WARNING': 650,
@@ -689,9 +773,12 @@
                 <span id="dashboard-filter-label">All Warnings</span>
               </button>
               <div class="dashboard-filter-menu" id="dashboard-filter-menu">
-                <button class="dashboard-filter-option active" type="button" data-filter="all">All Warnings</button>
-                <button class="dashboard-filter-option" type="button" data-filter="tornado">Tornado Warnings</button>
-                <button class="dashboard-filter-option" type="button" data-filter="severe">Severe Warnings</button>
+                <button class="dashboard-filter-option active" type="button" data-filter="all">All</button>
+                <button class="dashboard-filter-option" type="button" data-filter="tornado">Tornado</button>
+                <button class="dashboard-filter-option" type="button" data-filter="severe">Severe</button>
+                <button class="dashboard-filter-option" type="button" data-filter="winter">Winter</button>
+                <button class="dashboard-filter-option" type="button" data-filter="special">Special Event</button>
+                <button class="dashboard-filter-option" type="button" data-filter="flood">Flood</button>
               </div>
             </div>
           </div>
@@ -805,33 +892,53 @@
       ? 'No warnings match the current search or filter.'
       : 'No active warnings.';
 
+    const _CAT_ORDER = ['tornado', 'severe', 'winter', 'special', 'flood', 'other'];
+    const _CAT_LABELS = { tornado: 'Tornado', severe: 'Severe', winter: 'Winter', special: 'Special Event', flood: 'Flood', other: 'Other' };
+    // Group rows by category (preserve sort order within each group)
+    const grouped = {};
+    for (const cat of _CAT_ORDER) grouped[cat] = [];
     for (const row of rows) {
-      const expanded = expandedWarningIds.has(row.id);
-      const flashUntilMs = Number(warningFlashUntilMs.get(row.id) || 0);
-      const isFlashing = flashUntilMs > Date.now();
-      const li = document.createElement('li');
-      li.className = `warning-item${isFlashing ? ' warning-flash' : ''}`;
-      li.style.setProperty('--row-border', warningBorderColor(row));
-      li.innerHTML = `
-        <div class="warning-main">
-          <div class="warning-title-row">
-            <div class="warning-title">${escapeHtml(row.title || row.event || 'Warning')}</div>
+      const cat = warningCategory(row);
+      (grouped[cat] || grouped['other']).push(row);
+    }
+    const showCategories = filterMode === 'all' && rows.length > 0;
+    for (const cat of _CAT_ORDER) {
+      const catRows = grouped[cat];
+      if (!catRows || !catRows.length) continue;
+      if (showCategories) {
+        const header = document.createElement('li');
+        header.className = 'warning-category-header';
+        header.innerHTML = `<span class="warning-cat-label">${escapeHtml(_CAT_LABELS[cat])}</span><span class="warning-cat-count">${catRows.length}</span>`;
+        listEl.appendChild(header);
+      }
+      for (const row of catRows) {
+        const expanded = expandedWarningIds.has(row.id);
+        const flashUntilMs = Number(warningFlashUntilMs.get(row.id) || 0);
+        const isFlashing = flashUntilMs > Date.now();
+        const li = document.createElement('li');
+        li.className = `warning-item${isFlashing ? ' warning-flash' : ''}`;
+        li.style.setProperty('--row-border', warningBorderColor(row));
+        li.innerHTML = `
+          <div class="warning-main">
+            <div class="warning-title-row">
+              <div class="warning-title">${escapeHtml(row.title || row.event || 'Warning')}</div>
+            </div>
+            ${isMeaningful(row.headline) ? `<div class="warning-headline">${escapeHtml(row.headline)}</div>` : ''}
+            <div class="warning-area">${escapeHtml(row.area || 'Area not listed')}</div>
+            <div class="warning-hazards"><span class="warning-hazards-label">Hazards</span>${escapeHtml(row.hazards || '--')}</div>
+            <div class="warning-times">
+              <span>Issued: ${escapeHtml(formatAbsolute(row.sent))}</span>
+              <span class="warning-expires" data-expires-ms="${escapeHtml(row.expiresMs)}">${escapeHtml(renderExpiresText(Number(row.expiresMs) || NaN))}</span>
+            </div>
+            ${expanded ? renderDetailRows(row) : ''}
           </div>
-          ${isMeaningful(row.headline) ? `<div class="warning-headline">${escapeHtml(row.headline)}</div>` : ''}
-          <div class="warning-area">${escapeHtml(row.area || 'Area not listed')}</div>
-          <div class="warning-hazards"><span class="warning-hazards-label">Hazards</span>${escapeHtml(row.hazards || '--')}</div>
-          <div class="warning-times">
-            <span>Issued: ${escapeHtml(formatAbsolute(row.sent))}</span>
-            <span class="warning-expires" data-expires-ms="${escapeHtml(row.expiresMs)}">${escapeHtml(renderExpiresText(Number(row.expiresMs) || NaN))}</span>
+          <div class="warning-actions">
+            <button class="warning-info" type="button" data-warning-info="${escapeHtml(row.id)}" aria-expanded="${expanded ? 'true' : 'false'}">i</button>
+            <button class="warning-go" type="button" data-warning-id="${escapeHtml(row.id)}">Go To</button>
           </div>
-          ${expanded ? renderDetailRows(row) : ''}
-        </div>
-        <div class="warning-actions">
-          <button class="warning-info" type="button" data-warning-info="${escapeHtml(row.id)}" aria-expanded="${expanded ? 'true' : 'false'}">i</button>
-          <button class="warning-go" type="button" data-warning-id="${escapeHtml(row.id)}">Go To</button>
-        </div>
-      `;
-      listEl.appendChild(li);
+        `;
+        listEl.appendChild(li);
+      }
     }
     refreshLiveTimes();
   }
