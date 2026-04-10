@@ -86,12 +86,14 @@ const EARTH_RADIUS_M = 6_371_000.0;
 const MAX_MERCATOR_LAT = 85.05112878;
 const MAP_STYLE_BLACK = 'custom://black';
 const MAP_STYLE_DARK = 'mapbox://styles/mapbox/dark-v11';
+const MAP_STYLE_GREY = 'mapbox://styles/tuftsweather/cmnr19sq6003k01qt8u28bt6g';
 const MAP_STYLE_LIGHT_GRAY = 'mapbox://styles/mapbox/light-v11';
 const MAP_STYLE_SATELLITE = 'mapbox://styles/mapbox/satellite-streets-v12';
 const DEFAULT_MAP_STYLE = MAP_STYLE_DARK;
 const MAP_STYLE_OPTIONS = [
   { id: MAP_STYLE_BLACK, label: 'Black' },
   { id: MAP_STYLE_DARK, label: 'Dark' },
+  { id: MAP_STYLE_GREY, label: 'Grey' },
   { id: MAP_STYLE_LIGHT_GRAY, label: 'Light Gray' },
   { id: MAP_STYLE_SATELLITE, label: 'Satellite' },
 ];
@@ -724,6 +726,7 @@ const SPC_LAYER_IDS = ['spc-base-fill', 'spc-base-line', 'spc-cig-fill', 'spc-ci
 const SPC_GEOJSON_CACHE = new Map();
 
 const MESO_DISCUSSION_URL = 'https://mapservices.weather.noaa.gov/vector/rest/services/outlooks/spc_mesoscale_discussion/MapServer/0/query?where=1%3D1&outFields=*&returnGeometry=true&f=geojson';
+const SPC_MESO_INDEX_URL = 'https://www.spc.noaa.gov/products/md/';
 const MESO_EMPTY_GEOJSON = { type: 'FeatureCollection', features: [] };
 const MESO_LAYER_IDS = ['meso-discussions-line'];
 const SPC_WATCHES_URL = 'https://mesonet.agron.iastate.edu/json/spcwatch.py';
@@ -1571,6 +1574,17 @@ let _spcViewerTypes = [];
 let _spcViewerIdx = 0;
 const _spcDiscussionCache = {};
 const _spcImageCache = new Map(); // url → data URL
+let _spcViewerMode = 'outlook';
+let _spcViewerFacts = [];
+let _spcViewerDocKey = '';
+
+function _spcImageMimeType(imageUrl) {
+  const url = String(imageUrl || '').toLowerCase();
+  if (url.includes('.gif')) return 'image/gif';
+  if (url.includes('.jpg') || url.includes('.jpeg')) return 'image/jpeg';
+  if (url.includes('.webp')) return 'image/webp';
+  return 'image/png';
+}
 
 async function _fetchSpcImageDataUrl(imageUrl) {
   if (_spcImageCache.has(imageUrl)) return _spcImageCache.get(imageUrl);
@@ -1578,7 +1592,7 @@ async function _fetchSpcImageDataUrl(imageUrl) {
   if (!res || res.status < 200 || res.status >= 400 || !res.body_base64) {
     throw Object.assign(new Error(`HTTP ${res?.status ?? '?'}`), { status: res?.status ?? 0 });
   }
-  const dataUrl = `data:image/png;base64,${res.body_base64}`;
+  const dataUrl = `data:${_spcImageMimeType(imageUrl)};base64,${res.body_base64}`;
   _spcImageCache.set(imageUrl, dataUrl);
   return dataUrl;
 }
@@ -1622,19 +1636,105 @@ async function _fetchSpcDiscussion(day) {
   }
 }
 
+async function _fetchTextDocument(url) {
+  const key = String(url || '').trim();
+  if (!key) return '(No text available.)';
+  if (_spcDiscussionCache[key]) return _spcDiscussionCache[key];
+  try {
+    const res = await invoke('fetch_url_base64', { url: key });
+    if (!res || res.status < 200 || res.status >= 400 || !res.body_base64) {
+      throw new Error(`HTTP ${res?.status || 0}`);
+    }
+    const html = _decodeBase64Utf8(res.body_base64);
+    const parser = new DOMParser();
+    const doc = parser.parseFromString(html, 'text/html');
+    const pre = doc.querySelector('pre');
+    const text = pre
+      ? pre.textContent.trim()
+      : (doc.body?.textContent || '').replace(/\n{3,}/g, '\n\n').trim();
+    _spcDiscussionCache[key] = text || '(No discussion text found on this page.)';
+    return _spcDiscussionCache[key];
+  } catch (err) {
+    return `(Failed to load text: ${err?.message || err})`;
+  }
+}
+
+function _setSpcViewerFacts(facts = []) {
+  _spcViewerFacts = Array.isArray(facts) ? facts.filter(Boolean) : [];
+  const wrap = document.getElementById('spc-viewer-facts');
+  if (!wrap) return;
+  wrap.innerHTML = '';
+  if (!_spcViewerFacts.length) {
+    wrap.classList.remove('open');
+    return;
+  }
+  wrap.classList.add('open');
+  _spcViewerFacts.forEach(item => {
+    const label = String(item?.label || '').trim();
+    const value = String(item?.value || '').trim();
+    if (!label || !value) return;
+    const card = document.createElement('div');
+    card.className = 'spc-viewer-fact-card';
+    const labelEl = document.createElement('div');
+    labelEl.className = 'spc-viewer-fact-label';
+    labelEl.textContent = label;
+    const valueEl = document.createElement('div');
+    valueEl.className = 'spc-viewer-fact-value';
+    valueEl.innerHTML = value;
+    card.appendChild(labelEl);
+    card.appendChild(valueEl);
+    wrap.appendChild(card);
+  });
+}
+
+function _spcWatchImageOptions(props = {}) {
+  const num = Number.parseInt(String(props?._number || '').trim(), 10);
+  if (!Number.isFinite(num) || num <= 0) return [];
+  const padded = String(num).padStart(4, '0');
+  return [
+    { id: 'overview', label: 'Overview', imageUrl: `https://www.spc.noaa.gov/products/watch/ww${padded}_overview.gif` },
+    { id: 'counties', label: 'Counties', imageUrl: `https://www.spc.noaa.gov/products/watch/ww${padded}_overview_wou.gif` },
+    { id: 'warnings', label: 'Warnings', imageUrl: `https://www.spc.noaa.gov/products/watch/ww${padded}_warnings.gif` },
+    { id: 'radar', label: 'Initial Radar', imageUrl: `https://www.spc.noaa.gov/products/watch/ww${padded}_radar_init.gif` },
+  ];
+}
+
+function _spcWatchPageUrls(props = {}) {
+  const num = Number.parseInt(String(props?._number || '').trim(), 10);
+  if (!Number.isFinite(num) || num <= 0) return null;
+  const padded = String(num).padStart(4, '0');
+  return {
+    watchPage: `https://www.spc.noaa.gov/products/watch/ww${padded}.html`,
+    wouPage: `https://www.spc.noaa.gov/products/watch/wou${padded}.html`,
+  };
+}
+
+function _spcMesoImageUrl(number) {
+  const num = Number.parseInt(String(number || '').trim(), 10);
+  if (!Number.isFinite(num) || num <= 0) return '';
+  return `https://www.spc.noaa.gov/products/md/mcd${String(num).padStart(4, '0')}.png`;
+}
+
 function _spcViewerUpdateImage() {
   const overlay = document.getElementById('spc-viewer-overlay');
   if (!overlay?.classList.contains('open')) return;
-  const type = _spcViewerTypes[_spcViewerIdx] || { id: 'CAT', label: 'Categorical' };
-  const d = _spcViewerDay.replace('DAY', '');
-  document.getElementById('spc-viewer-title').textContent = `SPC Day ${d} Outlook — ${type.label}`;
-  document.getElementById('spc-viewer-image-label').textContent = type.label;
+  const type = _spcViewerTypes[_spcViewerIdx] || { id: 'CAT', label: 'Categorical', imageUrl: '' };
+  document.getElementById('spc-viewer-image-label').textContent = type.label || '';
   const img = document.getElementById('spc-viewer-img');
   const imgStatus = document.getElementById('spc-viewer-img-status');
   if (img) {
-    const imageUrl = _spcImageUrl(_spcViewerDay, type.id);
-    const capturedDay = _spcViewerDay;
-    const capturedIdx = _spcViewerIdx;
+    const imageUrl = type.imageUrl || _spcImageUrl(_spcViewerDay, type.id);
+    const capturedKey = `${_spcViewerMode}|${_spcViewerDocKey}|${_spcViewerIdx}`;
+    if (!imageUrl) {
+      img.src = '';
+      img.style.display = 'none';
+      if (imgStatus) {
+        imgStatus.textContent = 'No image available.';
+        imgStatus.style.display = 'block';
+      }
+      _updateSpcViewerNavButtons();
+      return;
+    }
     // If already cached, show instantly
     if (_spcImageCache.has(imageUrl)) {
       img.onload = () => { img.style.display = 'block'; if (imgStatus) imgStatus.style.display = 'none'; };
@@ -1648,13 +1748,13 @@ function _spcViewerUpdateImage() {
       if (imgStatus) { imgStatus.textContent = 'Loading…'; imgStatus.style.display = 'block'; }
       _fetchSpcImageDataUrl(imageUrl).then(dataUrl => {
         if (!overlay.classList.contains('open')) return;
-        if (_spcViewerDay !== capturedDay || _spcViewerIdx !== capturedIdx) return;
+        if (`${_spcViewerMode}|${_spcViewerDocKey}|${_spcViewerIdx}` !== capturedKey) return;
         img.onload = () => { img.style.display = 'block'; if (imgStatus) imgStatus.style.display = 'none'; };
         img.onerror = () => { img.style.display = 'none'; if (imgStatus) { imgStatus.textContent = 'Image could not be rendered.'; imgStatus.style.display = 'block'; } };
         img.src = dataUrl;
       }).catch(err => {
         if (!overlay.classList.contains('open')) return;
-        if (_spcViewerDay !== capturedDay || _spcViewerIdx !== capturedIdx) return;
+        if (`${_spcViewerMode}|${_spcViewerDocKey}|${_spcViewerIdx}` !== capturedKey) return;
         if (imgStatus) { imgStatus.textContent = `Image unavailable (${err?.message || 'error'})`; imgStatus.style.display = 'block'; }
       });
     }
@@ -1672,16 +1772,24 @@ function _updateSpcViewerNavButtons() {
 function openSpcViewer(day, type) {
   const overlay = document.getElementById('spc-viewer-overlay');
   if (!overlay) return;
+  _spcViewerMode = 'outlook';
   _spcViewerDay = day || 'DAY1';
-  const dayOptions = SPC_TYPE_OPTIONS_BY_DAY[_spcViewerDay] || [{ id: 'CAT', label: 'Categorical' }];
+  _spcViewerDocKey = _spcViewerDay;
+  const dayOptions = (SPC_TYPE_OPTIONS_BY_DAY[_spcViewerDay] || [{ id: 'CAT', label: 'Categorical' }]).map(item => ({
+    ...item,
+    imageUrl: _spcImageUrl(_spcViewerDay, item.id),
+  }));
   _spcViewerTypes = dayOptions;
   _spcViewerIdx = Math.max(0, dayOptions.findIndex(t => t.id === (type || 'CAT')));
+  document.getElementById('spc-viewer-title').textContent = `SPC Day ${_spcViewerDay.replace('DAY', '')} Outlook — ${(dayOptions[_spcViewerIdx] || dayOptions[0] || {}).label || 'Categorical'}`;
+  document.getElementById('spc-viewer-discussion-label').textContent = 'Discussion';
+  _setSpcViewerFacts([]);
   overlay.classList.add('open');
   _spcViewerUpdateImage();
   // Prefetch all other types for this day in the background so prev/next is instant
   const prefetchDay = _spcViewerDay;
   _spcViewerTypes.forEach(t => {
-    const url = _spcImageUrl(prefetchDay, t.id);
+    const url = t.imageUrl || _spcImageUrl(prefetchDay, t.id);
     if (!_spcImageCache.has(url)) _fetchSpcImageDataUrl(url).catch(() => {});
   });
   // Load discussion text
@@ -1696,7 +1804,85 @@ function openSpcViewer(day, type) {
   }
 }
 
+function openSpcWatchViewer(props = {}) {
+  const overlay = document.getElementById('spc-viewer-overlay');
+  if (!overlay) return;
+  const images = _spcWatchImageOptions(props);
+  const urls = _spcWatchPageUrls(props);
+  _spcViewerMode = 'watch';
+  _spcViewerDay = 'WATCH';
+  _spcViewerDocKey = String(props?._number || '');
+  _spcViewerTypes = images.length ? images : [{ id: 'watch', label: 'Watch', imageUrl: '' }];
+  _spcViewerIdx = 0;
+  document.getElementById('spc-viewer-title').textContent = String(props?._label || 'SPC Watch');
+  document.getElementById('spc-viewer-discussion-label').textContent = 'Watch Details';
+  const expireMs = _alertsParseTimeMs(props?._expire);
+  const windKt = Number(props?._wind);
+  const hailVal = Number(props?._hail);
+  _setSpcViewerFacts([
+    { label: 'PDS', value: _escapeHtml(String(props?._isPds || 'NO')) },
+    { label: 'Max Hail', value: _escapeHtml(Number.isFinite(hailVal) ? `${hailVal.toFixed(2)} in` : '--') },
+    { label: 'Max Wind', value: _escapeHtml(Number.isFinite(windKt) ? `${Math.round(windKt * 1.15078)} mph` : '--') },
+    { label: 'Expires', value: expireMs ? _escapeHtml(new Date(expireMs).toLocaleString()) : '--' },
+  ]);
+  overlay.classList.add('open');
+  _spcViewerUpdateImage();
+  _spcViewerTypes.forEach(t => {
+    const url = t.imageUrl || '';
+    if (url && !_spcImageCache.has(url)) _fetchSpcImageDataUrl(url).catch(() => {});
+  });
+  const textEl = document.getElementById('spc-viewer-discussion-text');
+  if (textEl) {
+    textEl.textContent = 'Loading watch text...';
+    const currentKey = _spcViewerDocKey;
+    Promise.all([
+      urls?.watchPage ? _fetchTextDocument(urls.watchPage) : Promise.resolve('(Watch page unavailable.)'),
+      urls?.wouPage ? _fetchTextDocument(urls.wouPage) : Promise.resolve(''),
+    ]).then(([watchText, wouText]) => {
+      if (!overlay.classList.contains('open')) return;
+      if (_spcViewerMode !== 'watch' || _spcViewerDocKey !== currentKey) return;
+      textEl.textContent = wouText
+        ? `${watchText}\n\n------------------------------\n\n${wouText}`
+        : watchText;
+    });
+  }
+}
+
+function openSpcMesoViewer(props = {}) {
+  const overlay = document.getElementById('spc-viewer-overlay');
+  if (!overlay) return;
+  const num = Number.parseInt(String(props?._number || '').trim(), 10);
+  const imageUrl = _spcMesoImageUrl(num);
+  const productUrl = String(props?._url || '').trim() || (Number.isFinite(num) && num > 0 ? `https://www.spc.noaa.gov/products/md/md${String(num).padStart(4, '0')}.html` : '');
+  _spcViewerMode = 'meso';
+  _spcViewerDay = 'MESO';
+  _spcViewerDocKey = String(num || props?._name || '');
+  _spcViewerTypes = [{ id: 'meso', label: 'Discussion Image', imageUrl }];
+  _spcViewerIdx = 0;
+  document.getElementById('spc-viewer-title').textContent = String(props?._name || 'Mesoscale Discussion');
+  document.getElementById('spc-viewer-discussion-label').textContent = 'Discussion';
+  _setSpcViewerFacts([
+    { label: 'MD Number', value: _escapeHtml(Number.isFinite(num) && num > 0 ? String(num) : '--') },
+    { label: 'Link', value: productUrl ? `<a href="${_escapeHtml(productUrl)}" target="_blank" rel="noopener noreferrer">Open SPC page</a>` : '--' },
+  ]);
+  overlay.classList.add('open');
+  _spcViewerUpdateImage();
+  if (imageUrl && !_spcImageCache.has(imageUrl)) _fetchSpcImageDataUrl(imageUrl).catch(() => {});
+  const textEl = document.getElementById('spc-viewer-discussion-text');
+  if (textEl) {
+    textEl.textContent = 'Loading discussion...';
+    const currentKey = _spcViewerDocKey;
+    _fetchTextDocument(productUrl).then(text => {
+      if (!overlay.classList.contains('open')) return;
+      if (_spcViewerMode !== 'meso' || _spcViewerDocKey !== currentKey) return;
+      textEl.textContent = text;
+    });
+  }
+}
+
 function closeSpcViewer() {
+  _spcViewerFacts = [];
+  _setSpcViewerFacts([]);
   document.getElementById('spc-viewer-overlay')?.classList.remove('open');
 }
 
@@ -2610,16 +2796,97 @@ function _buildMesoGeoJson(raw) {
     const geom = _asSpcPolygonGeometry(feature?.geometry);
     if (!geom) continue;
     const p = feature?.properties || {};
+    const mdRaw = p.md_number ?? p.md_num ?? p.md ?? p.discussion_num ?? p.num ?? p.objectid ?? '';
+    const mdNumber = Number.parseInt(String(mdRaw).trim(), 10);
+    const mdText = Number.isFinite(mdNumber) && mdNumber > 0 ? String(mdNumber) : '';
+    const defaultUrl = mdText ? `https://www.spc.noaa.gov/products/md/md${mdText.padStart(4, '0')}.html` : '';
+    const title = String(
+      p.name
+      || p.md_name
+      || p.title
+      || (mdText ? `Mesoscale Discussion ${mdText}` : 'Mesoscale Discussion')
+    ).trim();
     out.push({
       type: 'Feature',
       geometry: geom,
       properties: {
-        _name: p.name || 'Mesoscale Discussion',
-        _url: p.popupinfo || '',
+        _name: title || 'Mesoscale Discussion',
+        _number: mdText,
+        _url: String(p.popupinfo || p.url || p.link || defaultUrl || '').trim(),
       },
     });
   }
   return { type: 'FeatureCollection', features: out };
+}
+
+async function _fetchCurrentMesoDiscussions() {
+  const res = await invoke('fetch_url_base64', { url: SPC_MESO_INDEX_URL });
+  if (!res || res.status < 200 || res.status >= 400 || !res.body_base64) {
+    throw new Error(`HTTP ${res?.status ?? 0}`);
+  }
+  const html = _decodeBase64Utf8(res.body_base64);
+  const parser = new DOMParser();
+  const doc = parser.parseFromString(html, 'text/html');
+  const bodyText = (doc.body?.textContent || '').replace(/\s+/g, ' ').trim();
+  const noActive = /No Mesoscale Discussions are currently in effect\./i.test(bodyText);
+  const links = [...doc.querySelectorAll('a[href]')]
+    .map(a => String(a.getAttribute('href') || '').trim())
+    .filter(href => /\/products\/md\/md\d{4}\.html$/i.test(href))
+    .map(href => {
+      const absolute = new URL(href, SPC_MESO_INDEX_URL).toString();
+      const match = absolute.match(/md(\d{4})\.html$/i);
+      return match ? { href: absolute, number: match[1] } : null;
+    })
+    .filter(Boolean);
+  const dedup = [];
+  const seen = new Set();
+  links.forEach(item => {
+    if (!item || seen.has(item.number)) return;
+    seen.add(item.number);
+    dedup.push(item);
+  });
+  return {
+    noActive,
+    active: noActive ? [] : dedup,
+    latest: dedup[0] || null,
+  };
+}
+
+async function _buildCurrentMesoGeoJson() {
+  const [raw, index] = await Promise.all([
+    _fetchGeoJsonViaTauri(MESO_DISCUSSION_URL),
+    _fetchCurrentMesoDiscussions(),
+  ]);
+
+  const data = _buildMesoGeoJson(raw);
+  const activeNumbers = new Set((index?.active || []).map(item => item.number));
+  const latestNumber = String(index?.latest?.number || '').trim();
+  const latestUrl = String(index?.latest?.href || '').trim();
+  const filtered = [];
+
+  for (const feature of Array.isArray(data?.features) ? data.features : []) {
+    const props = feature?.properties || {};
+    const num = String(props?._number || '').trim().padStart(4, '0');
+    if (activeNumbers.size) {
+      if (!activeNumbers.has(num)) continue;
+    } else if (latestNumber) {
+      if (num !== latestNumber) continue;
+    } else {
+      continue;
+    }
+    filtered.push({
+      ...feature,
+      properties: {
+        ...props,
+        _url: latestUrl && num === latestNumber ? latestUrl : String(props?._url || '').trim(),
+      },
+    });
+  }
+
+  return {
+    type: 'FeatureCollection',
+    features: filtered,
+  };
 }
 
 async function refreshMesoOverlay(force = false, opts = {}) {
@@ -2641,8 +2908,7 @@ async function refreshMesoOverlay(force = false, opts = {}) {
     const fresh = cached && (Date.now() - cached.fetchedAt) < STORM_REPORT_CACHE_MS;
     if (fresh && !forceNetwork) data = cached.data;
     else {
-      const raw = await _fetchGeoJsonViaTauri(MESO_DISCUSSION_URL);
-      data = _buildMesoGeoJson(raw);
+      data = await _buildCurrentMesoGeoJson();
       mesoCache = { fetchedAt: Date.now(), data };
     }
   } catch (err) {
@@ -2680,15 +2946,7 @@ function initMesoOverlayLayers() {
   map.on('click', 'meso-discussions-line', e => {
     if (!Array.isArray(e?.features) || !e.features.length) return;
     const f = e.features[0];
-    const name = _escapeHtml(f?.properties?._name || 'Mesoscale Discussion');
-    const url = _escapeHtml(f?.properties?._url || '');
-    const html = url
-      ? `<div style="min-width:190px"><b>${name}</b><br><span style="opacity:.75">${url}</span></div>`
-      : `<div style="min-width:190px"><b>${name}</b></div>`;
-    new mapboxgl.Popup({ closeButton: true, closeOnClick: true })
-      .setLngLat(e.lngLat)
-      .setHTML(html)
-      .addTo(map);
+    openSpcMesoViewer(f?.properties || {});
   });
 
   mesoMapReady = true;
@@ -2872,36 +3130,7 @@ function initWatchOverlayLayers() {
 
   const clickWatch = e => {
     if (!Array.isArray(e?.features) || !e.features.length) return;
-    const p = e.features[0]?.properties || {};
-    const expireMs = _alertsParseTimeMs(p._expire);
-    const expireLive = _popupExpiresLiveHtml(expireMs);
-    const hail = Number.isFinite(Number(p._hail)) ? `${Number(p._hail).toFixed(2)} in` : '--';
-    const windKt = Number(p._wind);
-    const wind = Number.isFinite(windKt) ? `${Math.round(windKt * 1.15078)} mph` : '--';
-    const link = p._url
-      ? `<a href="${_escapeHtml(p._url)}" target="_blank" rel="noopener noreferrer" style="color:#8fc0ff;text-decoration:none">SPC Product</a>`
-      : '--';
-    const popup = new mapboxgl.Popup({
-      closeButton: true,
-      closeOnClick: true,
-      className: 'storm-popup',
-      maxWidth: '320px',
-    })
-      .setLngLat(e.lngLat)
-      .setHTML(
-        `<div class="storm-popup-card" style="--storm-accent:${_escapeHtml(String(p._color || '#E6E6E6'))}">`
-        + `<div class="storm-popup-title">${_escapeHtml(p._label || 'SPC Watch')}</div>`
-        + `<div class="storm-popup-time">${expireLive}</div>`
-        + `<div class="storm-popup-grid">`
-        + `<div class="storm-popup-k">PDS</div><div class="storm-popup-v">${_escapeHtml(p._isPds || 'NO')}</div>`
-        + `<div class="storm-popup-k">Max Hail</div><div class="storm-popup-v">${_escapeHtml(hail)}</div>`
-        + `<div class="storm-popup-k">Max Wind</div><div class="storm-popup-v">${_escapeHtml(wind)}</div>`
-        + `<div class="storm-popup-k">Link</div><div class="storm-popup-v">${link}</div>`
-        + `</div></div>`,
-      )
-      .addTo(map);
-    _ensurePopupExpiresTicker();
-    _refreshPopupExpiresLive();
+    openSpcWatchViewer(e.features[0]?.properties || {});
   };
 
   map.on('mouseenter', 'spc-watch-line', () => { map.getCanvas().style.cursor = 'pointer'; });
@@ -5763,6 +5992,33 @@ function _alertsScheduleBootstrapPrune() {
   }, ALERT_BOOTSTRAP_GRACE_MS);
 }
 
+function _isFatalNwwsStatusMessage(message) {
+  const text = String(message || '').toLowerCase();
+  return (
+    text.includes('not-authorized')
+    || text.includes('starttls_failure')
+    || text.includes('packet length too long')
+    || text.includes('tls_get_more_records')
+    || text.includes('client network socket disconnected before secure tls connection was established')
+    || text.includes('error-reconnecting-too-fast')
+    || text.includes('write after end')
+    || text.includes('cannot read properties of null')
+    || text.includes('maxlistenersexceededwarning')
+  );
+}
+
+function _stopNwwsBridgeForFatal(message) {
+  if (nwwsFatalStopInFlight) return;
+  nwwsFatalStopInFlight = true;
+  nwwsBridgeStartPromise = null;
+  invoke('stop_nwws_bridge')
+    .catch(() => {})
+    .finally(() => {
+      const text = String(message || 'Fatal NWWS error');
+      setNwwsCredentialsStatus(`NWWS stopped: ${text}`, true);
+    });
+}
+
 function _alertsReplaceNormalizedCollection(features, provider, opts = {}) {
   const normalized = Array.isArray(features) ? features.filter(Boolean) : [];
   const removeMissing = opts.removeMissing !== false;
@@ -5915,7 +6171,11 @@ async function ensureNwwsBridge() {
       }
       if (phase === 'error' && message) {
         setNwwsCredentialsStatus(message, true);
+        if (_isFatalNwwsStatusMessage(message) && !nwwsFatalStopInFlight) {
+          _stopNwwsBridgeForFatal(message);
+        }
       } else if (phase === 'connected') {
+        nwwsFatalStopInFlight = false;
         setNwwsCredentialsStatus('Connected');
       }
       if (phase === 'starting' || phase === 'reconnecting' || phase === 'error') {
@@ -5946,7 +6206,10 @@ async function ensureNwwsBridge() {
       const level = String(payload?.level || 'info').toLowerCase();
       const message = String(payload?.message || '').trim();
       if (!message) return;
-      if (level === 'error') console.warn('[NWWS]', message);
+      if (level === 'error') {
+        console.warn('[NWWS]', message);
+        if (_isFatalNwwsStatusMessage(message)) _stopNwwsBridgeForFatal(message);
+      }
       else if (level === 'warn') console.warn('[NWWS]', message);
       else console.info('[NWWS]', message);
     });
@@ -9456,6 +9719,7 @@ let alertsBootstrapPruneTimer = null;
 let nwwsBridgeStartPromise = null;
 let nwwsBridgeListenersReady = false;
 let nwwsLastStatusSig = '';
+let nwwsFatalStopInFlight = false;
 let warningDashboardMessagingReady = false;
 let warningDashboardChannel = null;
 const warningDashboardSeenMessages = new Set();

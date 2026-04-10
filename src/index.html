@@ -1823,6 +1823,45 @@
       white-space: pre-wrap;
       font-family: "Consolas", "Courier New", monospace;
     }
+    #spc-viewer-facts {
+      display: none;
+      grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+      gap: 8px;
+      margin-bottom: 8px;
+    }
+    #spc-viewer-facts.open {
+      display: grid;
+    }
+    .spc-viewer-fact-card {
+      background: #101217;
+      border: 1px solid #232936;
+      border-radius: 6px;
+      padding: 8px 10px;
+      min-width: 0;
+    }
+    .spc-viewer-fact-label {
+      font-size: 10px;
+      font-weight: 700;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      color: #718096;
+      margin-bottom: 4px;
+    }
+    .spc-viewer-fact-value {
+      font-size: 12px;
+      line-height: 1.45;
+      color: #e6edf7;
+      word-break: break-word;
+      white-space: normal;
+      font-family: "Segoe UI", sans-serif;
+    }
+    .spc-viewer-fact-value a {
+      color: #8fc0ff;
+      text-decoration: none;
+    }
+    .spc-viewer-fact-value a:hover {
+      text-decoration: underline;
+    }
 
 
 
@@ -4841,6 +4880,7 @@
         </div>
         <div id="spc-viewer-discussion">
           <div id="spc-viewer-discussion-label">Discussion</div>
+          <div id="spc-viewer-facts"></div>
           <div id="spc-viewer-discussion-text"></div>
         </div>
       </div>
