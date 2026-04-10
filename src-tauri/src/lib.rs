@@ -2221,6 +2221,151 @@ async fn decode_key(
     .map_err(|e| e.to_string())?
 }
 
+#[tauri::command]
+async fn decode_wise_key(
+    app: AppHandle,
+    state: tauri::State<'_, Backend>,
+    key: String,
+    palettes: Option<serde_json::Value>,
+) -> Result<tauri::ipc::Response, String> {
+    let pool = state.0.clone();
+    let key_for_sig = key.clone();
+    let palettes_for_sig = palettes.clone();
+    let signature = serde_json::json!({
+        "key": key_for_sig,
+        "palettes": palettes_for_sig,
+    });
+    tauri::async_runtime::spawn_blocking(move || {
+        if let Some(bytes) = read_decode_cache_bytes(&app, "wise", &signature) {
+            return Ok(tauri::ipc::Response::new(bytes));
+        }
+
+        let mut guard = acquire_backend(&pool);
+
+        if let BackendState::Failed(prev_err) = &*guard {
+            match spawn_backend() {
+                Ok(inner) => *guard = BackendState::Ready(inner),
+                Err(new_err) => {
+                    return Err(format!(
+                        "Backend unavailable.\nPrevious error: {}\nRestart error: {}",
+                        prev_err, new_err
+                    ))
+                }
+            }
+        }
+
+        let inner = match &mut *guard {
+            BackendState::Ready(inner) => inner,
+            BackendState::Failed(err) => return Err(err.clone()),
+        };
+
+        let mut req_obj = serde_json::json!({ "cmd": "decode_wise", "key": key });
+        if let Some(p) = palettes {
+            req_obj["palettes"] = p;
+        }
+
+        match request_decode_binary(inner, req_obj.clone()) {
+            Ok(bytes) => {
+                if let Err(err) = write_decode_cache_bytes(&app, "wise", &signature, &bytes) {
+                    eprintln!("[radar] decode cache write failed: {err}");
+                }
+                Ok(tauri::ipc::Response::new(bytes))
+            }
+            Err(first_err) => {
+                if !should_restart_backend(&first_err) {
+                    return Err(first_err);
+                }
+                let restarted = spawn_backend().map_err(|restart_err| {
+                    format!(
+                        "Backend request failed: {}\nBackend restart failed: {}",
+                        first_err, restart_err
+                    )
+                })?;
+                *inner = restarted;
+                request_decode_binary(inner, req_obj)
+                    .map(|bytes| {
+                        if let Err(err) = write_decode_cache_bytes(&app, "wise", &signature, &bytes) {
+                            eprintln!("[radar] decode cache write failed: {err}");
+                        }
+                        tauri::ipc::Response::new(bytes)
+                    })
+                    .map_err(|retry_err| {
+                        format!(
+                            "Backend request failed: {}\nBackend restarted but retry failed: {}",
+                            first_err, retry_err
+                        )
+                    })
+            }
+        }
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn list_wise_frames(
+    state: tauri::State<'_, Backend>,
+    station: String,
+    family: String,
+    tilt: Option<String>,
+    max_frames: Option<u32>,
+    mode: Option<String>,
+) -> Result<serde_json::Value, String> {
+    let pool = state.0.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut guard = acquire_backend(&pool);
+
+        if let BackendState::Failed(prev_err) = &*guard {
+            match spawn_backend() {
+                Ok(inner) => *guard = BackendState::Ready(inner),
+                Err(new_err) => {
+                    return Err(format!(
+                        "Backend unavailable.\nPrevious error: {}\nRestart error: {}",
+                        prev_err, new_err
+                    ))
+                }
+            }
+        }
+
+        let inner = match &mut *guard {
+            BackendState::Ready(inner) => inner,
+            BackendState::Failed(err) => return Err(err.clone()),
+        };
+
+        let req_obj = serde_json::json!({
+            "cmd": "list_wise",
+            "station": station,
+            "family": family,
+            "tilt": tilt.unwrap_or_else(|| "0.5".into()),
+            "max_frames": max_frames.unwrap_or(20),
+            "mode": mode.unwrap_or_else(|| "live".into()),
+        });
+
+        match request_backend(inner, req_obj.clone()) {
+            Ok(val) => Ok(val),
+            Err(first_err) => {
+                if !should_restart_backend(&first_err) {
+                    return Err(first_err);
+                }
+                let restarted = spawn_backend().map_err(|restart_err| {
+                    format!(
+                        "Backend request failed: {}\nBackend restart failed: {}",
+                        first_err, restart_err
+                    )
+                })?;
+                *inner = restarted;
+                request_backend(inner, req_obj).map_err(|retry_err| {
+                    format!(
+                        "Backend request failed: {}\nBackend restarted but retry failed: {}",
+                        first_err, retry_err
+                    )
+                })
+            }
+        }
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
 
 // ── HTTP proxy for camera feeds ───────────────────────────────────────────────
 static HTTP_CLIENT: OnceLock<reqwest::blocking::Client> = OnceLock::new();
@@ -2434,10 +2579,19 @@ fn do_fetch_inner(url: String, depth: u8, timeout_ms: Option<u64>) -> Result<Fet
     } else if url.contains("511.idaho.gov") {
         // Idaho
         req = req.header("Origin", "https://511.idaho.gov").header("Referer", "https://511.idaho.gov/");
+    } else if url.contains("spc.noaa.gov") {
+        // SPC outlook images and discussion pages require a browser-like Referer to avoid 403
+        eprintln!("[spc] fetching: {}", url);
+        req = req
+            .header("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8")
+            .header("Referer", "https://www.spc.noaa.gov/");
     }
 
     let resp = req.send().map_err(|e| e.to_string())?;
     let status = resp.status().as_u16();
+    if url.contains("spc.noaa.gov") {
+        eprintln!("[spc] response status: {} for {}", status, url);
+    }
     let final_url = resp.url().to_string();
     let content_type = resp.headers()
         .get(reqwest::header::CONTENT_TYPE)
@@ -3480,8 +3634,21 @@ pub fn run() {
             .send();
     });
 
+    let pool_size = backend_pool_size();
+    let pool: Vec<Mutex<BackendState>> = (0..pool_size)
+        .map(|_| Mutex::new(BackendState::Failed(BACKEND_LAZY_INIT_MESSAGE.to_string())))
+        .collect();
+    let pool_arc = Arc::new(pool);
+    // Pre-warm all backend workers in background so first decode doesn't pay cold-start cost
+    {
+        let pool_clone = pool_arc.clone();
+        std::thread::spawn(move || { let _ = restart_backend_pool(&pool_clone); });
+    }
+    let backend = Backend(pool_arc);
+
     let app = tauri::Builder::default()
         .manage(NwwsBridgeState::default())
+        .manage(backend)
         .invoke_handler(tauri::generate_handler![
             l3_list_page,
             l3_resolve_selection,
@@ -3499,7 +3666,9 @@ pub fn run() {
             fetch_pendot_stream,
             start_nwws_bridge,
             stop_nwws_bridge,
-            open_warning_dashboard
+            open_warning_dashboard,
+            decode_wise_key,
+            list_wise_frames
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application");
