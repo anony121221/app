@@ -18,6 +18,31 @@ let lastStatus = {
   alertCount: 0,
   updatedAt: new Date().toISOString(),
 };
+let fatalShutdownScheduled = false;
+
+function isFatalNwwsError(message) {
+  const text = String(message || '').toLowerCase();
+  return (
+    text.includes('not-authorized')
+    || text.includes('starttls_failure')
+    || text.includes('packet length too long')
+    || text.includes('tls_get_more_records')
+    || text.includes('cannot read properties of null')
+    || text.includes('maxlistenersexceededwarning')
+    || text.includes('error-reconnecting-too-fast')
+    || text.includes('write after end')
+  );
+}
+
+function scheduleFatalShutdown(message) {
+  if (fatalShutdownScheduled) return;
+  fatalShutdownScheduled = true;
+  updateStatus({
+    phase: 'error',
+    message: String(message || 'Fatal NWWS bridge error'),
+  });
+  setImmediate(() => process.exit(1));
+}
 
 function emit(type, payload) {
   process.stdout.write(`${JSON.stringify({ type, payload })}\n`);
@@ -309,6 +334,7 @@ client.onEvent('onConnection', () => {
 });
 
 client.onEvent('onReconnect', () => {
+  if (fatalShutdownScheduled) return;
   emitLog('warn', 'NWWS bridge is reconnecting');
   updateStatus({
     phase: 'reconnecting',
@@ -317,11 +343,17 @@ client.onEvent('onReconnect', () => {
 });
 
 client.onEvent('onError', (error) => {
-  emitLog('error', String(error?.stack || error?.message || error || 'Unknown NWWS error'));
+  if (fatalShutdownScheduled) return;
+  const message = String(error?.stack || error?.message || error || 'Unknown NWWS error');
+  emitLog('error', message);
   updateStatus({
     phase: 'error',
     message: String(error?.message || error || 'Unknown NWWS error'),
   });
+  if (isFatalNwwsError(message)) {
+    emitLog('error', 'NWWS bridge encountered a fatal auth/TLS error and will stop reconnecting');
+    scheduleFatalShutdown(String(error?.message || error || 'Fatal NWWS error'));
+  }
 });
 
 client.onEvent('onAlert', (alerts) => {
