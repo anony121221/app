@@ -1925,6 +1925,93 @@
 
     }
 
+    /* -- Timeline scrubber ------------------------------------------------------ */
+    #tl-strip {
+      display: none;
+      padding: 6px 9px 7px;
+      border-bottom: 1px solid #171717;
+      background: linear-gradient(180deg, rgba(255,255,255,0.015), rgba(255,255,255,0));
+      touch-action: none;
+    }
+    #control-island.tl-active #tl-strip { display: block; }
+
+    #tl-row {
+      display: flex;
+      align-items: center;
+      gap: 7px;
+    }
+    #tl-track-wrap {
+      position: relative;
+      flex: 1;
+      height: 16px;
+      cursor: pointer;
+      user-select: none;
+    }
+    #tl-track-bg {
+      position: absolute;
+      left: 0; right: 0;
+      top: 6px;
+      height: 2px;
+      background: linear-gradient(90deg, #191919, #242424);
+      border-radius: 999px;
+      box-shadow: inset 0 0 0 1px rgba(255,255,255,0.05);
+    }
+    #tl-track-fill {
+      position: absolute;
+      left: 0;
+      top: 6px;
+      height: 2px;
+      background: linear-gradient(90deg, #969696, #d2d2d2);
+      border-radius: 999px;
+      width: 0%;
+      pointer-events: none;
+    }
+    #tl-thumb {
+      position: absolute;
+      width: 10px;
+      height: 10px;
+      background: #d8d8d8;
+      border: 1px solid #050505;
+      box-shadow: 0 0 0 1px rgba(255,255,255,0.08);
+      border-radius: 50%;
+      top: 50%;
+      transform: translate(-50%, -50%);
+      left: 0%;
+      pointer-events: none;
+    }
+    #tl-strip.tl-dragging #tl-thumb { transition: none; }
+    /* Tick marks — one per frame, inside track-wrap */
+    #tl-labels {
+      position: absolute;
+      left: 0; right: 0;
+      top: 11px;
+      height: 4px;
+      pointer-events: none;
+    }
+    .tl-lbl {
+      position: absolute;
+      width: 2px;
+      height: 5px;
+      background: rgba(255,255,255,0.32);
+      border-radius: 999px;
+      transform: translateX(-50%);
+    }
+    .tl-lbl-active { background: #f0f0f0; height: 7px; top: -1px; }
+    #tl-btn-play {
+      width: 24px; height: 24px;
+      border-radius: 5px;
+      border: 1px solid #252525;
+      background: linear-gradient(180deg, #111111, #0b0b0b);
+      color: #d6d6d6;
+      font-size: 9px;
+      cursor: pointer;
+      display: flex; align-items: center; justify-content: center;
+      padding: 0;
+      flex-shrink: 0;
+      line-height: 1;
+    }
+    #tl-btn-play:hover { background: linear-gradient(180deg, #171717, #101010); border-color: #3a3a3a; }
+
 
 
     /* ââ Island product row (top card) âââââââââââââââââââââââââââââââââ */
@@ -1933,6 +2020,7 @@
       display: flex; align-items: flex-end; gap: 6px;
       padding: 6px 7px;
     }
+
 
     #product-picker {
       display: flex;
@@ -2121,6 +2209,7 @@
       font-variant-numeric: tabular-nums; line-height: 1; min-width: 62px;
     }
     #frame-label.ok      { color: #8ddbb0; }
+    #frame-label.history { color: #cfcfcf; }
     #frame-label.loading { color: #f0c97a; }
     #frame-label.error   { color: #ff8f8f; }
 
@@ -3061,6 +3150,20 @@
 
 
 
+    #load-more-frames-btn {
+      display: none;
+      border: 1px solid #2a2a2a; border-radius: 4px;
+      background: #000; color: #aaa;
+      height: 26px; padding: 0 9px;
+      font-size: 11px; font-weight: 500;
+      white-space: nowrap;
+      cursor: pointer;
+      transition: border-color 0.1s, background 0.1s, color 0.1s;
+      align-self: flex-end;
+    }
+    #load-more-frames-btn:hover { border-color: #5a5a5a; background: #101010; color: #ddd; }
+    #load-more-frames-btn:disabled { color: #555; border-color: #222; cursor: default; }
+
     #tools-btn {
       border: 1px solid #2a2a2a; border-radius: 4px;
       background: #000; color: #888;
@@ -3391,19 +3494,7 @@
 
     /* ââ Corner decode toast (non-blocking, shown during initial station load) */
 
-    #decode-toast {
-
-      position: fixed; top: 10px; left: 50%; transform: translateX(-50%); z-index: 26;
-
-      display: none; align-items: center; gap: 7px;
-
-      background: rgba(0,0,0,0.75); border: 1px solid #333;
-
-      border-radius: 6px; padding: 6px 11px;
-
-      pointer-events: none; /* map stays fully interactive */
-
-    }
+    #decode-toast { display: none !important; }
 
     .loading-spinner {
 
@@ -3419,6 +3510,25 @@
 
     #decode-msg { font-size: 11px; color: #bbb; white-space: nowrap; }
 
+    /* Load progress bar — shown above the product pickers while loading */
+    #load-bar-wrap {
+      display: none;
+      height: 2px;
+      background: #0c0f14;
+      overflow: hidden;
+      border-radius: 1px;
+      margin: 0 8px 3px;
+    }
+    #control-island.bar-loading #load-bar-wrap { display: block; }
+    #load-bar-fill {
+      height: 100%;
+      background: linear-gradient(90deg, #1e4fa0 0%, #4f8df7 100%);
+      width: 0%;
+      transition: width 0.3s ease;
+      border-radius: 1px;
+    }
+
+    /* Timeline time labels — row below the scrubber track */
     #warning-toast-host {
 
       position: fixed;
@@ -4471,6 +4581,18 @@
         </div>
       </div>
       <div id="island-main">
+        <div id="load-bar-wrap"><div id="load-bar-fill"></div></div>
+        <div id="tl-strip">
+          <div id="tl-row">
+            <div id="tl-track-wrap">
+              <div id="tl-track-bg"></div>
+              <div id="tl-labels"></div>
+              <div id="tl-track-fill"></div>
+              <div id="tl-thumb"></div>
+            </div>
+            <button id="tl-btn-play" title="Play">&#9654;</button>
+          </div>
+        </div>
         <div id="island-product-row">
         <div id="product-picker">
           <span class="island-picker-label">Product</span>
@@ -4497,6 +4619,7 @@
             <option value="3.1">3.1&deg;</option>
           </select>
         </div>
+        <button id="load-more-frames-btn" type="button" title="Load recent history frames for this product">Load More Frames</button>
         <div id="tools-menu">
           <button id="tools-btn" type="button" title="Tools">
 
@@ -4533,6 +4656,7 @@
         </div>
 
       </div>
+
 
     </div>
   </div>
@@ -4628,15 +4752,7 @@
 
 
 
-  <!-- Corner decode toast (shown during initial station load, non-blocking) -->
-
-  <div id="decode-toast">
-
-    <div class="loading-spinner"></div>
-
-    <span id="decode-msg">Decoding...</span>
-
-  </div>
+  <!-- decode-toast removed: replaced by #load-bar-fill in control island -->
 
   <div id="warning-toast-host" aria-live="polite" aria-atomic="false"></div>
 

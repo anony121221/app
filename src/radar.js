@@ -58,7 +58,7 @@ const WISE_MAX_RENDER_GATES = 750000;
 const WISE_PROBE_LOOKBACK_MINUTES = 12;
 const WISE_PROBE_AHEAD_MINUTES = 1;
 const WISE_PROBE_TIMEOUT_MS = 2500;
-const WISE_NOT_FOUND_COOLDOWN_MS = 20000;
+const WISE_NOT_FOUND_COOLDOWN_MS = 5000;
 const WISE_MAX_PROBE_CANDIDATES = 3;
 const WISE_PREFETCH_CACHE_MAX = 24;
 const WISE_GEOMETRY_CACHE_MAX = 6;
@@ -472,7 +472,15 @@ function flatDateTime(d) {
 
 async function findRecentKeys(stationId, family, tilt, maxFrames = 5) {
   if (_canUseProcessedWise(stationId, family, tilt)) {
-    return _fetchRecentProcessedWiseMetas(stationId, family, tilt, maxFrames);
+    const result = await invoke('list_wise_frames', {
+      station: canonicalStationId(stationId),
+      family:  String(family || '').trim().toUpperCase(),
+      tilt:    normalizeTilt(tilt || '0.5'),
+      maxFrames: Math.max(1, Math.round(Number(maxFrames) || 5)),
+    });
+    return (Array.isArray(result?.frames) ? result.frames : [])
+      .map(fileName => _buildProcessedWiseMeta(stationId, family, result.tilt || tilt, fileName))
+      .filter(Boolean);
   }
   const res = await resolveL3Selection(stationId, family, tilt, maxFrames);
   return Array.isArray(res?.history) ? res.history : [];
@@ -812,6 +820,7 @@ const ALERT_EVENT_COLOR_MAP = {
   TORP: '#C010FF',
   TORE: '#FF00FF',
   FFW: '#35C759',
+  FLW: '#2FBF71',
   TOW: '#7A0000',
   TOWP: '#FF4DFF',
   SVW: '#FFE600',
@@ -844,6 +853,7 @@ const ALERT_EVENT_COLOR_MAP = {
   'Tornado Warning': '#FF2D2D',
   'Severe Thunderstorm Warning': '#FFE600',
   'Flash Flood Warning': '#35C759',
+  'Flood Warning': '#2FBF71',
   'Tornado Watch': '#7A0000',
   'Severe Thunderstorm Watch': '#FFE600',
 };
@@ -874,6 +884,7 @@ const WARNING_PREF_CONFIG = Object.freeze([
   { id: 'SVRC', label: 'Considerable Severe Thunderstorm Warning' },
   { id: 'SVR', label: 'Severe Thunderstorm Warning' },
   { id: 'FFW', label: 'Flash Flood Warning' },
+  { id: 'FLW', label: 'Flood Warning' },
   { id: 'TOWP', label: 'PDS Tornado Watch' },
   { id: 'TOW', label: 'Tornado Watch' },
   { id: 'SVWP', label: 'PDS Severe Thunderstorm Watch' },
@@ -912,10 +923,12 @@ const WARNING_TOAST_LIFETIME_MS = 12_000;
 const WARNING_TOAST_LIMIT = 4;
 const WARNING_SOUND_COOLDOWN_MS = 2500;
 const ALERT_SOURCE_NWS_API = 'NWS_API';
+const ALERT_SOURCE_NWS_BOOTSTRAP = 'NWS_BOOTSTRAP';
 const ALERT_SOURCE_NWWS = 'NWWS';
 const ALERT_SOURCE_TEST = 'TEST';
 const NWS_API_ALERTS_URL = 'https://api.weather.gov/alerts/active';
 const NWS_API_POLL_MS = 60_000;
+const ALERT_BOOTSTRAP_GRACE_MS = 30_000;
 const WARNING_DASHBOARD_CHANNEL = 'radar-warning-dashboard';
 const WARNING_DASHBOARD_STORAGE_KEY = 'radar_warning_dashboard_bus';
 const WARNING_DASHBOARD_MESSAGE_SNAPSHOT = 'snapshot';
@@ -1044,9 +1057,9 @@ function _purgeStationRuntimeCaches(stationId) {
       latestKeyCache.delete(cacheId);
     }
   }
-  for (const [ck, layer] of layerPool.entries()) {
+  for (const ck of [...layerPool.keys()]) {
     if (String(ck).startsWith(`${sid}:`)) {
-      try { layer.clearFrame(); } catch (_) {}
+      _disposePrimaryLayerPoolForCombo(ck);
     }
   }
 }
@@ -1087,25 +1100,38 @@ function _warningPrefForClass(warnClass) {
   return warningPrefs?.[id] || _defaultWarningPrefs()[id];
 }
 
+function _warningClassId(props = {}) {
+  return String(props?._warnClass || '').trim().toUpperCase();
+}
+
+function _warningIsRecognized(props = {}) {
+  return !!_warningPrefMeta(_warningClassId(props));
+}
+
 function _warningDisplayColor(props = {}) {
-  const warnClass = String(props?._warnClass || '').trim().toUpperCase();
+  const warnClass = _warningClassId(props);
   const pref = _warningPrefForClass(warnClass);
   return pref?.color || ALERT_EVENT_COLOR_MAP[warnClass] || ALERT_EVENT_COLOR_MAP[String(props?.event || props?.eventRaw || '').trim()] || ALERT_FALLBACK_COLOR;
 }
 
 function _warningNotificationsEnabled(props = {}) {
-  const warnClass = String(props?._warnClass || '').trim().toUpperCase();
+  const warnClass = _warningClassId(props);
   return _warningPrefForClass(warnClass)?.notifications === true;
 }
 
 function _warningSoundIdForProps(props = {}) {
-  const warnClass = String(props?._warnClass || '').trim().toUpperCase();
+  const warnClass = _warningClassId(props);
   return _normalizeWarningSoundId(_warningPrefForClass(warnClass)?.sound);
 }
 
 function _warningShowOnMap(props = {}) {
-  const warnClass = String(props?._warnClass || '').trim().toUpperCase();
+  const warnClass = _warningClassId(props);
+  if (!WARNING_PREF_ID_SET.has(warnClass)) return false;
   return _warningPrefForClass(warnClass)?.showOnMap !== false;
+}
+
+function _warningEnabledForUi(props = {}) {
+  return alertsVisible && _warningShowOnMap(props);
 }
 
 function _extractSpcPolygons(geometry, out) {
@@ -1519,10 +1545,13 @@ function initSpcOverlayLayers() {
 
   map.on('click', 'spc-base-fill', e => {
     if (!e.features?.length) return;
+    // Don't open the SPC viewer when the click also landed on a radar station dot.
+    if (map.queryRenderedFeatures(e.point, { layers: ['stations-dot'] }).length > 0) return;
     openSpcViewer(spcDay, spcType);
   });
   map.on('click', 'spc-cig-fill', e => {
     if (!e.features?.length) return;
+    if (map.queryRenderedFeatures(e.point, { layers: ['stations-dot'] }).length > 0) return;
     openSpcViewer(spcDay, spcType);
   });
   map.on('mouseenter', 'spc-base-fill', () => { map.getCanvas().style.cursor = 'pointer'; });
@@ -1541,11 +1570,29 @@ let _spcViewerDay = 'DAY1';
 let _spcViewerTypes = [];
 let _spcViewerIdx = 0;
 const _spcDiscussionCache = {};
+const _spcImageCache = new Map(); // url → data URL
+
+async function _fetchSpcImageDataUrl(imageUrl) {
+  if (_spcImageCache.has(imageUrl)) return _spcImageCache.get(imageUrl);
+  const res = await invoke('fetch_url_base64', { url: imageUrl });
+  if (!res || res.status < 200 || res.status >= 400 || !res.body_base64) {
+    throw Object.assign(new Error(`HTTP ${res?.status ?? '?'}`), { status: res?.status ?? 0 });
+  }
+  const dataUrl = `data:image/png;base64,${res.body_base64}`;
+  _spcImageCache.set(imageUrl, dataUrl);
+  return dataUrl;
+}
 
 function _spcImageUrl(day, type) {
   const d = day.replace('DAY', '');
   if (+d >= 4) return `https://www.spc.noaa.gov/products/exper/day4-8/media/day${d}prob.png`;
-  return `https://www.spc.noaa.gov/products/outlook/day${d}otlk_${type.toLowerCase()}.gif`;
+  if (+d === 3) {
+    return type === 'PROB'
+      ? `https://www.spc.noaa.gov/products/outlook/day3prob.png`
+      : `https://www.spc.noaa.gov/products/outlook/day3otlk.png`;
+  }
+  if (type === 'CAT') return `https://www.spc.noaa.gov/products/outlook/day${d}otlk.png`;
+  return `https://www.spc.noaa.gov/products/outlook/day${d}probotlk_${type.toLowerCase()}.png`;
 }
 
 function _spcDiscussionUrl(day) {
@@ -1585,35 +1632,32 @@ function _spcViewerUpdateImage() {
   const img = document.getElementById('spc-viewer-img');
   const imgStatus = document.getElementById('spc-viewer-img-status');
   if (img) {
-    img.src = '';
-    img.style.display = 'none';
-    if (imgStatus) { imgStatus.textContent = 'Loading…'; imgStatus.style.display = 'block'; }
     const imageUrl = _spcImageUrl(_spcViewerDay, type.id);
     const capturedDay = _spcViewerDay;
     const capturedIdx = _spcViewerIdx;
-    invoke('fetch_url_base64', { url: imageUrl }).then(res => {
-      if (!overlay.classList.contains('open')) return;
-      if (_spcViewerDay !== capturedDay || _spcViewerIdx !== capturedIdx) return;
-      if (!res || res.status < 200 || res.status >= 400 || !res.body_base64) {
-        if (imgStatus) { imgStatus.textContent = `Image unavailable (HTTP ${res?.status ?? '?'})`; imgStatus.style.display = 'block'; }
-        return;
-      }
-      const mime = imageUrl.endsWith('.png') ? 'image/png' : 'image/gif';
-      const dataUrl = `data:${mime};base64,${res.body_base64}`;
-      // Set handlers BEFORE src so they fire even if load is synchronous
-      img.onload = () => {
-        img.style.display = 'block';
-        if (imgStatus) imgStatus.style.display = 'none';
-      };
-      img.onerror = () => {
-        img.style.display = 'none';
-        if (imgStatus) { imgStatus.textContent = 'Image could not be rendered.'; imgStatus.style.display = 'block'; }
-      };
-      img.src = dataUrl;
-    }).catch(err => {
-      if (!overlay.classList.contains('open')) return;
-      if (imgStatus) { imgStatus.textContent = `Failed to load: ${err?.message || err || 'unknown error'}`; imgStatus.style.display = 'block'; }
-    });
+    // If already cached, show instantly
+    if (_spcImageCache.has(imageUrl)) {
+      img.onload = () => { img.style.display = 'block'; if (imgStatus) imgStatus.style.display = 'none'; };
+      img.onerror = () => { img.style.display = 'none'; if (imgStatus) { imgStatus.textContent = 'Image could not be rendered.'; imgStatus.style.display = 'block'; } };
+      img.src = _spcImageCache.get(imageUrl);
+      img.style.display = 'block';
+      if (imgStatus) imgStatus.style.display = 'none';
+    } else {
+      img.src = '';
+      img.style.display = 'none';
+      if (imgStatus) { imgStatus.textContent = 'Loading…'; imgStatus.style.display = 'block'; }
+      _fetchSpcImageDataUrl(imageUrl).then(dataUrl => {
+        if (!overlay.classList.contains('open')) return;
+        if (_spcViewerDay !== capturedDay || _spcViewerIdx !== capturedIdx) return;
+        img.onload = () => { img.style.display = 'block'; if (imgStatus) imgStatus.style.display = 'none'; };
+        img.onerror = () => { img.style.display = 'none'; if (imgStatus) { imgStatus.textContent = 'Image could not be rendered.'; imgStatus.style.display = 'block'; } };
+        img.src = dataUrl;
+      }).catch(err => {
+        if (!overlay.classList.contains('open')) return;
+        if (_spcViewerDay !== capturedDay || _spcViewerIdx !== capturedIdx) return;
+        if (imgStatus) { imgStatus.textContent = `Image unavailable (${err?.message || 'error'})`; imgStatus.style.display = 'block'; }
+      });
+    }
   }
   _updateSpcViewerNavButtons();
 }
@@ -1634,6 +1678,12 @@ function openSpcViewer(day, type) {
   _spcViewerIdx = Math.max(0, dayOptions.findIndex(t => t.id === (type || 'CAT')));
   overlay.classList.add('open');
   _spcViewerUpdateImage();
+  // Prefetch all other types for this day in the background so prev/next is instant
+  const prefetchDay = _spcViewerDay;
+  _spcViewerTypes.forEach(t => {
+    const url = _spcImageUrl(prefetchDay, t.id);
+    if (!_spcImageCache.has(url)) _fetchSpcImageDataUrl(url).catch(() => {});
+  });
   // Load discussion text
   const textEl = document.getElementById('spc-viewer-discussion-text');
   if (textEl) {
@@ -1804,8 +1854,10 @@ const _weatherWiseRelayState = {
   pollingSid: '',        // kept for compatibility checks
   flyForceInstanceId: '',
   namespaceReady: false,
-  desiredRoom: '',
+  desiredRoom: '',         // count:radar:{STATION}
   joinedRoom: '',
+  desiredProductRoom: '',  // radar:{STATION}:{FOLDER} — direct file-ready pushes
+  joinedProductRoom: '',
   countByStation: new Map(),
 };
 
@@ -1996,6 +2048,92 @@ function _weatherWiseRelayCurrentCountRoom() {
   return `count:radar:${canonicalStationId(activeStation)}`;
 }
 
+function _weatherWiseRelayCurrentProductRoom() {
+  if (!WEATHERWISE_RELAY_ENABLED) return '';
+  if (!activeStation || isLocalRadarMode()) return '';
+  if (!_canUseProcessedWise(activeStation, activeFamily, activeTilt)) return '';
+  const folder = _processedWiseFolderName(activeStation, activeFamily, activeTilt);
+  if (!folder) return '';
+  return `radar:${canonicalStationId(activeStation)}:${folder}`;
+}
+
+// Guards for the relay-triggered fast-activate path.
+let _relayActivateActive = false;
+let _relayActivateQueued = false;
+
+// Called whenever the relay signals a new scan is available (either from the
+// product room push or from a count change).  Probes the file URL directly to
+// get the new filename — bypassing the Python dir.list cache — then immediately
+// enqueues it for decode.
+async function _relayActivateNewFrame(stationId, family, tilt, knownFilename = null) {
+  if (_relayActivateActive) {
+    _relayActivateQueued = true;
+    return;
+  }
+  _relayActivateActive = true;
+  try {
+    const sid = canonicalStationId(stationId);
+    const ck = `${sid}:${family}:${tilt}`;
+
+    let probedMeta = null;
+
+    // Fast path: we already know the filename from the product-room push
+    if (knownFilename && /\.wise$/i.test(knownFilename)) {
+      const normalizedTilt = _normalizeProcessedWiseTiltForStation(sid, family, tilt);
+      probedMeta = _buildProcessedWiseMeta(sid, family, normalizedTilt, knownFilename);
+    }
+
+    // Probe path: guess the filename by direct S3 HEAD requests (no dir.list)
+    if (!probedMeta) {
+      const currentFileName = _processedWiseFileNameFromKey(comboLatestKey.get(ck) || '');
+      probedMeta = await _probeLatestProcessedWiseMeta(sid, family, tilt, currentFileName, { ignoreCooldown: true });
+    }
+
+    if (!probedMeta?.key) {
+      // Probe found nothing — fall back to the traditional dir.list path
+      await pollActiveL3Latest(stationId);
+      return;
+    }
+
+    // Confirm the probed file is actually newer than what we have
+    const currentKey = comboLatestKey.get(ck) || '';
+    if (probedMeta.key === currentKey) return;
+    const probedTs = _parseProcessedWiseFileTimestampMs(probedMeta.fileName);
+    const currentTs = _parseProcessedWiseFileTimestampMs(_processedWiseFileNameFromKey(currentKey));
+    if (Number.isFinite(currentTs) && Number.isFinite(probedTs) && probedTs <= currentTs) return;
+
+    // Guard: user may have switched station/product while we were probing
+    if (sid !== canonicalStationId(activeStation) || family !== activeFamily || tilt !== activeTilt) return;
+
+    scheduleProcessedWiseSiblingWarm(sid, family, tilt);
+
+    if (frameCache.has(probedMeta.key)) {
+      // Already in cache (predictive prefetch hit)
+      _setL3HistoryEntries(ck, [...(historyMap.get(ck) || []), probedMeta], probedMeta.key);
+      if (liveSweepEnabled && !sweepActive) {
+        const d = frameCache.get(probedMeta.key);
+        if (d) beginSweepReveal(d, probedMeta.key); else showFrame(probedMeta.key);
+      } else if (!sweepActive) {
+        showFrame(probedMeta.key);
+      }
+    } else {
+      // Enqueue decode; decode worker will call _setL3HistoryEntries via activateL3Latest
+      const prevKey = comboLatestKey.get(ck);
+      if (liveSweepEnabled && prevKey) sweepPendingKey = probedMeta.key;
+      enqueueDecode(probedMeta.key, { ...probedMeta, activateL3Latest: true, comboKey: ck, latestEntry: probedMeta }, true);
+    }
+    _syncLoadMoreBtn();
+    _schedulePredictiveWisePrefetch(sid, family, tilt, probedMeta.fileName);
+  } catch (_) {
+  } finally {
+    _relayActivateActive = false;
+    if (_relayActivateQueued) {
+      _relayActivateQueued = false;
+      void _relayActivateNewFrame(stationId, family, tilt, null).catch(() => {});
+    }
+  }
+}
+
 function _scheduleProcessedWiseImmediateRefresh(delayMs = 0) {
   if (_processedWiseRealtimeRefreshTimer != null) {
     clearTimeout(_processedWiseRealtimeRefreshTimer);
@@ -2031,15 +2169,29 @@ function _weatherWiseRelaySend(payload) {
 
 function _weatherWiseRelayJoinDesiredRoom() {
   if (!_weatherWiseRelayState.namespaceReady) return;
-  const desired = String(_weatherWiseRelayState.desiredRoom || '');
-  if (_weatherWiseRelayState.joinedRoom === desired) return;
-  if (_weatherWiseRelayState.joinedRoom) {
-    _weatherWiseRelaySend(`42["room:leave","${_weatherWiseRelayState.joinedRoom}"]`);
-    _weatherWiseRelayState.joinedRoom = '';
+
+  // Count room (station-wide: fires on any product update)
+  const desiredCount = String(_weatherWiseRelayState.desiredRoom || '');
+  if (_weatherWiseRelayState.joinedRoom !== desiredCount) {
+    if (_weatherWiseRelayState.joinedRoom) {
+      _weatherWiseRelaySend(`42["room:leave","${_weatherWiseRelayState.joinedRoom}"]`);
+      _weatherWiseRelayState.joinedRoom = '';
+    }
+    if (desiredCount && _weatherWiseRelaySend(`42["room:join","${desiredCount}"]`)) {
+      _weatherWiseRelayState.joinedRoom = desiredCount;
+    }
   }
-  if (!desired) return;
-  if (_weatherWiseRelaySend(`42["room:join","${desired}"]`)) {
-    _weatherWiseRelayState.joinedRoom = desired;
+
+  // Product room (product-specific: fires with exact filename when a new scan lands)
+  const desiredProduct = String(_weatherWiseRelayState.desiredProductRoom || '');
+  if (_weatherWiseRelayState.joinedProductRoom !== desiredProduct) {
+    if (_weatherWiseRelayState.joinedProductRoom) {
+      _weatherWiseRelaySend(`42["room:leave","${_weatherWiseRelayState.joinedProductRoom}"]`);
+      _weatherWiseRelayState.joinedProductRoom = '';
+    }
+    if (desiredProduct && _weatherWiseRelaySend(`42["room:join","${desiredProduct}"]`)) {
+      _weatherWiseRelayState.joinedProductRoom = desiredProduct;
+    }
   }
 }
 
@@ -2065,6 +2217,7 @@ function _weatherWiseRelayClose(scheduleReconnect = false) {
   _weatherWiseRelayState.ws = null;
   _weatherWiseRelayState.namespaceReady = false;
   _weatherWiseRelayState.joinedRoom = '';
+  _weatherWiseRelayState.joinedProductRoom = '';
   _weatherWiseRelayState.pollingSid = '';
   if (ws) {
     ws.onmessage = null;
@@ -2077,6 +2230,21 @@ function _weatherWiseRelayClose(scheduleReconnect = false) {
 
 function _weatherWiseRelayHandleEvent(eventName, payload) {
   const name = String(eventName || '');
+
+  // Product room: "radar:{STATION}:{FOLDER}" — fires the instant a new .wise file lands.
+  // This gives us the filename directly, so no dir.list or probing is needed.
+  if (name.startsWith('radar:') && !name.startsWith('radar-')) {
+    if (name === _weatherWiseRelayState.joinedProductRoom
+        && activeStation
+        && _canUseProcessedWise(activeStation, activeFamily, activeTilt)) {
+      const filename = String(payload?.filename || payload?.file || payload?.name || '').trim();
+      void _relayActivateNewFrame(activeStation, activeFamily, activeTilt, filename || null).catch(() => {});
+    }
+    return;
+  }
+
+  // Count room: "count:radar:{STATION}" — fires when any product's count changes.
+  // Use as a fallback trigger when the product room hasn't fired yet.
   if (!name.startsWith('count:radar:')) return;
   const stationId = canonicalStationId(name.slice('count:radar:'.length));
   if (!stationId) return;
@@ -2089,12 +2257,8 @@ function _weatherWiseRelayHandleEvent(eventName, payload) {
   if (!changed) return;
   if (stationId !== canonicalStationId(activeStation)) return;
   if (!_canUseProcessedWise(activeStation, activeFamily, activeTilt)) return;
-  // Start a background probe immediately so the file bytes are in-flight
-  // (and deduplicated) before _scheduleProcessedWiseImmediateRefresh fires.
-  void _probeLatestProcessedWiseMeta(
-    activeStation, activeFamily, activeTilt, null, { ignoreCooldown: true }
-  ).catch(() => {});
-  _scheduleProcessedWiseImmediateRefresh(0);
+  // Only use count-room as trigger if the product room didn't already handle this scan
+  void _relayActivateNewFrame(activeStation, activeFamily, activeTilt, null).catch(() => {});
 }
 
 function _weatherWiseRelayHandleMessage(raw) {
@@ -2205,9 +2369,11 @@ async function _weatherWiseRelayEnsureConnected() {
 }
 
 function _syncProcessedWiseRealtime() {
-  const desired = _weatherWiseRelayCurrentCountRoom();
-  _weatherWiseRelayState.desiredRoom = desired;
-  if (!desired) {
+  const desiredCount   = _weatherWiseRelayCurrentCountRoom();
+  const desiredProduct = _weatherWiseRelayCurrentProductRoom();
+  _weatherWiseRelayState.desiredRoom        = desiredCount;
+  _weatherWiseRelayState.desiredProductRoom = desiredProduct;
+  if (!desiredCount && !desiredProduct) {
     _weatherWiseRelayClose(false);
     return;
   }
@@ -2362,11 +2528,28 @@ async function _fetchRecentProcessedWiseMetas(stationId, family, tilt, maxFrames
   const normalizedTilt = _normalizeProcessedWiseTiltForStation(stationId, normalizedFamily, tilt);
   const cacheKey = `${sid}:${normalizedFamily}:${normalizedTilt}`;
   const wanted = Math.max(1, Math.min(MAX_HISTORY_FRAMES, Math.round(Number(maxFrames) || 1)));
+  const existingHistory = historyMap.get(cacheKey) || [];
+  if (_isManualHistoryActive(cacheKey) && existingHistory.length >= wanted) {
+    return existingHistory.slice(-wanted);
+  }
   let files = [];
   try {
-    const text = await _fetchTextViaTauri(_processedWiseListUrl(sid, normalizedFamily, normalizedTilt));
-    files = _parseProcessedWiseListing(text);
+    const result = await invoke('list_wise_frames', {
+      station: sid,
+      family: normalizedFamily,
+      tilt: normalizedTilt,
+      maxFrames: wanted,
+      mode: 'manual',
+    });
+    files = Array.isArray(result?.frames) ? result.frames : [];
   } catch (_) {}
+
+  if (!files.length) {
+    try {
+      const text = await _fetchTextViaTauri(_processedWiseListUrl(sid, normalizedFamily, normalizedTilt));
+      files = _parseProcessedWiseListing(text);
+    } catch (_) {}
+  }
 
   let entries = files
     .slice(-wanted)
@@ -4182,6 +4365,7 @@ function _alertsWarnClass(eventName, props = {}) {
   }
 
   if (e.includes('flash flood warning')) return 'FFW';
+  if (e.includes('flood warning')) return 'FLW';
   if (e.includes('tornado watch')) return isPds ? 'TOWP' : 'TOW';
   if (e.includes('severe thunderstorm watch')) return isPds ? 'SVWP' : 'SVW';
   return '';
@@ -4192,7 +4376,7 @@ const _WARN_CATEGORY_MAP = {
   severe:  new Set(['SVR', 'SVRC', 'SVRD', 'SVW', 'SVWP']),
   winter:  new Set(['WSW', 'BLW', 'ISW', 'SNQ', 'WCW', 'LESW', 'FFZ', 'HFZ', 'FZW', 'WSWA', 'ISWA', 'LESWA', 'WWA', 'FRA', 'WCVA', 'LESA']),
   special: new Set(['SPS', 'HWO', 'DFA', 'HWW', 'WNDADV']),
-  flood:   new Set(['FFW']),
+  flood:   new Set(['FFW', 'FLW']),
 };
 
 function _warningCategory(warnClass) {
@@ -4504,6 +4688,7 @@ function _warningUrgencyScore(props = {}) {
     SVRC: 780,
     SVR: 740,
     FFW: 700,
+    FLW: 520,
     // Winter warnings (high priority)
     BLW: 750,
     WSW: 720,
@@ -4815,6 +5000,7 @@ function _collectWarningDashboardSnapshot() {
   for (const feature of alertsById.values()) {
     if (_alertsFeatureExpired(feature, nowMs)) continue;
     const props = feature?.properties || {};
+    if (!_warningEnabledForUi(props)) continue;
     const event = String(props?.event || props?.eventRaw || '').trim();
     const warnClassVal = String(props?._warnClass || '').trim();
     // Include any alert that has a recognized warnClass, or falls back to old "warning" name check
@@ -5350,6 +5536,7 @@ function ensureWarningDashboardMessaging() {
 
 function _alertsClearProviderFeatures(provider) {
   if (!provider) return;
+  if (provider === ALERT_SOURCE_NWS_BOOTSTRAP) _alertsClearBootstrapPruneTimer();
   let changed = false;
   for (const [id, feature] of alertsById.entries()) {
     if (String(feature?.properties?._provider || '') === provider) {
@@ -5458,16 +5645,10 @@ function _alertsUpsertFromPayload(payload) {
   }
 }
 
-function _canonicalAlertEvent(eventName) {
+function _alertsNwsApiWarningEvent(eventName) {
   const raw = String(eventName || '').trim();
   if (!raw) return null;
-  const s = raw.toLowerCase();
-  if (s.includes('tornado warning')) return 'Tornado Warning';
-  if (s.includes('severe thunderstorm warning')) return 'Severe Thunderstorm Warning';
-  if (s.includes('flash flood warning')) return 'Flash Flood Warning';
-  if (s.includes('tornado watch')) return 'Tornado Watch';
-  if (s.includes('severe thunderstorm watch')) return 'Severe Thunderstorm Watch';
-  return null;
+  return /warning/i.test(raw) ? raw : null;
 }
 
 function _alertsNormalizeNwsApiFeature(feature, provider = ALERT_SOURCE_NWS_API) {
@@ -5478,8 +5659,11 @@ function _alertsNormalizeNwsApiFeature(feature, provider = ALERT_SOURCE_NWS_API)
 
   const props = feature?.properties || {};
   const eventRaw = String(props?.event || '').trim();
-  const event = _canonicalAlertEvent(eventRaw);
+  const event = _alertsNwsApiWarningEvent(eventRaw);
   if (!event) return null;
+
+  const warnClass = _alertsWarnClass(event, props);
+  if (!warnClass || !WARNING_PREF_ID_SET.has(warnClass)) return null;
 
   const id = String(feature?.id || props?.id || props?.tracking || '').trim();
   if (!id) return null;
@@ -5502,7 +5686,7 @@ function _alertsNormalizeNwsApiFeature(feature, provider = ALERT_SOURCE_NWS_API)
       id,
       event,
       eventRaw,
-      _warnClass: _alertsWarnClass(event, props),
+      _warnClass: warnClass,
       messageType: String(props?.messageType || 'Alert'),
       sent: Number.isFinite(sentMs) ? new Date(sentMs).toISOString() : null,
       expires: Number.isFinite(expiresMs) ? new Date(expiresMs).toISOString() : null,
@@ -5510,6 +5694,123 @@ function _alertsNormalizeNwsApiFeature(feature, provider = ALERT_SOURCE_NWS_API)
       _provider: provider,
     },
   };
+}
+
+function _alertsProviderForFeature(feature) {
+  return String(feature?.properties?._provider || '').trim();
+}
+
+function _alertsIdentityKey(feature) {
+  const props = feature?.properties || {};
+  const warnClass = _warningClassId(props);
+  const event = String(props?.event || props?.eventRaw || '').trim().toUpperCase();
+  const headline = String(props?.headline || '').replace(/\s+/g, ' ').trim().toUpperCase();
+  const areaDesc = String(props?.areaDesc || props?.area || '').replace(/\s+/g, ' ').trim().toUpperCase();
+  const vtecRaw = props?.parameters?.VTEC ?? props?.parameters?.vtec;
+  const vtec = Array.isArray(vtecRaw)
+    ? vtecRaw.map(v => String(v || '').trim().toUpperCase()).filter(Boolean).join(',')
+    : String(vtecRaw || '').trim().toUpperCase();
+  const ugcRaw = props?.parameters?.UGC ?? props?.parameters?.ugc;
+  const ugc = Array.isArray(ugcRaw)
+    ? ugcRaw.map(v => String(v || '').trim().toUpperCase()).filter(Boolean).join(',')
+    : String(ugcRaw || '').trim().toUpperCase();
+  const issuedMs = _alertsParseTimeMs(props?.sent ?? props?.issued ?? props?.effective ?? props?.onset);
+  const expiresMs = _alertsParseTimeMs(props?.expires);
+  const issuedBucket = Number.isFinite(issuedMs) ? Math.floor(issuedMs / 60000) : 0;
+  const expiresBucket = Number.isFinite(expiresMs) ? Math.floor(expiresMs / 60000) : 0;
+  return [
+    warnClass || event,
+    vtec,
+    ugc || areaDesc,
+    issuedBucket,
+    expiresBucket,
+    headline,
+  ].join('|');
+}
+
+function _alertsClearBootstrapPruneTimer() {
+  if (alertsBootstrapPruneTimer == null) return;
+  clearTimeout(alertsBootstrapPruneTimer);
+  alertsBootstrapPruneTimer = null;
+}
+
+function _alertsPruneBootstrapDuplicates() {
+  const liveIds = new Set();
+  const liveKeys = new Set();
+  for (const feature of alertsById.values()) {
+    const provider = _alertsProviderForFeature(feature);
+    if (!provider || provider === ALERT_SOURCE_NWS_BOOTSTRAP) continue;
+    liveIds.add(String(feature?.id || ''));
+    liveKeys.add(_alertsIdentityKey(feature));
+  }
+
+  let changed = false;
+  for (const [id, feature] of alertsById.entries()) {
+    if (_alertsProviderForFeature(feature) !== ALERT_SOURCE_NWS_BOOTSTRAP) continue;
+    if (liveIds.has(String(id)) || liveKeys.has(_alertsIdentityKey(feature))) {
+      alertsById.delete(id);
+      changed = true;
+    }
+  }
+  if (changed) _alertsScheduleSourceUpdate();
+}
+
+function _alertsScheduleBootstrapPrune() {
+  _alertsClearBootstrapPruneTimer();
+  alertsBootstrapPruneTimer = setTimeout(() => {
+    alertsBootstrapPruneTimer = null;
+    _alertsClearProviderFeatures(ALERT_SOURCE_NWS_BOOTSTRAP);
+  }, ALERT_BOOTSTRAP_GRACE_MS);
+}
+
+function _alertsReplaceNormalizedCollection(features, provider, opts = {}) {
+  const normalized = Array.isArray(features) ? features.filter(Boolean) : [];
+  const removeMissing = opts.removeMissing !== false;
+  const activeIds = new Set();
+  let changed = false;
+  const nowMs = Date.now();
+  const seedMode = !alertsSeeded;
+  const warningChanges = [];
+
+  for (const next of normalized) {
+    activeIds.add(next.id);
+
+    const prev = alertsById.get(next.id);
+    const prevFlashUntil = Number(prev?.properties?._flashUntilMs);
+    if (Number.isFinite(prevFlashUntil) && prevFlashUntil > nowMs) {
+      next.properties._flashUntilMs = prevFlashUntil;
+    } else if (!prev && !seedMode) {
+      next.properties._flashUntilMs = nowMs + 10_000;
+    }
+
+    if (!prev || JSON.stringify(prev.properties) !== JSON.stringify(next.properties) || JSON.stringify(prev.geometry) !== JSON.stringify(next.geometry)) {
+      alertsById.set(next.id, next);
+      changed = true;
+      if (warningNotificationsPrimed && !seedMode) {
+        const kind = _warningChangeKind(prev, next);
+        if (kind) warningChanges.push({ feature: next, kind });
+      }
+    }
+  }
+
+  if (removeMissing) {
+    for (const [id, feature] of alertsById.entries()) {
+      if (_alertsProviderForFeature(feature) !== provider) continue;
+      if (!activeIds.has(id)) {
+        if (warningNotificationsPrimed && !seedMode) {
+          const kind = _warningChangeKind(feature, null, { removed: true });
+          if (kind) warningChanges.push({ feature, kind });
+        }
+        alertsById.delete(id);
+        changed = true;
+      }
+    }
+  }
+
+  if (!alertsSeeded) alertsSeeded = true;
+  if (changed) _alertsScheduleSourceUpdate();
+  else _ensureOverlayFlashTicker();
+  if (warningChanges.length) _announceWarningChanges(warningChanges);
 }
 
 function _alertsNormalizeExternalFeature(feature, provider = ALERT_SOURCE_NWWS) {
@@ -5559,51 +5860,43 @@ function _alertsNormalizeExternalFeature(feature, provider = ALERT_SOURCE_NWWS) 
 
 function _alertsReplaceProviderCollection(collection, provider = ALERT_SOURCE_NWWS) {
   const features = Array.isArray(collection?.features) ? collection.features : [];
-  const activeIds = new Set();
-  let changed = false;
-  const nowMs = Date.now();
-  const seedMode = !alertsSeeded;
-  const warningChanges = [];
+  const normalized = features
+    .map(feature => _alertsNormalizeExternalFeature(feature, provider))
+    .filter(Boolean);
+  _alertsReplaceNormalizedCollection(normalized, provider);
+}
 
-  for (const feature of features) {
-    const next = _alertsNormalizeExternalFeature(feature, provider);
-    if (!next) continue;
-    activeIds.add(next.id);
+async function bootstrapNwsApiWarnings() {
+  if (!alertsVisible) return;
+  if (nwsBootstrapCompleted) return;
+  if (nwsBootstrapPromise) return nwsBootstrapPromise;
 
-    const prev = alertsById.get(next.id);
-    const prevFlashUntil = Number(prev?.properties?._flashUntilMs);
-    if (Number.isFinite(prevFlashUntil) && prevFlashUntil > nowMs) {
-      next.properties._flashUntilMs = prevFlashUntil;
-    } else if (!prev && !seedMode) {
-      next.properties._flashUntilMs = nowMs + 10_000;
+  nwsBootstrapPromise = (async () => {
+    let raw = null;
+    try {
+      raw = await _fetchGeoJsonViaTauri(NWS_API_ALERTS_URL);
+    } catch (err) {
+      console.warn('[NWS bootstrap] fetch failed:', err?.message || String(err));
+      return;
     }
 
-    if (!prev || JSON.stringify(prev.properties) !== JSON.stringify(next.properties) || JSON.stringify(prev.geometry) !== JSON.stringify(next.geometry)) {
-      alertsById.set(next.id, next);
-      changed = true;
-      if (warningNotificationsPrimed && !seedMode) {
-        const kind = _warningChangeKind(prev, next);
-        if (kind) warningChanges.push({ feature: next, kind });
-      }
-    }
-  }
+    const features = Array.isArray(raw?.features) ? raw.features : [];
+    const normalized = features
+      .map(feature => _alertsNormalizeNwsApiFeature(feature, ALERT_SOURCE_NWS_BOOTSTRAP))
+      .filter(feature => feature && _warningEnabledForUi(feature.properties));
 
-  for (const [id, feature] of alertsById.entries()) {
-    if (String(feature?.properties?._provider || '') !== provider) continue;
-    if (!activeIds.has(id)) {
-      if (warningNotificationsPrimed && !seedMode) {
-        const kind = _warningChangeKind(feature, null, { removed: true });
-        if (kind) warningChanges.push({ feature, kind });
-      }
-      alertsById.delete(id);
-      changed = true;
+    _alertsReplaceNormalizedCollection(normalized, ALERT_SOURCE_NWS_BOOTSTRAP);
+    if (nwwsHasPublishedSnapshot) {
+      _alertsPruneBootstrapDuplicates();
+      _alertsScheduleBootstrapPrune();
     }
-  }
+    nwsBootstrapCompleted = true;
+  })()
+    .finally(() => {
+      nwsBootstrapPromise = null;
+    });
 
-  if (!alertsSeeded) alertsSeeded = true;
-  if (changed) _alertsScheduleSourceUpdate();
-  else _ensureOverlayFlashTicker();
-  if (warningChanges.length) _announceWarningChanges(warningChanges);
+  return nwsBootstrapPromise;
 }
 
 async function ensureNwwsBridge() {
@@ -5637,8 +5930,11 @@ async function ensureNwwsBridge() {
       const generatedAt = String(payload?.generatedAt || '').trim();
       if (generatedAt && generatedAt === nwwsLastAlertsGeneratedAt) return;
       if (generatedAt) nwwsLastAlertsGeneratedAt = generatedAt;
+      nwwsHasPublishedSnapshot = true;
       _scheduleWarningNotificationPriming();
       _alertsReplaceProviderCollection(payload, ALERT_SOURCE_NWWS);
+      _alertsPruneBootstrapDuplicates();
+      _alertsScheduleBootstrapPrune();
     });
 
     await listen('nwws-log', evt => {
@@ -5768,6 +6064,7 @@ function applyAlertSourceMode() {
   alertSourceMode = ALERT_SOURCE_NWWS;
   stopNwsApiPolling();
   _alertsClearProviderFeatures(ALERT_SOURCE_NWS_API);
+  void bootstrapNwsApiWarnings();
   ensureNwwsBridge().catch(() => {});
 }
 
@@ -5980,8 +6277,17 @@ async function findLatestKey(stationId, selection) {
   const requestedTilt = normalizeTilt(selection?.tilt || '0.5');
   const requestedLabel = selectionLabel(requestedFamily, requestedTilt);
   if (_canUseProcessedWise(stationId, requestedFamily, requestedTilt)) {
-    const wiseMeta = await _fetchLatestProcessedWiseMeta(stationId, requestedFamily, requestedTilt);
-    if (wiseMeta?.key) return wiseMeta;
+    const result = await invoke('list_wise_frames', {
+      station: canonicalStationId(stationId),
+      family:  String(requestedFamily).trim().toUpperCase(),
+      tilt:    requestedTilt,
+      maxFrames: 1,
+    });
+    const frames = Array.isArray(result?.frames) ? result.frames : [];
+    if (frames.length) {
+      const meta = _buildProcessedWiseMeta(stationId, requestedFamily, result.tilt || requestedTilt, frames[frames.length - 1]);
+      if (meta?.key) return meta;
+    }
     throw new Error(`${stationId} ${requestedLabel} not found in processed feed`);
   }
   // Fast path: current-only probe returns quickly and avoids long "Connecting..." stalls.
@@ -6003,13 +6309,20 @@ async function findLatestKeyCurrentOnly(stationId, selection) {
   const requestedFamily = selection?.family || 'REF';
   const requestedTilt = normalizeTilt(selection?.tilt || '0.5');
   if (_canUseProcessedWise(stationId, requestedFamily, requestedTilt)) {
-    const wiseMeta = await _fetchLatestProcessedWiseMeta(
-      stationId,
-      requestedFamily,
-      requestedTilt,
-      { forceRefresh: selection?.forceRefresh === true },
-    );
-    return wiseMeta?.key ? wiseMeta : null;
+    try {
+      const result = await invoke('list_wise_frames', {
+        station: canonicalStationId(stationId),
+        family:  String(requestedFamily).trim().toUpperCase(),
+        tilt:    requestedTilt,
+        maxFrames: 1,
+      });
+      const frames = Array.isArray(result?.frames) ? result.frames : [];
+      if (frames.length) {
+        const meta = _buildProcessedWiseMeta(stationId, requestedFamily, result.tilt || requestedTilt, frames[frames.length - 1]);
+        if (meta?.key) return meta;
+      }
+    } catch (_) {}
+    return null;
   }
   const res = await resolveL3Selection(stationId, requestedFamily, requestedTilt, 1, true);
   return res?.latest?.key ? res.latest : null;
@@ -6019,8 +6332,49 @@ async function findLatestKeyCurrentOnly(stationId, selection) {
 // with typed array views (zero-copy — all arrays point into the original ArrayBuffer).
 function parseRadarBinaryBlob(buffer) {
   const dv = new DataView(buffer);
-  // Verify magic
   const magic = String.fromCharCode(dv.getUint8(0), dv.getUint8(1), dv.getUint8(2), dv.getUint8(3));
+
+  // ── WDAR format (Python WISE decode) ──────────────────────────────────────
+  if (magic === 'WDAR') {
+    let o = 4;
+    const vertex_count      = dv.getUint32(o, true); o += 4;
+    const gate_count        = dv.getUint32(o, true); o += 4;
+    const source_gate_count = dv.getUint32(o, true); o += 4;
+    const elevation         = dv.getFloat32(o, true); o += 4;
+    const station_lat       = dv.getFloat32(o, true); o += 4;
+    const station_lon       = dv.getFloat32(o, true); o += 4;
+    const scan_time_ms      = dv.getFloat64(o, true); o += 8;
+    o += 4;                                                    // unused slot
+    const decimated         = dv.getUint8(o) !== 0;  o += 1;
+    const has_types         = dv.getUint8(o) !== 0;  o += 1;
+    o += 4;                                                    // padding (h + H)
+    // field_name: 16 bytes null-padded at offset 46
+    const fieldRaw = new Uint8Array(buffer, 46, 16);
+    const nullIdx  = fieldRaw.indexOf(0);
+    const field    = new TextDecoder().decode(fieldRaw.slice(0, nullIdx < 0 ? 16 : nullIdx));
+    o = 64;
+
+    let _bufXy = null, _bufColor = null, _bufVals = null, _bufTypes = null;
+    if (vertex_count > 0) {
+      _bufXy    = new Float32Array(buffer, o, vertex_count * 2); o += vertex_count * 2 * 4;
+      _bufColor = new Uint8Array(buffer, o, vertex_count * 4);   o += vertex_count * 4;
+      _bufVals  = new Float32Array(buffer, o, vertex_count);     o += vertex_count * 4;
+      if (has_types) {
+        _bufTypes = new Uint8Array(buffer, o, vertex_count);
+      }
+    }
+    const scan_time = scan_time_ms > 0 ? new Date(scan_time_ms).toISOString() : null;
+    return {
+      vertex_count, gate_count, source_gate_count,
+      elevation, station_lat, station_lon, scan_time,
+      product_code: 0, decimated, field,
+      l2_product_mask: 0, l2_available_products: [],
+      l2_tilt_idx: undefined, l2_tilts: undefined,
+      _bufXy, _bufColor, _bufVals, _bufTypes,
+    };
+  }
+
+  // ── RDAR format (L3 / L2 Python backend) ──────────────────────────────────
   if (magic !== 'RDAR') throw new Error(`Bad binary magic from backend: ${magic}`);
 
   let o = 4;
@@ -6633,7 +6987,16 @@ async function _decodeWiseKey(key, opts = {}) {
 
 async function backendDecode(key, opts = {}) {
   if (String(key || '').startsWith('WISE:')) {
-    return _decodeWiseKey(key, opts);
+    const parts = String(key).split(':');
+    const family = String(parts[2] || '').trim().toUpperCase();
+    const palette = family === 'PRT'
+      ? _prepareWisePrtPalette()
+      : _prepareInlinePalette(ctGetEffectivePalette(family));
+    const palettes = palette
+      ? { [family]: { xp: Array.from(palette.xp), fp: Array.from(palette.fp), scale: palette.scale } }
+      : {};
+    const buf = await invoke('decode_wise_key', { key, palettes });
+    return parseRadarBinaryBlob(buf);
   }
   throw new Error('Legacy Py-ART decode was removed. This build supports processed WeatherWise radar only.');
 }
@@ -6678,7 +7041,7 @@ let _rgProgAttribs = null;
 // Maximum vertices to upload per render frame for the chunked GPU upload path.
 // Keeps each bufferSubData call well within the 16 ms frame budget even on
 // slow integrated graphics (~320 KB per chunk across all three buffers).
-const _UPLOAD_CHUNK_VERTS = 20_000;
+const _UPLOAD_CHUNK_VERTS = 60_000;
 
 class RadarGateLayer {
   // u_sweep_mode: 0=normal, 1=reveal new scan (discard az>sweep_deg), 2=erase old scan (discard az<=sweep_deg)
@@ -6815,7 +7178,7 @@ class RadarGateLayer {
     this.vertexCount = 0;
   }
 
-  setFrame(frame, onReady = null) {
+  setFrame(frame, onReady = null, opts = {}) {
     // If this exact frame object is already in GPU, fire callback immediately.
     if (frame && this._loadedData === frame) {
       if (this._visible) this.map?.triggerRepaint();
@@ -6842,8 +7205,12 @@ class RadarGateLayer {
     if (xy.length !== vertexCount * 2) throw new Error('Backend triangle position payload mismatch');
     if (colors.length !== vertexCount * 4) throw new Error('Backend triangle color payload mismatch');
 
-    const replaceVisibleFrame = false; // Always use chunked upload to prevent main thread lag
-    this._pending = { vertexCount, xy, colors, valData, _offset: 0, _immediate: replaceVisibleFrame };
+    // When no frame is currently visible, upload immediately in a single render
+    // pass so the scan appears without a multi-frame build-up delay.
+    // When replacing a visible frame, use the chunked path so the old scan
+    // stays smooth until the new one is fully ready.
+    const _immediate = opts?.immediateUpload === true || this.vertexCount === 0;
+    this._pending = { vertexCount, xy, colors, valData, _offset: 0, _immediate };
     this._onSwap = onReady || null;
     this.map?.triggerRepaint();
   }
@@ -7115,7 +7482,7 @@ class SweepLayer {
   }
 }
 
-function applyRadarFrame(data, frameKey = '', onFrameVisible = null) {
+function applyRadarFrame(data, frameKey = '', onFrameVisible = null, opts = {}) {
   if (!('vertex_count' in data)) {
     throw new Error('Backend payload mismatch. Rebuild backend and app together.');
   }
@@ -7130,7 +7497,7 @@ function applyRadarFrame(data, frameKey = '', onFrameVisible = null) {
   const minVal = _paneMinValue(family);
   radarLayer.setMinValue(minVal);
   radarLayerSweep?.setMinValue(minVal);
-  radarLayer.setFrame(data, onFrameVisible);
+  radarLayer.setFrame(data, onFrameVisible, opts);
   displayedPrimaryComboKey = ck;
   displayedPrimaryFamily = family;
 }
@@ -7343,6 +7710,62 @@ function _secondaryPaneTargetHistoryCount() {
     1,
   );
   return Math.max(1, Math.min(MAX_HISTORY_FRAMES, desired));
+}
+
+const CURRENT_STATION_HISTORY_TRIM_DELAY_MS = 20000;
+const NONVISIBLE_HISTORY_RETAIN_FRAMES = 1;
+let _stationResidencyTrimTimer = null;
+
+function _residentComboKeysForCurrentStation() {
+  const keep = new Set();
+  const stationId = canonicalStationId(activeStation);
+  if (!stationId) return keep;
+  keep.add(activeCacheKey());
+  if (_manualHistoryComboKey && _manualHistoryComboKey.startsWith(`${stationId}:`)) {
+    keep.add(_manualHistoryComboKey);
+  }
+  if (multiPaneCount > 1 && !levelII) {
+    for (const pane of secondaryPaneMaps.values()) {
+      if (!pane || pane.id > multiPaneCount) continue;
+      keep.add(_paneComboKey(pane));
+    }
+  }
+  return keep;
+}
+
+function _trimCurrentStationResidency() {
+  const stationId = canonicalStationId(activeStation);
+  if (!stationId || levelII || isLocalRadarMode()) return;
+  const keepComboKeys = _residentComboKeysForCurrentStation();
+  for (const ck of [...historyMap.keys()]) {
+    if (!String(ck).startsWith(`${stationId}:`) || keepComboKeys.has(ck)) continue;
+    const entries = historyMap.get(ck) || [];
+    if (entries.length > NONVISIBLE_HISTORY_RETAIN_FRAMES) {
+      const trimmed = entries.slice(-NONVISIBLE_HISTORY_RETAIN_FRAMES);
+      historyMap.set(ck, trimmed);
+      comboLatestKey.set(ck, trimmed[trimmed.length - 1].key);
+      comboHistoryTargetFrames.set(ck, NONVISIBLE_HISTORY_RETAIN_FRAMES);
+    }
+  }
+  for (const key of [...frameCache.keys()]) {
+    const comboKey = comboKeyFromS3Key(String(key || ''));
+    if (!comboKey || !comboKey.startsWith(`${stationId}:`) || keepComboKeys.has(comboKey)) continue;
+    const latestKey = comboLatestKey.get(comboKey);
+    if (latestKey && latestKey === key) continue;
+    frameCache.delete(key);
+  }
+  for (const ck of [...layerPool.keys()]) {
+    if (!String(ck).startsWith(`${stationId}:`) || keepComboKeys.has(ck)) continue;
+    _disposePrimaryLayerPoolForCombo(ck);
+  }
+}
+
+function _scheduleCurrentStationResidencyTrim(delayMs = CURRENT_STATION_HISTORY_TRIM_DELAY_MS) {
+  clearTimeout(_stationResidencyTrimTimer);
+  _stationResidencyTrimTimer = setTimeout(() => {
+    _stationResidencyTrimTimer = null;
+    _trimCurrentStationResidency();
+  }, Math.max(0, delayMs));
 }
 
 function _targetHistoryIndexForEntries(entries) {
@@ -7910,6 +8333,7 @@ function _destroySecondaryPane(id) {
   const pane = secondaryPaneMaps.get(id);
   if (pane) {
     _cancelPaneSweep(pane, false);
+    _disposePaneLayerPool(pane);
     try { pane.map.remove(); } catch (_) {}
     secondaryPaneMaps.delete(id);
   }
@@ -7939,6 +8363,21 @@ function _updateRecentFramesMenuSelection() {
   document.querySelectorAll('.recent-frames-option').forEach(btn => {
     btn.classList.toggle('active', Number(btn.dataset.count) === recentWiseFrameCount);
   });
+}
+
+function _syncLoadMoreBtn() {
+  const btn = document.getElementById('load-more-frames-btn');
+  if (!btn) return;
+  const show = (
+    !levelII &&
+    !!activeStation &&
+    _canUseProcessedWise(activeStation, activeFamily, activeTilt)
+  );
+  btn.style.display = show ? '' : 'none';
+  if (!show) return;
+  const history = historyMap.get(activeCacheKey()) || [];
+  btn.disabled = history.length > 1;
+  btn.textContent = history.length > 1 ? 'Frames Loaded' : 'Load More Frames';
 }
 
 function _setRecentFramesMenuOpen(open) {
@@ -7974,6 +8413,20 @@ function _setRecentFramesProgress(state = null) {
   controlIslandEl.classList.add('recent-progress-active');
 }
 
+function _resetTransientLoadUi({ cancelRecent = true, cancelStation = true } = {}) {
+  clearTimeout(_loadBarHideTimer);
+  _loadBarHideTimer = null;
+  clearTimeout(_toastDrainTimer);
+  _toastDrainTimer = null;
+  if (cancelRecent) recentFramesLoadSeq += 1;
+  _hideRecentFramesProgress();
+  if (cancelStation) {
+    _stationLoadActive = false;
+    _stationDecodeCount = 0;
+  }
+  _setLoadBar(null);
+}
+
 function _updatePaneMenuSelection() {
   document.querySelectorAll('.pane-option').forEach(btn => {
     btn.classList.toggle('active', Number(btn.dataset.count) === multiPaneCount);
@@ -8005,6 +8458,7 @@ function setMultiPaneCount(count) {
     // Live multi-pane remains L3-only; imported local files are allowed.
     return;
   }
+  _resetTransientLoadUi();
   multiPaneCount = next;
   mapGridEl?.classList.remove('panes-1', 'panes-2', 'panes-3', 'panes-4');
   mapGridEl?.classList.add(`panes-${multiPaneCount}`);
@@ -8031,6 +8485,7 @@ function setMultiPaneCount(count) {
   if (activeStation && (!levelII || isLocalRadarMode())) {
     void _loadVisibleSecondaryPanes({ force: true });
   }
+  _scheduleCurrentStationResidencyTrim(0);
   _restartPanePolling();
 }
 
@@ -8864,11 +9319,6 @@ map.on('load', () => {
     if (drawMode) return;
     const stationId = e.features[0].properties.id;
     selectStation(stationId);
-    // If SPC overlay is visible and the click falls within an SPC polygon, also open the viewer
-    if (spcVisible) {
-      const spcHit = map.queryRenderedFeatures(e.point, { layers: ['spc-base-fill'] });
-      if (spcHit.length > 0) openSpcViewer(spcDay, spcType);
-    }
   });
 
   map.on('mousemove', e => _updateInspectorPointer(map, e, 1));
@@ -8999,6 +9449,10 @@ let alertSourceMode = ALERT_SOURCE_NWWS;
 let nwsApiPollTimer = null;
 let nwsApiPollEnforceMode = false;
 let nwsApiPollProvider = ALERT_SOURCE_NWS_API;
+let nwsBootstrapPromise = null;
+let nwsBootstrapCompleted = false;
+let nwwsHasPublishedSnapshot = false;
+let alertsBootstrapPruneTimer = null;
 let nwwsBridgeStartPromise = null;
 let nwwsBridgeListenersReady = false;
 let nwwsLastStatusSig = '';
@@ -9209,15 +9663,20 @@ function clearAllRuntimeCaches() {
 }
 
 // Parallel decode queue for the active radar selection.
-const N_DECODE_WORKERS_L3 = 4;
+const N_DECODE_WORKERS_L3 = 2;
 const N_DECODE_WORKERS_L3_BURST = 8;
 const N_DECODE_WORKERS_L2 = 2;
 const L3_DECODE_BURST_MS = 7000;
+const MANUAL_HISTORY_BURST_MS = 18000;
+const MANUAL_HISTORY_PLAY_BURST_MS = 12000;
 const PROCESSED_WISE_SIBLING_WARM_THROTTLE_MS = 6000;
 let _l3DecodeBurstUntil = 0;
 let _processedWiseWarmSeq = 0;
 let _processedWiseLastWarmKey = '';
 let _processedWiseLastWarmAt = 0;
+let _processedWiseWarmTimer = null;
+let _manualHistoryBurstUntil = 0;
+let _manualHistoryBurstComboKey = '';
 
 function requestL3DecodeBurst(durationMs = L3_DECODE_BURST_MS) {
   const ms = Math.max(500, Math.round(Number(durationMs) || L3_DECODE_BURST_MS));
@@ -9226,8 +9685,31 @@ function requestL3DecodeBurst(durationMs = L3_DECODE_BURST_MS) {
   startDecodeWorkers();
 }
 
+function _isManualHistoryBurstActive(comboKey = activeCacheKey()) {
+  return !!comboKey
+    && comboKey === _manualHistoryBurstComboKey
+    && comboKey === _manualHistoryComboKey
+    && Date.now() < _manualHistoryBurstUntil;
+}
+
+function _refreshManualHistoryBurst(comboKey = activeCacheKey(), durationMs = MANUAL_HISTORY_BURST_MS) {
+  if (!comboKey) return;
+  _manualHistoryBurstComboKey = comboKey;
+  const ms = Math.max(1000, Math.round(Number(durationMs) || MANUAL_HISTORY_BURST_MS));
+  const nextUntil = Date.now() + ms;
+  if (nextUntil > _manualHistoryBurstUntil) _manualHistoryBurstUntil = nextUntil;
+  requestL3DecodeBurst(ms);
+}
+
+function _clearManualHistoryBurst(comboKey = '') {
+  if (comboKey && comboKey !== _manualHistoryBurstComboKey) return;
+  _manualHistoryBurstUntil = 0;
+  _manualHistoryBurstComboKey = '';
+}
+
 function currentDecodeWorkerLimit() {
   if (_isL2PathForFamily(activeFamily)) return N_DECODE_WORKERS_L2;
+  if (_isManualHistoryBurstActive()) return N_DECODE_WORKERS_L3_BURST;
   return Date.now() < _l3DecodeBurstUntil ? N_DECODE_WORKERS_L3_BURST : N_DECODE_WORKERS_L3;
 }
 let decodeQueue = [];
@@ -9260,6 +9742,10 @@ function clearL3WarmQueue() {
     clearTimeout(_l3WarmTimer);
     _l3WarmTimer = null;
   }
+  if (_processedWiseWarmTimer) {
+    clearTimeout(_processedWiseWarmTimer);
+    _processedWiseWarmTimer = null;
+  }
 }
 
 function _processedWiseWarmSelectionKey(stationId = activeStation, family = activeFamily, tilt = activeTilt) {
@@ -9272,6 +9758,7 @@ function _processedWiseWarmSelectionKey(stationId = activeStation, family = acti
 function scheduleProcessedWiseSiblingWarm(stationId = activeStation, family = activeFamily, tilt = activeTilt, opts = {}) {
   const selectionKey = _processedWiseWarmSelectionKey(stationId, family, tilt);
   if (!selectionKey) return;
+  if (_isManualHistoryActive(selectionKey)) return;
   const force = opts?.force === true;
   const now = Date.now();
   if (!force
@@ -9279,10 +9766,15 @@ function scheduleProcessedWiseSiblingWarm(stationId = activeStation, family = ac
     && (now - _processedWiseLastWarmAt) < PROCESSED_WISE_SIBLING_WARM_THROTTLE_MS) {
     return;
   }
-  _processedWiseLastWarmKey = selectionKey;
-  _processedWiseLastWarmAt = now;
-  const seq = ++_processedWiseWarmSeq;
-  void _warmProcessedWiseSiblingProducts(seq, stationId, family, tilt);
+  // Delay sibling warming so it doesn't compete with the active frame decode/render.
+  clearTimeout(_processedWiseWarmTimer);
+  _processedWiseWarmTimer = setTimeout(() => {
+    _processedWiseWarmTimer = null;
+    _processedWiseLastWarmKey = selectionKey;
+    _processedWiseLastWarmAt = Date.now();
+    const seq = ++_processedWiseWarmSeq;
+    void _warmProcessedWiseSiblingProducts(seq, stationId, family, tilt);
+  }, 2500);
 }
 
 async function _warmProcessedWiseSiblingProducts(seq, stationId, family, tilt) {
@@ -9291,7 +9783,7 @@ async function _warmProcessedWiseSiblingProducts(seq, stationId, family, tilt) {
   if (!_canUseProcessedWise(sid, primaryFamily, tilt)) return;
   const siblings = supportedL3FamiliesForStation(sid).filter(otherFamily => otherFamily && otherFamily !== primaryFamily);
   if (!siblings.length) return;
-  requestL3DecodeBurst();
+  // Don't burst — sibling warming uses normal worker limit so it doesn't compete with active frame.
   await Promise.allSettled(siblings.map(async otherFamily => {
     const otherTilt = normalizeTiltForStationFamily(sid, otherFamily, tilt);
     const latestMeta = await findLatestKeyCurrentOnly(sid, { family: otherFamily, tilt: otherTilt });
@@ -9498,6 +9990,10 @@ function clearStaleQueueItems() {
   const keepKeys = new Set(history.map(h => h.key));
   const latest = comboLatestKey.get(ck);
   if (latest) keepKeys.add(latest);
+  if (_isManualHistoryActive(ck)) {
+    decodeQueue = decodeQueue.filter(job => keepKeys.has(job.s3key));
+    return;
+  }
   if (_isL2PathForFamily(activeFamily) && activeStation && !isLocalRadarMode()) {
     const visible = viewedKey();
     if (visible) keepKeys.add(visible);
@@ -9585,8 +10081,19 @@ function viewedKey() {
 
 // Evict least-recently-inserted non-protected frames when cache grows too large.
 // Keeps current history + sweep frame safe; evicts background combo frames.
-const FRAME_CACHE_MAX = 40;
+// Base limit; raised while timeline is active (scrubbing or playing history)
+// so the frames we just decoded stay resident across a full scrub pass.
+const FRAME_CACHE_BASE = 160;
+const FRAME_CACHE_TIMELINE_ACTIVE = 300;
 const HISTORY_SCRUB_PREFETCH_RADIUS = 16;
+const HISTORY_MANUAL_PREFETCH_RADIUS = 1;
+const TIMELINE_SETTLE_DEBOUNCE_MS = 140;
+
+function _frameCacheMax() {
+  return (_tlDragging || isPlaying || historyIdx >= 0)
+    ? FRAME_CACHE_TIMELINE_ACTIVE
+    : FRAME_CACHE_BASE;
+}
 
 function _collectVisiblePaneHistoryProtectionKeys() {
   const protectedKeys = new Set();
@@ -9637,13 +10144,23 @@ function _prefetchVisiblePaneHistoryNeighborhood(centerIndex, direction = 0) {
   requestL3DecodeBurst();
   const ck = activeCacheKey();
   const activeHistory = historyMap.get(ck) || [];
+  const manualHistoryActive = _isManualHistoryActive(ck);
   if (activeHistory.length) {
-    _enqueueHistoryNeighborhood(activeHistory, Math.max(0, Math.min(centerIndex, activeHistory.length - 1)), {
-      direction,
-      radius: HISTORY_SCRUB_PREFETCH_RADIUS,
-      priorityCenter: true,
-    });
+    const boundedCenter = Math.max(0, Math.min(centerIndex, activeHistory.length - 1));
+    if (manualHistoryActive) {
+      _queueManualHistoryBurst(activeHistory, boundedCenter, {
+        includeBackfill: false,
+        burstMs: MANUAL_HISTORY_BURST_MS,
+      });
+    } else {
+      _enqueueHistoryNeighborhood(activeHistory, boundedCenter, {
+        direction,
+        radius: HISTORY_SCRUB_PREFETCH_RADIUS,
+        priorityCenter: true,
+      });
+    }
   }
+  if (manualHistoryActive) return;
   if (multiPaneCount <= 1) return;
   for (const pane of secondaryPaneMaps.values()) {
     if (!pane || pane.id > multiPaneCount) continue;
@@ -9659,8 +10176,413 @@ function _prefetchVisiblePaneHistoryNeighborhood(centerIndex, direction = 0) {
   }
 }
 
+// -- Timeline strip (history load progress + drag-to-seek) --------------------
+// Tracks decode progress for the active combo. Only the active station+family+tilt
+// combo is tracked; sibling products are ignored. Stays visible for navigation.
+
+let _hwComboKey  = '';
+let _hwFrameKeys = [];
+let _hwTotal     = 0;
+let _hwReady     = 0;
+let _hwFailed    = 0;
+let _tlActiveIdx = -1;
+let _manualHistoryComboKey = '';
+let _tlSettleTimer = null;
+let _tlSettleSeq = 0;
+let _tlPreviewFrameKey = '';
+
+// DOM refs for the scrubber
+const _tlTrackWrap = document.getElementById('tl-track-wrap');
+const _tlTrackFill = document.getElementById('tl-track-fill');
+const _tlThumb     = document.getElementById('tl-thumb');
+const _tlLabels    = document.getElementById('tl-labels');
+
+function _isManualHistoryActive(comboKey = activeCacheKey()) {
+  return !!comboKey && comboKey === _manualHistoryComboKey;
+}
+
+function _clearTimelineSettle() {
+  if (_tlSettleTimer) {
+    clearTimeout(_tlSettleTimer);
+    _tlSettleTimer = null;
+  }
+}
+
+function _pruneQueuedHistoryJobs(comboKey, keepKeys = []) {
+  const history = historyMap.get(comboKey) || [];
+  if (!history.length) return;
+  const historyKeys = new Set(history.map(entry => String(entry?.key || '')).filter(Boolean));
+  const keep = new Set(keepKeys.filter(Boolean));
+  const currentViewed = viewedKey();
+  if (currentViewed) keep.add(currentViewed);
+  decodeQueue = decodeQueue.filter(job => {
+    const key = String(job?.s3key || '');
+    if (!historyKeys.has(key)) return true;
+    return keep.has(key);
+  });
+}
+
+function _manualHistoryBurstOrder(entries, targetIndex, includeBackfill = true) {
+  if (!Array.isArray(entries) || !entries.length) return [];
+  const boundedTarget = Math.max(0, Math.min(targetIndex, entries.length - 1));
+  const latestIndex = entries.length - 1;
+  const ordered = [];
+  const seen = new Set();
+  const pushIndex = idx => {
+    if (idx < 0 || idx >= entries.length || seen.has(idx)) return;
+    const entry = entries[idx];
+    const key = String(entry?.key || '');
+    if (!key) return;
+    seen.add(idx);
+    ordered.push(entry);
+  };
+  pushIndex(latestIndex);
+  pushIndex(boundedTarget);
+  pushIndex(boundedTarget - 1);
+  pushIndex(boundedTarget + 1);
+  if (includeBackfill) {
+    for (const offset of _historyPrefetchOffsets(entries.length, 0)) {
+      pushIndex(boundedTarget + offset);
+    }
+  }
+  return ordered;
+}
+
+function _queueManualHistoryBurst(entries, targetIndex, { includeBackfill = true, burstMs = MANUAL_HISTORY_BURST_MS } = {}) {
+  if (!Array.isArray(entries) || !entries.length) return;
+  const ck = activeCacheKey();
+  if (!_isManualHistoryActive(ck)) return;
+  const ordered = _manualHistoryBurstOrder(entries, targetIndex, includeBackfill);
+  if (!ordered.length) return;
+  _refreshManualHistoryBurst(ck, burstMs);
+  _pruneQueuedHistoryJobs(ck, ordered.map(entry => entry.key));
+  const priorityCount = Math.min(RECENT_WISE_PRIORITY_WINDOW, ordered.length);
+  for (let i = priorityCount - 1; i >= 0; i -= 1) {
+    const entry = ordered[i];
+    const key = String(entry?.key || '');
+    if (!key || frameCache.has(key)) continue;
+    const { key: _ignoredKey, ...meta } = entry;
+    enqueueDecode(key, meta, true);
+  }
+  for (let i = priorityCount; i < ordered.length; i += 1) {
+    const entry = ordered[i];
+    const key = String(entry?.key || '');
+    if (!key || frameCache.has(key) || _isDecodeQueued(key)) continue;
+    const { key: _ignoredKey, ...meta } = entry;
+    enqueueDecode(key, meta, false);
+  }
+}
+
+function _setManualHistoryMode(comboKey, history) {
+  const entries = Array.isArray(history) ? history : [];
+  if (!comboKey || entries.length < 2) {
+    _hideTimeline();
+    return;
+  }
+  if (_processedWiseWarmTimer) {
+    clearTimeout(_processedWiseWarmTimer);
+    _processedWiseWarmTimer = null;
+  }
+  _manualHistoryComboKey = comboKey;
+  _refreshManualHistoryBurst(comboKey);
+  _initTimeline(comboKey, entries);
+}
+
+function _tlRebuildLabels(history) {
+  if (!_tlLabels || !history?.length) return;
+  _tlLabels.innerHTML = '';
+  const n = history.length;
+  for (let i = 0; i < n; i++) {
+    const pct = n > 1 ? (i / (n - 1)) * 100 : 50;
+    const span = document.createElement('span');
+    span.className = 'tl-lbl' + (i === _tlActiveIdx ? ' tl-lbl-active' : '');
+    span.dataset.idx = i;
+    span.style.left = `${pct}%`;
+    _tlLabels.appendChild(span);
+  }
+}
+
+function _initTimeline(comboKey, history) {
+  if (!history?.length) return;
+  if (_hwComboKey === comboKey && history.length <= _hwTotal) return;
+  _hwComboKey  = comboKey;
+  _hwFrameKeys = history.map(e => e.key);
+  _hwTotal     = _hwFrameKeys.length;
+  _hwReady     = 0;
+  _hwFailed    = 0;
+  _tlActiveIdx = -1;
+  document.getElementById('control-island')?.classList.add('tl-active');
+  _tlRebuildLabels(history);
+  _updateTlPosition();
+}
+
+function _hideTimeline() {
+  _clearTimelineSettle();
+  _tlSettleSeq += 1;
+  document.getElementById('control-island')?.classList.remove('tl-active');
+  _hwComboKey  = '';
+  _hwFrameKeys = [];
+  _hwTotal     = 0;
+  _hwReady     = 0;
+  _hwFailed    = 0;
+  _tlActiveIdx = -1;
+  _tlPreviewFrameKey = '';
+  _clearManualHistoryBurst();
+  _manualHistoryComboKey = '';
+  if (_tlLabels) _tlLabels.innerHTML = '';
+}
+
+function _historyIndexForComboSwitch(fromComboKey, toComboKey) {
+  const nextHistory = historyMap.get(toComboKey) || [];
+  if (!nextHistory.length) return -1;
+  const prevHistory = historyMap.get(fromComboKey) || [];
+  if (historyIdx < 0 || !prevHistory.length) return nextHistory.length - 1;
+  const prevLatestIdx = Math.max(0, prevHistory.length - 1);
+  const clampedPrevIdx = Math.max(0, Math.min(historyIdx, prevLatestIdx));
+  const offsetFromLatest = prevLatestIdx - clampedPrevIdx;
+  return Math.max(0, nextHistory.length - 1 - offsetFromLatest);
+}
+
+function _restoreTimelineForCombo(comboKey) {
+  const history = historyMap.get(comboKey) || [];
+  if (history.length < 2) {
+    _hideTimeline();
+    historyIdx = -1;
+    return false;
+  }
+  const nextIdx = _historyIndexForComboSwitch(_manualHistoryComboKey || comboKey, comboKey);
+  _setManualHistoryMode(comboKey, history);
+  historyIdx = Math.max(0, Math.min(nextIdx, history.length - 1));
+  updateSlider();
+  _updateTlPosition();
+  return true;
+}
+
+function _updateTlProgress(key, failed = false) {
+  const idx = _hwFrameKeys.indexOf(key);
+  if (idx < 0) return;
+  if (!failed) _hwReady++;
+  else _hwFailed++;
+  // Drive the load bar for "Load More Frames" progress
+  if (_hwTotal > 1 && !_stationLoadActive) {
+    const done = _hwReady + _hwFailed;
+    _setLoadBar(Math.round(done / _hwTotal * 100));
+    if (done >= _hwTotal) {
+      _loadBarHideTimer = setTimeout(() => _setLoadBar(null), 600);
+    }
+  }
+}
+
+function _updateTlPosition() {
+  const ck = activeCacheKey();
+  const history = historyMap.get(ck);
+  if (!history?.length || !_hwFrameKeys.length) return;
+  const newIdx = (historyIdx >= 0 && historyIdx < history.length)
+    ? historyIdx : history.length - 1;
+  const n = history.length;
+  const pct = n > 1 ? (newIdx / (n - 1)) * 100 : 0;
+
+  if (_tlThumb)     _tlThumb.style.left = `${pct}%`;
+  if (_tlTrackFill) _tlTrackFill.style.width = `${pct}%`;
+
+  // Update label highlights
+  if (newIdx !== _tlActiveIdx) {
+    if (_tlLabels) {
+      for (const lbl of _tlLabels.children) {
+        const li = Number(lbl.dataset.idx);
+        lbl.className = 'tl-lbl' + (li === newIdx ? ' tl-lbl-active' : '');
+      }
+    }
+  }
+  _tlActiveIdx = newIdx;
+}
+
+function _setHistoryFrameLabelForKey(key) {
+  const ts = parseKeyTimestampMs(key);
+  const timeStr = Number.isFinite(ts) ? new Date(ts).toUTCString().slice(17, 25) : '--:--';
+  setFrameLabel(timeStr, 'history');
+}
+
+function _disposeLayerFromMap(mapObj, layer) {
+  if (!layer) return;
+  try { layer.clearFrame(); } catch (_) {}
+  try {
+    if (mapObj?.getLayer?.(layer.id)) mapObj.removeLayer(layer.id);
+  } catch (_) {}
+}
+
+function _disposePrimaryLayerPoolForCombo(comboKey) {
+  const layer = layerPool.get(comboKey);
+  if (!layer) return;
+  if (radarLayer === layer) radarLayer = null;
+  if (radarLayerSweep === layer) radarLayerSweep = null;
+  if (sweepLayer === layer) sweepLayer = null;
+  _disposeLayerFromMap(map, layer);
+  layerPool.delete(comboKey);
+}
+
+function _disposePaneLayerPool(pane) {
+  if (!pane?.layerPool) return;
+  for (const layer of pane.layerPool.values()) {
+    if (pane.radarLayer === layer) pane.radarLayer = null;
+    if (pane.sweepLayer === layer) pane.sweepLayer = null;
+    _disposeLayerFromMap(pane.map, layer);
+  }
+  pane.layerPool.clear();
+}
+
+function _renderHistoryPlaceholderAt(idx, history) {
+  if (idx < 0 || idx >= history.length) return false;
+  const { key } = history[idx];
+  if (frameCache.has(key)) {
+    if (_tlPreviewFrameKey !== key || !_isFrameGpuReadyForKey(key)) {
+      showFrame(key, { skipPrefetch: true, immediateUpload: true });
+      _tlPreviewFrameKey = key;
+    }
+    return true;
+  }
+  for (let dist = 1; dist < history.length; dist++) {
+    const lo = idx - dist;
+    const hi = idx + dist;
+    if (lo >= 0 && frameCache.has(history[lo].key)) {
+      const fallbackKey = history[lo].key;
+      if (_tlPreviewFrameKey !== fallbackKey) {
+        showFrame(fallbackKey, { skipPrefetch: true });
+        _tlPreviewFrameKey = fallbackKey;
+      }
+      return true;
+    }
+    if (hi < history.length && frameCache.has(history[hi].key)) {
+      const fallbackKey = history[hi].key;
+      if (_tlPreviewFrameKey !== fallbackKey) {
+        showFrame(fallbackKey, { skipPrefetch: true });
+        _tlPreviewFrameKey = fallbackKey;
+      }
+      return true;
+    }
+  }
+  return false;
+}
+
+function _settleTimelineTarget(idx, history, settleSeq) {
+  if (settleSeq !== _tlSettleSeq) return;
+  if (!Array.isArray(history) || idx < 0 || idx >= history.length) return;
+  const ck = activeCacheKey();
+  if (!_isManualHistoryActive(ck)) return;
+  const target = history[idx];
+  if (!target?.key) return;
+  const neighborKeys = [];
+  if (idx > 0) neighborKeys.push(history[idx - 1]?.key);
+  if (idx < history.length - 1) neighborKeys.push(history[idx + 1]?.key);
+  _pruneQueuedHistoryJobs(ck, [target.key, ...neighborKeys]);
+  _queueManualHistoryBurst(history, idx, {
+    includeBackfill: true,
+    burstMs: MANUAL_HISTORY_BURST_MS,
+  });
+  _showHistoryFrameAt(idx, history, { fetchExact: true });
+  _prefetchVisiblePaneHistoryNeighborhood(idx, 0);
+}
+
+function _scheduleTimelineSettle(idx, history, immediate = false) {
+  _clearTimelineSettle();
+  const settleSeq = ++_tlSettleSeq;
+  const run = () => {
+    _tlSettleTimer = null;
+    _settleTimelineTarget(idx, history, settleSeq);
+  };
+  if (immediate) run();
+  else _tlSettleTimer = setTimeout(run, TIMELINE_SETTLE_DEBOUNCE_MS);
+}
+
+function _tlSeekFromPointer(clientX) {
+  if (!_tlTrackWrap || !_hwFrameKeys.length) return;
+  const rect = _tlTrackWrap.getBoundingClientRect();
+  const frac = Math.max(0, Math.min(1, (clientX - rect.left) / rect.width));
+  const ck = activeCacheKey();
+  const history = historyMap.get(ck) || [];
+  if (!history.length) return;
+  const newIdx = Math.round(frac * (history.length - 1));
+  if (newIdx === historyIdx) {
+    if (!frameCache.has(history[newIdx]?.key)) _scheduleTimelineSettle(newIdx, history, false);
+    return;
+  }
+  cancelSweep();
+  paneInteractionUntilMs = Date.now() + 1800;
+  historyIdx = newIdx;
+  _renderHistoryPlaceholderAt(historyIdx, history);
+  const target = history[historyIdx];
+  _setHistoryFrameLabelForKey(target?.key);
+  _updateTlPosition();
+  _scheduleTimelineSettle(historyIdx, history, false);
+}
+
+if (_tlTrackWrap) {
+  _tlTrackWrap.addEventListener('mousedown', e => {
+    e.preventDefault();
+    stopPlay();
+    _tlDragging = true;
+    document.getElementById('tl-strip')?.classList.add('tl-dragging');
+    _tlSeekFromPointer(e.clientX);
+  });
+  _tlTrackWrap.addEventListener('touchstart', e => {
+    stopPlay();
+    _tlDragging = true;
+    document.getElementById('tl-strip')?.classList.add('tl-dragging');
+    _tlSeekFromPointer(e.touches[0].clientX);
+  }, { passive: true });
+}
+document.addEventListener('mousemove', e => {
+  if (_tlDragging) _tlSeekFromPointer(e.clientX);
+});
+document.addEventListener('mouseup', () => {
+  if (_tlDragging) {
+    const ck = activeCacheKey();
+    const history = historyMap.get(ck) || [];
+    if (historyIdx >= 0 && historyIdx < history.length) {
+      _scheduleTimelineSettle(historyIdx, history, true);
+    }
+  }
+  _tlDragging = false;
+  _tlPreviewFrameKey = '';
+  document.getElementById('tl-strip')?.classList.remove('tl-dragging');
+});
+document.addEventListener('touchmove', e => {
+  if (_tlDragging) _tlSeekFromPointer(e.touches[0].clientX);
+}, { passive: true });
+document.addEventListener('touchend', () => {
+  if (_tlDragging) {
+    const ck = activeCacheKey();
+    const history = historyMap.get(ck) || [];
+    if (historyIdx >= 0 && historyIdx < history.length) {
+      _scheduleTimelineSettle(historyIdx, history, true);
+    }
+  }
+  _tlDragging = false;
+  _tlPreviewFrameKey = '';
+  document.getElementById('tl-strip')?.classList.remove('tl-dragging');
+});
+
+// Warm the full active-combo history into frameCache so arrow-key steps hit cache.
+// Uses spiral order (center-out from historyIdx). Safe to call any time; skips
+// already-cached/queued frames. Callers are responsible for burst/timeline setup.
+function _preloadActiveComboHistory() {
+  if (!activeStation || levelII || isLocalRadarMode()) return;
+  const ck = activeCacheKey();
+  const history = historyMap.get(ck);
+  if (!history?.length) return;
+  const center = (historyIdx >= 0 && historyIdx < history.length)
+    ? historyIdx
+    : history.length - 1;
+  _enqueueHistoryNeighborhood(history, center, {
+    direction: 0,
+    radius: history.length,
+    priorityCenter: true,
+  });
+}
+
 function pruneFrameCache() {
-  if (frameCache.size <= FRAME_CACHE_MAX) return;
+  const limit = _frameCacheMax();
+  if (frameCache.size <= limit) return;
   const protected_ = new Set();
   const ck = activeCacheKey();
   (historyMap.get(ck) || []).forEach(f => protected_.add(f.key));
@@ -9669,7 +10591,7 @@ function pruneFrameCache() {
   const toEvict = [];
   for (const key of frameCache.keys()) {
     if (!protected_.has(key)) toEvict.push(key);
-    if (toEvict.length >= frameCache.size - FRAME_CACHE_MAX) break;
+    if (toEvict.length >= frameCache.size - limit) break;
   }
   toEvict.forEach(key => frameCache.delete(key));
 }
@@ -9715,6 +10637,7 @@ async function _runOneDecodeWorker() {
       _settleDecodedFrameWaiters(job.s3key, null, data);
       pruneFrameCache();
       _trackFrameDecoded(job.s3key);
+      _updateTlProgress(job.s3key);
 
       if (isL2 && job.meta?.activateL2Latest && job.meta?.comboKey && job.meta?.latestEntry) {
         const comboKey = String(job.meta.comboKey);
@@ -9751,6 +10674,7 @@ async function _runOneDecodeWorker() {
       if (expectedL2Retry) _markL2RetryCooldown(job.s3key);
       _settleDecodedFrameWaiters(job.s3key, e);
       _trackFrameDecoded(job.s3key);
+      _updateTlProgress(job.s3key, true);
       let usedFallback = false;
       if (isL2 && activeStation && job.s3key === viewedKey()) {
         usedFallback = _fallbackActiveL2Frame(job.s3key, 'Waiting for complete L2 scan');
@@ -9774,7 +10698,7 @@ async function _runOneDecodeWorker() {
     // Give the event loop a chance to render the map between frames.
     // Priority frames yield 0 ms; background frames yield 50 ms so a quick
     // product/tilt switch can always grab a free worker quickly.
-    await new Promise(r => setTimeout(r, job.priority ? 0 : 6));
+    await new Promise(r => setTimeout(r, job.priority ? 0 : 50));
   }
   decodeWorkerCount--;
   // When the last worker exits, schedule the toast drain check.
@@ -9791,11 +10715,13 @@ function scheduleNeighborPrefetch() {
   if (_isL2PathForFamily(activeFamily)) return; // L2 decodes are expensive — skip prefetch
   clearTimeout(_prefetchTimer);
   _prefetchTimer = setTimeout(() => {
+    if (_tlDragging) return;
     const ck = activeCacheKey();
     const history = historyMap.get(ck) || [];
     if (!history.length) return;
     const idx = historyIdx >= 0 ? historyIdx : history.length - 1;
-    for (const offset of [-1, 1, -2, 2, -3, 3]) {
+    const offsets = _isManualHistoryActive(ck) ? [-1, 1] : [-1, 1, -2, 2, -3, 3];
+    for (const offset of offsets) {
       const i = idx + offset;
       if (i < 0 || i >= history.length) continue;
       const { key, ...meta } = history[i];
@@ -9804,19 +10730,21 @@ function scheduleNeighborPrefetch() {
   }, 300);
 }
 
-function showFrame(s3key) {
+function showFrame(s3key, opts = {}) {
   const data = frameCache.get(s3key);
   if (!data) return;
   if (String(s3key || '').startsWith('L2:')) _setActiveL2AvailableProducts(data?.l2_available_products);
   else _setActiveL2AvailableProducts(null);
-  applyRadarFrame(data, s3key, () => showFrameMeta(s3key, data));
+  applyRadarFrame(data, s3key, () => showFrameMeta(s3key, data), {
+    immediateUpload: opts?.immediateUpload === true,
+  });
   applyFilter();
   updateInspectorReadout();
   if (_stationLoadActive) {
     const vk = viewedKey();
     if (s3key === vk) _hideDecodeToast();
   }
-  scheduleNeighborPrefetch();
+  if (opts?.skipPrefetch !== true && !isPlaying) scheduleNeighborPrefetch();
 }
 
 // Update UI info (time/elev/code/label) for a given key+data without re-rendering.
@@ -9835,8 +10763,12 @@ function showFrameMeta(s3key, data) {
   }
   const ck = activeCacheKey();
   const history = historyMap.get(ck) || [];
+  if (_tlDragging && _isManualHistoryActive(ck) && historyIdx >= 0 && historyIdx < history.length) {
+    _setHistoryFrameLabelForKey(history[historyIdx]?.key);
+    return;
+  }
   const isLive = historyIdx < 0 || history.length === 0 || historyIdx >= history.length - 1;
-  setFrameLabel(isLive ? `${timeStr}  LIVE` : timeStr, isLive ? 'ok' : '');
+  setFrameLabel(isLive ? `${timeStr}  LIVE` : timeStr, isLive ? 'ok' : 'history');
 }
 
 function setFrameLabel(text, cls) {
@@ -9854,7 +10786,8 @@ function showCachedActiveCombo() {
     historyMap.set(ck, history);
   }
   if (history.length) {
-    historyIdx = history.length - 1;
+    const keepHistoryIdx = _isManualHistoryActive(ck) && historyIdx >= 0 && historyIdx < history.length;
+    historyIdx = keepHistoryIdx ? historyIdx : (history.length - 1);
     updateSlider();
     const { key: curKey, ...curMeta } = history[historyIdx];
     const pooledData = pooledLayer?._loadedData || null;
@@ -9870,12 +10803,7 @@ function showCachedActiveCombo() {
         if (!frameCache.has(key)) enqueueDecode(key, meta, false);
       });
     }
-    // If we have fewer frames than desired, kick off a background backfill
-    // (this happens when the user switches to a combo that had only 1 frame pre-loaded)
-    if (!levelII && targetFrames > 1 && history.length < targetFrames) {
-      const [sid, fam, tlt] = ck.split(':');
-      _backfillHistory(sid, fam, tlt, _l3LoadSeq);
-    }
+    _syncLoadMoreBtn();
     return true;
   }
 
@@ -9889,11 +10817,7 @@ function showCachedActiveCombo() {
   }
   if (frameCache.has(latestKey) && !sweepActive) showFrame(latestKey);
   else enqueueDecode(latestKey, {}, true);
-  const fallbackTargetFrames = historyFrameLimitForCombo(ck);
-  if (!levelII && fallbackTargetFrames > 1) {
-    const [sid, fam, tlt] = ck.split(':');
-    void _backfillHistory(sid, fam, tlt, _l3LoadSeq);
-  }
+  _syncLoadMoreBtn();
   return true;
 }
 
@@ -9917,7 +10841,6 @@ async function loadHistory(stationId, family, tilt, opts = {}) {
   const currentOnly = opts.currentOnly === true;
   const targetFrames = historyFrameLimitForSelection(stationId, family, tilt);
   const seq = ++_l3LoadSeq;
-  if (_canUseProcessedWise(stationId, family, tilt)) requestL3DecodeBurst();
 
   try {
     const cachedEntries = historyMap.get(ck) || [];
@@ -9927,10 +10850,8 @@ async function loadHistory(stationId, family, tilt, opts = {}) {
       const { key: curKey, ...curMeta } = cachedEntries[historyIdx];
       if (frameCache.has(curKey) && !sweepActive) showFrame(curKey);
       else enqueueDecode(curKey, curMeta, true);
-      if (targetFrames > 1 && cachedEntries.length < targetFrames) {
-        void _backfillHistory(stationId, family, tilt, seq);
-      }
-      scheduleProcessedWiseSiblingWarm(stationId, family, tilt);
+      if (!_isManualHistoryActive(ck)) scheduleProcessedWiseSiblingWarm(stationId, family, tilt);
+      _syncLoadMoreBtn();
       return;
     }
 
@@ -9959,15 +10880,13 @@ async function loadHistory(stationId, family, tilt, opts = {}) {
     if (stationId !== activeStation || family !== activeFamily || tilt !== activeTilt) return;
 
     _setL3HistoryEntries(ck, [latestMeta], latestMeta.key);
-    scheduleProcessedWiseSiblingWarm(stationId, family, tilt);
+    if (!_isManualHistoryActive(ck)) scheduleProcessedWiseSiblingWarm(stationId, family, tilt);
 
     const history = historyMap.get(ck) || [latestMeta];
     const curKey = history[historyIdx].key;
     if (frameCache.has(curKey) && !sweepActive) showFrame(curKey);
     else enqueueDecode(curKey, latestMeta, true);
-    if (targetFrames > 1) {
-      void _backfillHistory(stationId, family, tilt, seq);
-    }
+    _syncLoadMoreBtn();
 
   } catch (_) {
     if (seq === _l3LoadSeq
@@ -9985,6 +10904,7 @@ async function pollActiveL3Latest(stationId) {
   const family = activeFamily;
   const tilt = activeTilt;
   const ck = `${stationId}:${family}:${tilt}`;
+  if (_isManualHistoryActive(ck)) return;
 
   try {
     const latestMeta = await findLatestKeyCurrentOnly(stationId, { family, tilt, forceRefresh: true });
@@ -10062,17 +10982,9 @@ async function _backfillHistory(stationId, family, tilt, seq) {
   }
   updateSlider();
   startFrameTracking(newHistory.map(e => e.key));
-
-  // Decode older frames in background with a small stagger between them so
-  // the event loop stays responsive and the map keeps rendering.
-  for (const { key, ...meta } of olderKeys) {
-    if (seq !== _l3LoadSeq) return;
-    if (stationId !== activeStation || family !== activeFamily || tilt !== activeTilt) return;
-    if (!frameCache.has(key)) {
-      enqueueDecode(key, meta, false);
-      await new Promise(r => setTimeout(r, 8));
-    }
-  }
+  _setManualHistoryMode(ck, newHistory);
+  _scheduleTimelineSettle(Math.max(0, historyIdx), newHistory, true);
+  _syncLoadMoreBtn();
 }
 
 function stopPolling() {
@@ -10105,6 +11017,7 @@ async function loadRecentWiseFrames(stationId = activeStation, family = activeFa
   const onProgress = typeof options?.onProgress === 'function' ? options.onProgress : null;
   const updateFrameLabel = options?.updateFrameLabel !== false;
   const shouldActivate = options?.activate !== false;
+  const requestSeq = Number.isFinite(Number(options?.requestSeq)) ? Number(options.requestSeq) : null;
   const emitProgress = payload => {
     if (typeof onProgress !== 'function') return;
     try { onProgress(payload); } catch (_) {}
@@ -10117,57 +11030,57 @@ async function loadRecentWiseFrames(stationId = activeStation, family = activeFa
   const normalizedTilt = _normalizeProcessedWiseTilt(normalizedFamily, tilt);
   const ck = `${sid}:${normalizedFamily}:${normalizedTilt}`;
   const wanted = Math.max(2, Math.min(MAX_HISTORY_FRAMES, Math.round(Number(count) || RECENT_WISE_FRAME_COUNT)));
-  requestL3DecodeBurst(12000);
+  _refreshManualHistoryBurst(ck, MANUAL_HISTORY_BURST_MS);
   emitProgress({ phase: 'resolving', requested: wanted, completed: 0, total: wanted, failed: 0 });
   comboHistoryTargetFrames.set(ck, wanted);
   const entries = await _fetchRecentProcessedWiseMetas(sid, normalizedFamily, normalizedTilt, wanted);
+  if (requestSeq !== null && requestSeq !== recentFramesLoadSeq) return [];
   if (!entries.length) {
     throw new Error('No recent processed frames were found.');
   }
   _setL3HistoryEntries(ck, entries, entries[entries.length - 1].key);
-  const latestEntry = entries[entries.length - 1];
-  const orderedEntries = [latestEntry, ...entries.slice(0, -1).reverse()];
-  let completed = 0;
-  let failed = 0;
-  const publishProgress = () => {
-    emitProgress({
-      phase: completed >= orderedEntries.length ? (failed ? 'complete-with-errors' : 'complete') : 'downloading',
-      requested: wanted,
-      completed,
-      total: orderedEntries.length,
-      failed,
-    });
-  };
-  publishProgress();
-  const jobs = orderedEntries.map((entry, index) => {
-    const finish = error => {
-      completed += 1;
-      if (error) failed += 1;
-      publishProgress();
-    };
-    if (frameCache.has(entry.key)) {
-      if (index === 0 && shouldActivate && activeCacheKey() === ck && !sweepActive) showFrame(entry.key);
-      finish(null);
-      return Promise.resolve(frameCache.get(entry.key));
-    }
-    return ensureFrameDecoded(entry.key, entry, index < RECENT_WISE_PRIORITY_WINDOW)
-      .then(data => {
-        if (index === 0 && shouldActivate && activeCacheKey() === ck && !sweepActive && frameCache.has(entry.key)) showFrame(entry.key);
-        finish(null);
-        return data;
-      })
-      .catch(err => {
-        finish(err);
-        throw err;
-      });
+  const history = historyMap.get(ck) || entries;
+  const isActiveCombo = activeStation === sid && activeFamily === normalizedFamily && activeTilt === normalizedTilt && activeCacheKey() === ck;
+  if (isActiveCombo) _setManualHistoryMode(ck, history);
+  const latestIndex = Math.max(0, history.length - 1);
+  _queueManualHistoryBurst(history, latestIndex, {
+    includeBackfill: true,
+    burstMs: MANUAL_HISTORY_BURST_MS,
   });
-  const results = await Promise.allSettled(jobs);
-  const readyCount = completed - failed;
-  if (!readyCount) {
-    const firstFailure = results.find(result => result.status === 'rejected');
-    throw firstFailure?.reason || new Error('Recent frames failed.');
+  const latestEntry = history[history.length - 1];
+  emitProgress({
+    phase: 'downloading',
+    requested: wanted,
+    completed: 0,
+    total: history.length,
+    failed: 0,
+  });
+  try {
+    await ensureFrameDecoded(latestEntry.key, latestEntry, true);
+  } catch (err) {
+    emitProgress({
+      phase: 'complete-with-errors',
+      requested: wanted,
+      completed: 0,
+      total: history.length,
+      failed: 1,
+    });
+    throw err;
   }
-  if (shouldActivate && updateFrameLabel) setFrameLabel(`Recent frames: ${readyCount}`, failed ? 'loading' : 'live');
+  if (requestSeq !== null && requestSeq !== recentFramesLoadSeq) return entries;
+  if (shouldActivate && activeCacheKey() === ck && !sweepActive && frameCache.has(latestEntry.key)) {
+    showFrame(latestEntry.key, { skipPrefetch: true, immediateUpload: true });
+  }
+  _syncLoadMoreBtn();
+  emitProgress({
+    phase: 'complete',
+    requested: wanted,
+    completed: history.length,
+    total: history.length,
+    failed: 0,
+  });
+  if (isActiveCombo) _scheduleTimelineSettle(history.length - 1, history, true);
+  if (shouldActivate && updateFrameLabel) setFrameLabel(`Recent frames: ${history.length}`, 'live');
   return entries;
 }
 
@@ -10183,9 +11096,12 @@ async function loadRecentWiseFramesForAllProducts(stationId = activeStation, pri
     ...families.filter(family => family !== primary),
   ].filter((family, index, arr) => family && arr.indexOf(family) === index);
   const requested = Math.max(2, Math.min(MAX_HISTORY_FRAMES, Math.round(Number(count) || RECENT_WISE_FRAME_COUNT)));
-  requestL3DecodeBurst(15000);
+  const primaryTilt = _normalizeProcessedWiseTilt(primary, tilt);
+  const primaryComboKey = `${sid}:${primary}:${primaryTilt}`;
+  _refreshManualHistoryBurst(primaryComboKey, MANUAL_HISTORY_BURST_MS);
   const onProgress = typeof options?.onProgress === 'function' ? options.onProgress : null;
   const updateFrameLabel = options?.updateFrameLabel !== false;
+  const requestSeq = Number.isFinite(Number(options?.requestSeq)) ? Number(options.requestSeq) : null;
   const progressByFamily = new Map();
   for (const family of orderedFamilies) {
     progressByFamily.set(family, {
@@ -10230,6 +11146,7 @@ async function loadRecentWiseFramesForAllProducts(stationId = activeStation, pri
       const entries = await loadRecentWiseFrames(sid, family, tilt, requested, {
         activate: family === primary,
         updateFrameLabel: false,
+        requestSeq,
         onProgress: progress => {
           progressByFamily.set(family, {
             completed: Math.max(0, Number(progress?.completed) || 0),
@@ -10260,14 +11177,35 @@ async function loadRecentWiseFramesForAllProducts(stationId = activeStation, pri
       throw err;
     }
   }));
+  if (requestSeq !== null && requestSeq !== recentFramesLoadSeq) {
+    return { activeEntries: [], families: orderedFamilies, results };
+  }
   const primaryResult = results.find(result => result.status === 'fulfilled' && result.value.family === primary);
   const fallbackResult = results.find(result => result.status === 'fulfilled');
   const activeEntries = primaryResult?.status === 'fulfilled'
     ? primaryResult.value.entries
     : (fallbackResult?.status === 'fulfilled' ? fallbackResult.value.entries : []);
+  const activeFamilyName = primaryResult?.status === 'fulfilled'
+    ? primary
+    : (fallbackResult?.status === 'fulfilled' ? fallbackResult.value.family : primary);
   if (!activeEntries.length) {
     const firstFailure = results.find(result => result.status === 'rejected');
     throw firstFailure?.reason || new Error('Recent frames failed.');
+  }
+  const activeComboKey = `${sid}:${activeFamilyName}:${_normalizeProcessedWiseTilt(activeFamilyName, tilt)}`;
+  const primaryHistory = historyMap.get(activeComboKey) || activeEntries;
+  if (primaryHistory.length >= 2) {
+    _setManualHistoryMode(activeComboKey, primaryHistory);
+    const targetIndex = (historyIdx >= 0 && historyIdx < primaryHistory.length)
+      ? historyIdx
+      : (primaryHistory.length - 1);
+    historyIdx = targetIndex;
+    if (multiPaneCount > 1) {
+      _queueHistoryRender(targetIndex, primaryHistory, { priority: true });
+    } else if (frameCache.has(primaryHistory[targetIndex]?.key)) {
+      showFrame(primaryHistory[targetIndex].key, { skipPrefetch: true, immediateUpload: true });
+    }
+    _scheduleTimelineSettle(targetIndex, primaryHistory, true);
   }
   if (updateFrameLabel) setFrameLabel(`Recent frames: ${activeEntries.length}`, 'live');
   return {
@@ -10277,41 +11215,11 @@ async function loadRecentWiseFramesForAllProducts(stationId = activeStation, pri
   };
 }
 
-// -- Frame slider --------------------------------------------------------------
-const frameSlider = document.getElementById('frame-slider');
-
-function updateSlider() {
-  if (!frameSlider) return;
-  const ck = activeCacheKey();
-  const history = historyMap.get(ck) || [];
-  const hasFrames = history.length >= 2;
-  frameSlider.disabled = !hasFrames;
-  frameSlider.min = 0;
-  frameSlider.max = Math.max(0, history.length - 1);
-  if (historyIdx < 0 || historyIdx >= history.length) historyIdx = Math.max(0, history.length - 1);
-  frameSlider.value = historyIdx;
-  const backBtn = document.getElementById('frame-back');
-  const fwdBtn  = document.getElementById('frame-fwd');
-  const playBtn = document.getElementById('frame-play');
-  if (backBtn) backBtn.disabled = !hasFrames;
-  if (fwdBtn)  fwdBtn.disabled  = !hasFrames;
-  if (playBtn) playBtn.disabled  = !hasFrames;
-}
-
-if (frameSlider) {
-  frameSlider.addEventListener('input', () => {
-    stopPlay();
-    _clearHistoryHold();
-    cancelSweep();
-    paneInteractionUntilMs = Date.now() + 1800;
-    const idx = parseInt(frameSlider.value);
-    historyIdx = idx;
-    const ck = activeCacheKey();
-    const history = historyMap.get(ck) || [];
-    if (idx < 0 || idx >= history.length) return;
-    _queueHistoryRender(idx, history, { priority: true });
-  });
-}
+const _tlPlay   = document.getElementById('tl-btn-play');
+const _tlFpsVal = 6;
+let   _tlDragging = false;
+function drawTimeline() { _updateTlPosition(); }
+function updateSlider() {}
 
 // -- Settings modal ------------------------------------------------------------
 const settingsBtn     = document.getElementById('settings-btn');
@@ -11521,17 +12429,24 @@ syncYouTubeEmbedUi();
 
 // -- Playback controls ---------------------------------------------------------
 function stopPlay() {
-  if (playTimer !== null) { clearInterval(playTimer); playTimer = null; }
+  if (playTimer !== null) { cancelAnimationFrame(playTimer); playTimer = null; }
   isPlaying = false;
-  const playBtn = document.getElementById('frame-play');
-  if (playBtn) playBtn.textContent = '?';
+  _clearPlaybackPendingUpload();
+  _playWrapHoldUntil = 0;
+  _tlPreviewFrameKey = '';
+  if (_tlPlay) { _tlPlay.innerHTML = '&#9654;'; _tlPlay.title = 'Play'; }
 }
 
 const HISTORY_HOLD_INITIAL_DELAY_MS = 85;
 const HISTORY_HOLD_REPEAT_MS = 35;
+const PLAYBACK_WRAP_HOLD_MS = 1000;
 let historyRenderRunning = false;
 let historyRenderPending = null;
 let historyRenderRequestedSeq = 0;
+const PLAYBACK_PREFETCH_WINDOW = 4;
+let _playPendingUpload = null;
+let _playPendingUploadSeq = 0;
+let _playWrapHoldUntil = 0;
 let historyHoldDirection = 0;
 let historyHoldDelayTimer = null;
 let historyHoldIntervalTimer = null;
@@ -11558,12 +12473,10 @@ async function _renderHistoryIndex(idx, history, { priority = true, requestSeq =
   }
   const { key, ...meta } = history[idx];
   if (frameCache.has(key)) {
-    showFrame(key);
+    showFrame(key, { skipPrefetch: true });
     return;
   }
-  const ts = parseKeyTimestampMs(key);
-  const timeStr = Number.isFinite(ts) ? new Date(ts).toUTCString().slice(17, 25) : '--:--';
-  setFrameLabel(timeStr, 'loading');
+  _setHistoryFrameLabelForKey(key);
   try {
     await ensureFrameDecoded(key, meta, priority);
   } catch (_) {}
@@ -11601,37 +12514,162 @@ async function _flushHistoryRenderQueue() {
   }
 }
 
-function playLoop() {
+let _playLastFrameMs = 0;
+
+function _layerForCombo(comboKey) {
+  if (!comboKey) return null;
+  if (displayedPrimaryComboKey === comboKey && radarLayer) return radarLayer;
+  return layerPool.get(comboKey) || null;
+}
+
+function _isFrameGpuReadyForKey(key) {
+  const data = frameCache.get(key);
+  if (!data) return false;
+  const display = _displayComboFromFrameKey(key, activeCacheKey(), activeFamily);
+  const layer = _layerForCombo(display.comboKey);
+  return !!layer?.isFrameReady(data);
+}
+
+function _clearPlaybackPendingUpload() {
+  _playPendingUpload = null;
+  _playPendingUploadSeq += 1;
+}
+
+function _primePlaybackWindow(history, startIdx) {
+  if (!Array.isArray(history) || history.length < 2) return;
+  _refreshManualHistoryBurst(activeCacheKey(), MANUAL_HISTORY_PLAY_BURST_MS);
+  if (_isManualHistoryActive(activeCacheKey())) {
+    _queueManualHistoryBurst(history, startIdx, {
+      includeBackfill: false,
+      burstMs: MANUAL_HISTORY_PLAY_BURST_MS,
+    });
+    return;
+  }
+  requestL3DecodeBurst(12000);
+  const keepKeys = [];
+  for (let step = 1; step <= PLAYBACK_PREFETCH_WINDOW; step += 1) {
+    const idx = (startIdx + step) % history.length;
+    const entry = history[idx];
+    const key = String(entry?.key || '');
+    if (!key) continue;
+    keepKeys.push(key);
+    if (!frameCache.has(key) && !_isDecodeQueued(key)) {
+      const { key: _ignored, ...meta } = entry;
+      enqueueDecode(key, meta, step === 1);
+    }
+  }
+  _pruneQueuedHistoryJobs(activeCacheKey(), keepKeys);
+}
+
+function _requestPlaybackAdvance(idx, history) {
+  if (!Array.isArray(history) || idx < 0 || idx >= history.length) return false;
+  const entry = history[idx];
+  const key = String(entry?.key || '');
+  if (!key) return false;
+  const { key: _ignored, ...meta } = entry;
+  _refreshManualHistoryBurst(activeCacheKey(), MANUAL_HISTORY_PLAY_BURST_MS);
+  _primePlaybackWindow(history, idx);
+  if (!frameCache.has(key)) {
+    _setHistoryFrameLabelForKey(key);
+    enqueueDecode(key, meta, true);
+    return false;
+  }
+  if (_isFrameGpuReadyForKey(key)) {
+    historyIdx = idx;
+    showFrame(key, { skipPrefetch: true, immediateUpload: true });
+    _updateTlPosition();
+    return true;
+  }
+  if (_playPendingUpload?.key === key) return false;
+  const data = frameCache.get(key);
+  if (!data) return false;
+  const seq = ++_playPendingUploadSeq;
+  _playPendingUpload = { seq, idx, key };
+  _setHistoryFrameLabelForKey(key);
+  applyRadarFrame(data, key, () => {
+    if (!_playPendingUpload || _playPendingUpload.seq !== seq || !isPlaying) return;
+    historyIdx = idx;
+    _playPendingUpload = null;
+    showFrameMeta(key, data);
+    updateInspectorReadout();
+    _updateTlPosition();
+  }, { immediateUpload: true });
+  applyFilter();
+  return false;
+}
+
+function playLoop(now = performance.now()) {
   const ck = activeCacheKey();
   const history = historyMap.get(ck) || [];
   if (history.length < 2) { stopPlay(); return; }
-  historyIdx = (historyIdx + 1) % history.length;
-  if (frameSlider) frameSlider.value = historyIdx;
+  if (_playPendingUpload) return;
+  const currentIdx = (historyIdx >= 0 && historyIdx < history.length) ? historyIdx : (history.length - 1);
+  const nextIdx = (currentIdx + 1) % history.length;
+  const wrapping = currentIdx === history.length - 1 && nextIdx === 0;
+  if (wrapping) {
+    if (_playWrapHoldUntil === 0) {
+      _playWrapHoldUntil = now + PLAYBACK_WRAP_HOLD_MS;
+      return;
+    }
+    if (now < _playWrapHoldUntil) return;
+    _playWrapHoldUntil = 0;
+  } else {
+    _playWrapHoldUntil = 0;
+  }
   paneInteractionUntilMs = Date.now() + 1200;
-  _queueHistoryRender(historyIdx, history, { priority: true });
+  if (multiPaneCount > 1) {
+    historyIdx = nextIdx;
+    _queueHistoryRender(historyIdx, history, { priority: true });
+    _primePlaybackWindow(history, historyIdx);
+  } else {
+    _requestPlaybackAdvance(nextIdx, history);
+  }
+}
+
+function _playRafLoop(now) {
+  if (!isPlaying) return;
+  if (now - _playLastFrameMs >= 1000 / _tlFpsVal) {
+    _playLastFrameMs = now;
+    playLoop(now);
+    if (!isPlaying) return; // playLoop may have called stopPlay
+  }
+  playTimer = requestAnimationFrame(_playRafLoop);
 }
 
 function startPlay() {
   const ck = activeCacheKey();
   const history = historyMap.get(ck) || [];
   if (history.length < 2) return;
+  _clearPlaybackPendingUpload();
+  _playWrapHoldUntil = 0;
+  const startIdx = (historyIdx >= 0 && historyIdx < history.length) ? historyIdx : (history.length - 1);
+  _primePlaybackWindow(history, startIdx);
   isPlaying = true;
-  const playBtn = document.getElementById('frame-play');
-  if (playBtn) playBtn.textContent = '¦';
-  playTimer = setInterval(playLoop, 500);
+  if (_tlPlay) { _tlPlay.innerHTML = '&#9632;'; _tlPlay.title = 'Stop'; }
+  _playLastFrameMs = 0;
+  playTimer = requestAnimationFrame(_playRafLoop);
 }
 
-function _showHistoryFrameAt(idx, history) {
+function _showHistoryFrameAt(idx, history, opts = {}) {
   if (idx < 0 || idx >= history.length) return;
+  const fetchExact = opts.fetchExact !== false;
   const { key, ...meta } = history[idx];
   if (frameCache.has(key)) {
-    showFrame(key);
+    showFrame(key, { skipPrefetch: true, immediateUpload: true });
     return;
   }
-  const ts = parseKeyTimestampMs(key);
-  const timeStr = Number.isFinite(ts) ? new Date(ts).toUTCString().slice(17, 25) : '--:--';
-  setFrameLabel(timeStr, 'loading');
-  enqueueDecode(key, meta, true);
+  // Exact frame not cached yet — show the nearest cached neighbor immediately so
+  // the map updates on every key press instead of freezing until decode finishes.
+  // The display will auto-update to the correct frame when the decode completes
+  // (the worker calls showFrame when key === viewedKey()).
+  for (let dist = 1; dist < history.length; dist++) {
+    const lo = idx - dist;
+    const hi = idx + dist;
+    if (lo >= 0 && frameCache.has(history[lo].key)) { showFrame(history[lo].key, { skipPrefetch: true }); break; }
+    if (hi < history.length && frameCache.has(history[hi].key)) { showFrame(history[hi].key, { skipPrefetch: true }); break; }
+  }
+  _setHistoryFrameLabelForKey(key);
+  if (fetchExact) enqueueDecode(key, meta, true);
 }
 
 function stepHistory(direction) {
@@ -11652,14 +12690,25 @@ function stepHistory(direction) {
     if (historyIdx < 0) return; // already at live/latest
     if (historyIdx >= liveIdx - 1) {
       historyIdx = -1;
-      _queueHistoryRender(liveIdx, history, { priority: true });
+      if (multiPaneCount > 1) {
+        _queueHistoryRender(liveIdx, history, { priority: true });
+      } else {
+        _showHistoryFrameAt(liveIdx, history);
+        _prefetchVisiblePaneHistoryNeighborhood(liveIdx, historyHoldDirection);
+      }
+      _updateTlPosition();
       return;
     }
     historyIdx += 1;
   }
 
-  if (frameSlider) frameSlider.value = historyIdx;
-  _queueHistoryRender(historyIdx, history, { priority: true });
+  if (multiPaneCount > 1) {
+    _queueHistoryRender(historyIdx, history, { priority: true });
+  } else {
+    _showHistoryFrameAt(historyIdx, history);
+    _prefetchVisiblePaneHistoryNeighborhood(historyIdx, historyHoldDirection);
+  }
+  _updateTlPosition();
 }
 
 function _startHistoryHold(direction) {
@@ -11677,19 +12726,9 @@ function _startHistoryHold(direction) {
   }, HISTORY_HOLD_INITIAL_DELAY_MS);
 }
 
-document.getElementById('frame-play')?.addEventListener('click', () => {
+_tlPlay?.addEventListener('click', () => {
   cancelSweep();
   if (isPlaying) stopPlay(); else startPlay();
-});
-
-document.getElementById('frame-back')?.addEventListener('click', () => {
-  _clearHistoryHold();
-  stepHistory(-1);
-});
-
-document.getElementById('frame-fwd')?.addEventListener('click', () => {
-  _clearHistoryHold();
-  stepHistory(1);
 });
 
 // -- Control island ------------------------------------------------------------
@@ -12186,7 +13225,8 @@ document.addEventListener('keydown', e => {
     e.preventDefault();
     if (document.getElementById('spc-viewer-overlay')?.classList.contains('open')) {
       _spcViewerNavigate(-1);
-    } else {
+    } else if (!e.repeat) {
+      // First physical keydown only — OS auto-repeat is ignored; hold setInterval drives repeat steps
       _startHistoryHold(-1);
     }
     return;
@@ -12195,7 +13235,7 @@ document.addEventListener('keydown', e => {
     e.preventDefault();
     if (document.getElementById('spc-viewer-overlay')?.classList.contains('open')) {
       _spcViewerNavigate(1);
-    } else {
+    } else if (!e.repeat) {
       _startHistoryHold(1);
     }
     return;
@@ -12269,8 +13309,7 @@ async function startRecentFramesDownload(count = recentWiseFrameCount) {
   recentWiseFrameCount = requested;
   _updateRecentFramesMenuSelection();
   closeToolsMenu();
-  const familyCount = Math.max(1, supportedL3FamiliesForStation(activeStation).length || PROCESSED_WISE_FAMILIES.length);
-  const requestedTotal = requested * familyCount;
+  const requestedTotal = requested;
   if (!activeStation) {
     setFrameLabel('Select a radar first', 'error');
     _setRecentFramesProgress({
@@ -12300,8 +13339,9 @@ async function startRecentFramesDownload(count = recentWiseFrameCount) {
   });
   setFrameLabel('Loading recent frames...', 'loading');
   try {
-    const result = await loadRecentWiseFramesForAllProducts(activeStation, activeFamily, activeTilt, requested, {
+    const entries = await loadRecentWiseFrames(activeStation, activeFamily, activeTilt, requested, {
       updateFrameLabel: false,
+      requestSeq: seq,
       onProgress: progress => {
         if (seq !== recentFramesLoadSeq) return;
         lastProgress = {
@@ -12337,7 +13377,6 @@ async function startRecentFramesDownload(count = recentWiseFrameCount) {
       },
     });
     if (seq !== recentFramesLoadSeq) return;
-    const entries = Array.isArray(result?.activeEntries) ? result.activeEntries : [];
     setFrameLabel(`Recent frames: ${entries.length}`, 'live');
     if (lastProgress.failed > 0) {
       _setRecentFramesProgress({
@@ -12381,6 +13420,17 @@ document.querySelectorAll('.recent-frames-option').forEach(btn => {
   });
 });
 _updateRecentFramesMenuSelection();
+
+document.getElementById('load-more-frames-btn')?.addEventListener('click', () => {
+  if (!activeStation || levelII) return;
+  if (!_canUseProcessedWise(activeStation, activeFamily, activeTilt)) return;
+  const ck = activeCacheKey();
+  const history = historyMap.get(ck) || [];
+  if (history.length > 1) return;
+  comboHistoryTargetFrames.set(ck, RECENT_WISE_FRAME_COUNT);
+  _syncLoadMoreBtn();
+  void _backfillHistory(activeStation, activeFamily, activeTilt, _l3LoadSeq);
+});
 
 multiPaneBtnEl?.addEventListener('click', e => {
   e.stopPropagation();
@@ -12461,6 +13511,7 @@ function selectStation(id, opts = {}) {
   const [lat, lon] = station;
   const shouldRecenter = opts?.recenter === true;
   const switchingStation = stationId !== activeStation;
+  const previousStationId = activeStation;
   if (!levelII) {
     const families = supportedL3FamiliesForStation(stationId);
     if (!families.includes(activeFamily)) {
@@ -12474,15 +13525,17 @@ function selectStation(id, opts = {}) {
   const initialComboKey = `${stationId}:${activeFamily}:${activeTilt}`;
   _savedRadarStation = stationId;
   if (switchingStation) {
+    _resetTransientLoadUi();
     decodeQueue = [];
     clearL3WarmQueue();
     ++_l3LoadSeq;
     ++_l2LoadSeq;
     historyIdx = -1;
     stopPlay();
+    _hideTimeline();
     startFrameTracking([]);
     _l2ScanCache = { station: null, scans: [], fullAt: 0 };
-    _purgeStationRuntimeCaches(stationId);
+    _purgeStationRuntimeCaches(previousStationId);
     // Free GPU memory for the old station's pool layers.
     // Pool layers for the new station (if the user is returning) are kept.
     for (const [ck, layer] of layerPool.entries()) {
@@ -12547,7 +13600,19 @@ function selectStation(id, opts = {}) {
   if (multiPaneCount > 1 && !levelII) {
     void _loadVisibleSecondaryPanes({ force: true });
   }
+  _scheduleCurrentStationResidencyTrim();
   _restartPanePolling();
+}
+
+function _restoreOrHideTimelineForActiveCombo() {
+  if (!activeStation || levelII || _isL2PathForFamily(activeFamily) || isLocalRadarMode()) {
+    _hideTimeline();
+    historyIdx = -1;
+    return false;
+  }
+  const restored = _restoreTimelineForCombo(activeCacheKey());
+  if (!restored) historyIdx = -1;
+  return restored;
 }
 
 if (familySelect) {
@@ -12584,6 +13649,7 @@ if (familySelect) {
       pane.family = next;
       pane.tilt = restoreTiltSelectL3(activeStation, pane.family, pane.tilt) || pane.tilt;
       _syncPaneControlsFromActive();
+      _scheduleCurrentStationResidencyTrim();
       if (activeStation) _loadSecondaryPaneLatest(activePaneId, { force: true });
       return;
     }
@@ -12591,9 +13657,11 @@ if (familySelect) {
     activeFamily = next;
     activeTilt = restoreTiltSelectL3(activeStation, activeFamily, activeTilt) || activeTilt;
     setActiveSelectionUi(activeFamily, activeTilt);
-    historyIdx = -1;
     stopPlay();
     cancelSweep();
+    _resetTransientLoadUi();
+    _syncLoadMoreBtn();
+    _restoreOrHideTimelineForActiveCombo();
     if (!activeStation) return;
     if (_isL2PathForFamily(activeFamily)) {
       // Cancel any in-flight L2 loads for the old product, then clear the queue
@@ -12614,6 +13682,7 @@ if (familySelect) {
         loadHistory(activeStation, next, activeTilt, { preferCache: false, currentOnly: true });
       }
     }
+    _scheduleCurrentStationResidencyTrim();
   });
 }
 
@@ -12654,17 +13723,20 @@ if (tiltSelect) {
       if (pane.tilt === nextTilt) return;
       pane.tilt = nextTilt;
       _syncPaneControlsFromActive();
+      _scheduleCurrentStationResidencyTrim();
       if (activeStation) _loadSecondaryPaneLatest(activePaneId, { force: true });
       return;
     }
-    historyIdx = -1;
     stopPlay();
     cancelSweep();
+    _resetTransientLoadUi();
+    _syncLoadMoreBtn();
     if (_isL2PathForFamily(activeFamily)) {
       activeTilt = levelII
         ? tiltSelect.value // integer index as string
         : normalizeTilt(tiltSelect.value);
       if (!levelII) setActiveSelectionUi(activeFamily, activeTilt);
+      _restoreOrHideTimelineForActiveCombo();
       if (!activeStation) return;
       ++_l2LoadSeq;
       clearStaleQueueItems();
@@ -12680,6 +13752,7 @@ if (tiltSelect) {
         if (tiltSelect) tiltSelect.value = '0.5';
       }
       setActiveSelectionUi(activeFamily, activeTilt);
+      _restoreOrHideTimelineForActiveCombo();
       if (!activeStation) return;
       ++_l3LoadSeq;
       clearStaleQueueItems();
@@ -12689,6 +13762,7 @@ if (tiltSelect) {
         loadHistory(activeStation, activeFamily, activeTilt, { preferCache: false, currentOnly: true });
       }
     }
+    _scheduleCurrentStationResidencyTrim();
   });
 }
 
@@ -16286,20 +17360,33 @@ setInterval(() => {
   if (lightningVisible) void refreshLightningOverlay(true, { forceNetwork: true });
 }, LIGHTNING_POLL_MS);
 
-// -- Corner decode toast -------------------------------------------------------
-// Shown only during the initial station load (L2 + L3). Never shown when
-// switching products/tilts — by then everything is preloaded.
+// -- Load progress bar ---------------------------------------------------------
+// Replaces the old fixed top-center decode toast. The bar lives in the
+// control island above the product pickers and shows 0–100 % progress.
 var _stationLoadActive = false;  // true only while the initial decode wave is running
 var _stationDecodeCount = 0;     // frames decoded since station click
-var _toastDrainTimer   = null;   // debounce handle for hiding the toast
+var _toastDrainTimer   = null;   // debounce handle for hiding the bar
+var _loadBarHideTimer  = null;
 var _startupDeferredSyncScheduled = false;
 var _startupDeferredSyncDone = false;
 
+function _setLoadBar(pct) {
+  const fill = document.getElementById('load-bar-fill');
+  const ci   = document.getElementById('control-island');
+  if (!fill) return;
+  clearTimeout(_loadBarHideTimer);
+  if (pct === null || pct < 0) {
+    ci?.classList.remove('bar-loading');
+    fill.style.width = '0%';
+    return;
+  }
+  ci?.classList.add('bar-loading');
+  fill.style.width = `${Math.max(0, Math.min(100, Math.round(pct)))}%`;
+}
+
 function _showDecodeToast(msg) {
-  const el    = document.getElementById('decode-toast');
-  const msgEl = document.getElementById('decode-msg');
-  if (el)    el.style.display = 'flex';
-  if (msgEl) msgEl.textContent = msg;
+  const pct = msg.includes('Resolv') ? 20 : msg.includes('Decod') ? 40 : 5;
+  _setLoadBar(pct);
 }
 
 function _runDeferredStartupSync() {
@@ -16332,31 +17419,28 @@ function _scheduleDeferredStartupSync() {
 }
 
 function _hideDecodeToast() {
-  const el = document.getElementById('decode-toast');
-  if (el) el.style.display = 'none';
   _stationLoadActive = false;
+  _setLoadBar(100);
+  _loadBarHideTimer = setTimeout(() => _setLoadBar(null), 400);
 }
 
 // L3 can spend noticeable time in list/resolve before any frame decode finishes.
-// Surface that phase so the toast does not appear stuck on "Connecting...".
 function _trackResolveStarted() {
   if (!_stationLoadActive) return;
-  _showDecodeToast('Resolving\u2026');
+  _setLoadBar(20);
 }
 
 // Called right before a decode starts (not when it finishes).
-// This switches the toast from "Connecting/Resolving" to "Decoding" immediately.
 function _trackDecodeStarted(_key) {
   if (!_stationLoadActive) return;
-  if (_stationDecodeCount === 0) _showDecodeToast('Decoding\u2026');
+  if (_stationDecodeCount === 0) _setLoadBar(40);
 }
 
 // Called by _runOneDecodeWorker after every successful decode.
-// Only updates the toast while an initial station load is running.
 function _trackFrameDecoded(_key) {
   if (!_stationLoadActive) return;
   _stationDecodeCount++;
-  _showDecodeToast(`Decoding\u2026 ${_stationDecodeCount}`);
+  _setLoadBar(Math.min(90, 40 + _stationDecodeCount * 25));
 }
 
 // Called when the last decode worker exits. Waits 2 s before hiding so that
@@ -16965,5 +18049,3 @@ document.getElementById('l2-warning-confirm')?.addEventListener('click', () => {
   localStorage.setItem('l2_warning_ok', '1');
   enableLevelII();
 });
-
-
