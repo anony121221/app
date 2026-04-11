@@ -932,14 +932,6 @@ const ALERT_SOURCE_TEST = 'TEST';
 const NWS_API_ALERTS_URL = 'https://api.weather.gov/alerts/active';
 const NWS_API_POLL_MS = 60_000;
 const ALERT_BOOTSTRAP_GRACE_MS = 30_000;
-const WARNING_DASHBOARD_CHANNEL = 'radar-warning-dashboard';
-const WARNING_DASHBOARD_STORAGE_KEY = 'radar_warning_dashboard_bus';
-const WARNING_DASHBOARD_MESSAGE_SNAPSHOT = 'snapshot';
-const WARNING_DASHBOARD_MESSAGE_REQUEST = 'request_snapshot';
-const WARNING_DASHBOARD_MESSAGE_GO_TO = 'go_to_warning';
-const WARNING_DASHBOARD_SOURCE_MAIN = 'main';
-const WARNING_DASHBOARD_LOG_EVENT = 'dashboard-window-log';
-
 function _defaultWarningPrefs() {
   const prefs = {};
   WARNING_PREF_CONFIG.forEach(item => {
@@ -1060,6 +1052,23 @@ function _purgeStationRuntimeCaches(stationId) {
       latestKeyCache.delete(cacheId);
     }
   }
+  for (const cacheKey of [..._wiseNotFoundCooldown.keys()]) {
+    const value = String(cacheKey || '');
+    if (value.includes(`/${sid3}_`) || value.includes(`${sid}:`) || value.includes(`${sid3}:`)) {
+      _wiseNotFoundCooldown.delete(cacheKey);
+    }
+  }
+  for (const key of [...decodeWaiters.keys()]) {
+    const comboKey = comboKeyFromS3Key(String(key || ''));
+    if (!comboKey || !comboKey.startsWith(`${sid}:`)) continue;
+    const waiters = decodeWaiters.get(key) || [];
+    decodeWaiters.delete(key);
+    for (const waiter of waiters) {
+      try {
+        waiter.reject(new Error('Radar station changed'));
+      } catch (_) {}
+    }
+  }
   for (const ck of [...layerPool.keys()]) {
     if (String(ck).startsWith(`${sid}:`)) {
       _disposePrimaryLayerPoolForCombo(ck);
@@ -1103,8 +1112,23 @@ function _warningPrefForClass(warnClass) {
   return warningPrefs?.[id] || _defaultWarningPrefs()[id];
 }
 
+function _resolvedWarningClass(props = {}) {
+  const explicit = String(props?._warnClass || '').trim().toUpperCase();
+  if (WARNING_PREF_ID_SET.has(explicit)) return explicit;
+  const derived = String(
+    _alertsWarnClass(
+      props?.event
+      || props?.eventRaw
+      || props?.headline
+      || '',
+      props,
+    ) || ''
+  ).trim().toUpperCase();
+  return WARNING_PREF_ID_SET.has(derived) ? derived : explicit;
+}
+
 function _warningClassId(props = {}) {
-  return String(props?._warnClass || '').trim().toUpperCase();
+  return _resolvedWarningClass(props);
 }
 
 function _warningIsRecognized(props = {}) {
@@ -2290,8 +2314,6 @@ async function _relayActivateNewFrame(stationId, family, tilt, knownFilename = n
 
     // Guard: user may have switched station/product while we were probing
     if (sid !== canonicalStationId(activeStation) || family !== activeFamily || tilt !== activeTilt) return;
-
-    scheduleProcessedWiseSiblingWarm(sid, family, tilt);
 
     if (frameCache.has(probedMeta.key)) {
       // Already in cache (predictive prefetch hit)
@@ -4682,7 +4704,11 @@ function _alertsNormalizeFeature(payload) {
       id,
       event,
       eventRaw: String(payload?.eventRaw ?? src?.properties?.eventRaw ?? event),
-      _warnClass: _alertsWarnClass(event, src?.properties || {}),
+      _warnClass: _resolvedWarningClass({
+        ...(src?.properties || {}),
+        event,
+        eventRaw: String(payload?.eventRaw ?? src?.properties?.eventRaw ?? event),
+      }),
       messageType: String(payload?.messageType ?? src?.properties?.messageType ?? ''),
       sent: Number.isFinite(sentMs) ? new Date(sentMs).toISOString() : null,
       expires: Number.isFinite(expiresMs) ? new Date(expiresMs).toISOString() : null,
@@ -5199,30 +5225,6 @@ function _announceWarningChanges(changes = []) {
   });
 }
 
-function _dashboardMessageRemember(id) {
-  const key = String(id || '').trim();
-  if (!key) return false;
-  if (warningDashboardSeenMessages.has(key)) return true;
-  warningDashboardSeenMessages.add(key);
-  if (warningDashboardSeenMessages.size > 256) {
-    const first = warningDashboardSeenMessages.values().next().value;
-    if (first) warningDashboardSeenMessages.delete(first);
-  }
-  return false;
-}
-
-function _postWarningDashboardMessage(type, payload = null) {
-  const message = {
-    id: `main-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`,
-    source: WARNING_DASHBOARD_SOURCE_MAIN,
-    type,
-    payload,
-    sentAt: new Date().toISOString(),
-  };
-  try { warningDashboardChannel?.postMessage(message); } catch (_) {}
-  try { localStorage.setItem(WARNING_DASHBOARD_STORAGE_KEY, JSON.stringify(message)); } catch (_) {}
-}
-
 function _collectWarningDashboardSnapshot() {
   const nowMs = Date.now();
   const warnings = [];
@@ -5231,7 +5233,7 @@ function _collectWarningDashboardSnapshot() {
     const props = feature?.properties || {};
     if (!_warningEnabledForUi(props)) continue;
     const event = String(props?.event || props?.eventRaw || '').trim();
-    const warnClassVal = String(props?._warnClass || '').trim();
+    const warnClassVal = _warningClassId(props);
     // Include any alert that has a recognized warnClass, or falls back to old "warning" name check
     if (!event || (!warnClassVal && !/warning/i.test(event))) continue;
 
@@ -5245,7 +5247,7 @@ function _collectWarningDashboardSnapshot() {
     const expiresMs = _warningExpiresMs(props);
     const urgencyScore = _warningUrgencyScore(props);
 
-    const wc = String(props?._warnClass || '').trim();
+    const wc = _warningClassId(props);
     warnings.push({
       id,
       title: _alertsDashboardTitle(props),
@@ -5352,11 +5354,7 @@ function _renderWarningsDropdown(snapshot = null) {
 
 function _emitWarningDashboardSnapshot() {
   const snapshot = _collectWarningDashboardSnapshot();
-  console.info('[dashboard] snapshot emit', snapshot.warnings.length);
   _renderWarningsDropdown(snapshot);
-  if (warningDashboardMessagingReady) {
-    _postWarningDashboardMessage(WARNING_DASHBOARD_MESSAGE_SNAPSHOT, snapshot);
-  }
 }
 
 function _goToWarningFromDashboard(target) {
@@ -5711,58 +5709,6 @@ function clearTestWarnings() {
   _alertsClearProviderFeatures(ALERT_SOURCE_TEST);
 }
 
-function _handleWarningDashboardMessage(message) {
-  if (!message || typeof message !== 'object') return;
-  if (String(message.source || '') === WARNING_DASHBOARD_SOURCE_MAIN) return;
-  if (_dashboardMessageRemember(message.id)) return;
-
-  const type = String(message.type || '');
-  if (type === WARNING_DASHBOARD_MESSAGE_REQUEST) {
-    console.info('[dashboard] snapshot requested');
-    _emitWarningDashboardSnapshot();
-    return;
-  }
-  if (type === WARNING_DASHBOARD_MESSAGE_GO_TO) {
-    console.info('[dashboard] go-to requested', String(message?.payload?.id || ''));
-    _goToWarningFromDashboard(message?.payload);
-  }
-}
-
-function ensureWarningDashboardMessaging() {
-  if (warningDashboardMessagingReady) return;
-  warningDashboardMessagingReady = true;
-  console.info('[dashboard] messaging ready');
-
-  if (typeof BroadcastChannel === 'function') {
-    try {
-      warningDashboardChannel = new BroadcastChannel(WARNING_DASHBOARD_CHANNEL);
-      warningDashboardChannel.addEventListener('message', evt => {
-        _handleWarningDashboardMessage(evt?.data);
-      });
-    } catch (_) {
-      warningDashboardChannel = null;
-    }
-  }
-
-  window.addEventListener('storage', evt => {
-    if (evt.key !== WARNING_DASHBOARD_STORAGE_KEY || !evt.newValue) return;
-    try {
-      _handleWarningDashboardMessage(JSON.parse(evt.newValue));
-    } catch (_) {}
-  });
-
-  listen(WARNING_DASHBOARD_LOG_EVENT, evt => {
-    const payload = evt?.payload || {};
-    const phase = String(payload?.phase || '').trim();
-    const detail = String(payload?.detail || '').trim();
-    const url = String(payload?.url || '').trim();
-    const status = Number(payload?.status);
-    console.info('[dashboard]', phase || 'log', detail || '', url || '', Number.isFinite(status) ? `status=${status}` : '');
-  }).catch(err => {
-    console.warn('[dashboard] log listener failed', err?.message || String(err));
-  });
-}
-
 function _alertsClearProviderFeatures(provider) {
   if (!provider) return;
   if (provider === ALERT_SOURCE_NWS_BOOTSTRAP) _alertsClearBootstrapPruneTimer();
@@ -5798,13 +5744,16 @@ function _alertsQueueTiming(alertId, timing) {
 }
 
 function _alertsApplySourceDataNow() {
-  if (!alertsMapReady) return;
-  const src = map.getSource('alerts-src');
-  if (!src) return;
-  src.setData({
-    type: 'FeatureCollection',
-    features: _alertsStyledFeatures(),
-  });
+  const features = _alertsStyledFeatures();
+  if (alertsMapReady) {
+    const src = map.getSource('alerts-src');
+    if (src) {
+      src.setData({
+        type: 'FeatureCollection',
+        features,
+      });
+    }
+  }
   _ensureOverlayFlashTicker();
   _emitWarningDashboardSnapshot();
 }
@@ -5827,6 +5776,12 @@ function _alertsScheduleSourceUpdate() {
     _ensureOverlayFlashTicker();
     _emitWarningDashboardSnapshot();
   });
+}
+
+function _alertsRefreshPresentationNow() {
+  alertsFlushPending = false;
+  _alertsCleanupExpired();
+  _alertsApplySourceDataNow();
 }
 
 function _alertsUpsertFromPayload(payload) {
@@ -5915,7 +5870,12 @@ function _alertsNormalizeNwsApiFeature(feature, provider = ALERT_SOURCE_NWS_API)
       id,
       event,
       eventRaw,
-      _warnClass: warnClass,
+      _warnClass: _resolvedWarningClass({
+        ...(props || {}),
+        event,
+        eventRaw,
+        _warnClass: warnClass,
+      }),
       messageType: String(props?.messageType || 'Alert'),
       sent: Number.isFinite(sentMs) ? new Date(sentMs).toISOString() : null,
       expires: Number.isFinite(expiresMs) ? new Date(expiresMs).toISOString() : null,
@@ -6104,7 +6064,11 @@ function _alertsNormalizeExternalFeature(feature, provider = ALERT_SOURCE_NWWS) 
       id,
       event,
       eventRaw: eventRaw || event,
-      _warnClass: _alertsWarnClass(event, props),
+      _warnClass: _resolvedWarningClass({
+        ...(props || {}),
+        event,
+        eventRaw: eventRaw || event,
+      }),
       messageType: String(props?.messageType || props?.action || 'Alert'),
       sent: Number.isFinite(sentMs) ? new Date(sentMs).toISOString() : null,
       expires: Number.isFinite(expiresMs) ? new Date(expiresMs).toISOString() : null,
@@ -7966,13 +7930,48 @@ function _storePassiveComboHistoryEntries(comboKey, entries, preferredKey = null
 }
 
 function _secondaryPaneTargetHistoryCount() {
-  const primaryHistory = historyMap.get(activeCacheKey()) || [];
+  const primaryHistory = _timelineHistory();
   const desired = Math.max(
     primaryHistory.length,
     historyFrameLimitForSelection(activeStation, activeFamily, activeTilt),
     1,
   );
   return Math.max(1, Math.min(MAX_HISTORY_FRAMES, desired));
+}
+
+function _visibleProcessedWiseSelections(stationId = activeStation) {
+  const sid = canonicalStationId(stationId);
+  if (!sid || levelII || isLocalRadarMode()) return [];
+  const selections = [];
+  const seen = new Set();
+
+  const addSelection = (family, tilt, { isPrimary = false, paneId = 1 } = {}) => {
+    const normalizedFamily = String(family || '').trim().toUpperCase();
+    if (!normalizedFamily) return;
+    const normalizedTilt = _normalizeProcessedWiseTiltForStation(sid, normalizedFamily, tilt || '0.5');
+    if (!_canUseProcessedWise(sid, normalizedFamily, normalizedTilt)) return;
+    const comboKey = `${sid}:${normalizedFamily}:${normalizedTilt}`;
+    if (seen.has(comboKey)) return;
+    seen.add(comboKey);
+    selections.push({
+      station: sid,
+      family: normalizedFamily,
+      tilt: normalizedTilt,
+      comboKey,
+      isPrimary,
+      paneId,
+    });
+  };
+
+  addSelection(activeFamily, activeTilt, { isPrimary: true, paneId: 1 });
+  if (multiPaneCount > 1) {
+    for (const pane of secondaryPaneMaps.values()) {
+      if (!pane || pane.id > multiPaneCount) continue;
+      addSelection(pane.family, pane.tilt, { paneId: pane.id });
+    }
+  }
+
+  return selections;
 }
 
 const CURRENT_STATION_HISTORY_TRIM_DELAY_MS = 20000;
@@ -7984,6 +7983,9 @@ function _residentComboKeysForCurrentStation() {
   const stationId = canonicalStationId(activeStation);
   if (!stationId) return keep;
   keep.add(activeCacheKey());
+  if (_timelineAnchorComboKey && _timelineAnchorComboKey.startsWith(`${stationId}:`)) {
+    keep.add(_timelineAnchorComboKey);
+  }
   if (_manualHistoryComboKey && _manualHistoryComboKey.startsWith(`${stationId}:`)) {
     keep.add(_manualHistoryComboKey);
   }
@@ -8033,15 +8035,10 @@ function _scheduleCurrentStationResidencyTrim(delayMs = CURRENT_STATION_HISTORY_
 
 function _targetHistoryIndexForEntries(entries) {
   if (!Array.isArray(entries) || !entries.length) return -1;
-  const primaryHistory = historyMap.get(activeCacheKey()) || [];
-  if (!primaryHistory.length || historyIdx < 0) return entries.length - 1;
-  const primaryLiveIdx = Math.max(0, primaryHistory.length - 1);
-  const primaryIdx = Math.max(0, Math.min(historyIdx, primaryLiveIdx));
-  const offsetFromLatest = primaryLiveIdx - primaryIdx;
-  return Math.max(0, entries.length - 1 - offsetFromLatest);
+  return _historyIndexFromPlaybackOffset(entries);
 }
 
-async function _showSecondaryPaneHistoryFrame(pane, entries, index, { priority = true } = {}) {
+async function _showSecondaryPaneHistoryFrame(pane, entries, index, { priority = true, immediateUpload = false } = {}) {
   if (!pane || !pane.ready || !Array.isArray(entries) || index < 0 || index >= entries.length) return;
   const entry = entries[index];
   const key = String(entry?.key || '');
@@ -8057,7 +8054,54 @@ async function _showSecondaryPaneHistoryFrame(pane, entries, index, { priority =
     }
   }
   if (pane.lastKey !== key) return;
-  _paneRenderFrame(pane, data);
+  _paneRenderFrame(pane, data, { immediateUpload });
+}
+
+async function _resolveSecondaryPaneHistoryFrame(pane, { priority = true } = {}) {
+  if (!pane || !pane.ready || !activeStation || levelII) return null;
+  const comboKey = _paneComboKey(pane);
+  const targetFrames = _secondaryPaneTargetHistoryCount();
+  let entries = historyMap.get(comboKey) || [];
+
+  if (targetFrames > 1 && entries.length < targetFrames) {
+    try {
+      const recentEntries = await findRecentKeys(activeStation, pane.family, pane.tilt, targetFrames);
+      if (Array.isArray(recentEntries) && recentEntries.length) {
+        entries = _storePassiveComboHistoryEntries(
+          comboKey,
+          [...entries, ...recentEntries],
+          pane.lastKey,
+          targetFrames,
+        );
+      }
+    } catch (_) {}
+  }
+
+  if (!entries.length) return null;
+  const targetIndex = _targetHistoryIndexForEntries(entries);
+  if (targetIndex < 0 || targetIndex >= entries.length) return null;
+  const entry = entries[targetIndex];
+  const key = String(entry?.key || '');
+  if (!key) return null;
+
+  const prevKey = pane.lastKey;
+  pane.lastKey = key;
+  pane.historyIdx = targetIndex;
+
+  let data = (prevKey === key && pane.lastFrameData)
+    ? pane.lastFrameData
+    : frameCache.get(key);
+  if (!data) {
+    data = await ensureFrameDecoded(key, entry, priority);
+  }
+  if (pane.lastKey !== key) return null;
+
+  return {
+    pane,
+    data,
+    key,
+    historyIdx: targetIndex,
+  };
 }
 
 async function _syncSecondaryPanesToPrimaryFrame(options = {}) {
@@ -8221,12 +8265,14 @@ function _cancelAllPaneSweeps(promoteNewFrame = false) {
   secondaryPaneMaps.forEach(pane => _cancelPaneSweep(pane, promoteNewFrame));
 }
 
-function _paneRenderFrame(pane, frame) {
+function _paneRenderFrame(pane, frame, opts = {}) {
   if (!pane || !pane.ready || !frame) return;
   if (pane.sweepState) _cancelPaneSweep(pane, false);
   const layer = _paneSetActiveComboLayer(pane);
   layer.setMinValue(_paneMinValue(pane.family));
-  layer.setFrame(frame);
+  layer.setFrame(frame, null, {
+    immediateUpload: opts?.immediateUpload === true,
+  });
   pane.lastFrameData = frame;
   _setPaneFrameTime(pane.id, pane.lastKey, frame);
   if (inspectorEnabled && inspectorPaneId === pane.id) updateInspectorReadout();
@@ -8429,7 +8475,7 @@ async function _loadVisibleSecondaryPanes({ force = false } = {}) {
   await Promise.allSettled(paneIds.map(id => _loadSecondaryPaneLatest(id, { force })));
 }
 
-async function _renderSyncedMultiPaneHistoryFrame(idx, history, { priority = true, requestSeq = 0 } = {}) {
+async function _renderSyncedMultiPaneHistoryFrame(idx, history, { priority = true, requestSeq = 0, immediateUpload = false } = {}) {
   if (!activeStation || !Array.isArray(history) || idx < 0 || idx >= history.length) return;
   const entry = history[idx];
   const primaryKey = String(entry?.key || '');
@@ -8439,28 +8485,22 @@ async function _renderSyncedMultiPaneHistoryFrame(idx, history, { priority = tru
     ? Promise.resolve(frameCache.get(primaryKey))
     : ensureFrameDecoded(primaryKey, entry, priority);
   const paneIds = [2, 3, 4].filter(id => id <= multiPaneCount);
-  const panePromises = paneIds.map(id => _loadSecondaryPaneLatest(id, {
-    force: true,
-    syncToPrimaryHistory: true,
-    priority,
-    deferRender: true,
-    animate: false,
-  }));
+  const panePromises = paneIds.map(id => _resolveSecondaryPaneHistoryFrame(secondaryPaneMaps.get(id), { priority }));
   const [primaryResult, ...paneResults] = await Promise.allSettled([primaryDataPromise, ...panePromises]);
   if (syncSeq !== multiPaneHistorySyncSeq) return;
   if (requestSeq && requestSeq !== historyRenderRequestedSeq) return;
   if (primaryResult.status === 'fulfilled' && frameCache.has(primaryKey)) {
-    showFrame(primaryKey);
+    showFrame(primaryKey, { skipPrefetch: true, immediateUpload });
   }
   for (const paneResult of paneResults) {
     if (paneResult.status !== 'fulfilled' || !paneResult.value?.pane || !paneResult.value?.data) continue;
     const result = paneResult.value;
     if (result.pane.lastKey !== result.key) continue;
-    _paneRenderFrame(result.pane, result.data);
+    _paneRenderFrame(result.pane, result.data, { immediateUpload });
   }
 }
 
-function _tryRenderCachedSyncedMultiPaneHistoryFrame(idx, history) {
+function _tryRenderCachedSyncedMultiPaneHistoryFrame(idx, history, { immediateUpload = false } = {}) {
   if (!activeStation || !Array.isArray(history) || idx < 0 || idx >= history.length) return false;
   const entry = history[idx];
   const primaryKey = String(entry?.key || '');
@@ -8489,11 +8529,11 @@ function _tryRenderCachedSyncedMultiPaneHistoryFrame(idx, history) {
   }
 
   multiPaneHistorySyncSeq += 1;
-  showFrame(primaryKey);
+  showFrame(primaryKey, { skipPrefetch: true, immediateUpload });
   for (const render of paneRenders) {
     render.pane.lastKey = render.targetKey;
     render.pane.historyIdx = render.targetIndex;
-    _paneRenderFrame(render.pane, render.data);
+    _paneRenderFrame(render.pane, render.data, { immediateUpload });
   }
   return true;
 }
@@ -8613,6 +8653,7 @@ function _ensurePaneCell(id) {
   cell.dataset.pane = String(id);
   cell.innerHTML = `<div id="map-pane-${id}" class="map-pane"></div><div class="pane-frame-time" id="pane-frame-time-${id}">--:--:--</div>`;
   mapGridEl?.appendChild(cell);
+  cell.addEventListener('pointerdown', () => _setActivePane(id));
   cell.addEventListener('mousedown', () => _setActivePane(id));
   return cell;
 }
@@ -8638,9 +8679,11 @@ function _syncLoadMoreBtn() {
   );
   btn.style.display = show ? '' : 'none';
   if (!show) return;
-  const history = historyMap.get(activeCacheKey()) || [];
-  btn.disabled = history.length > 1;
-  btn.textContent = history.length > 1 ? 'Frames Loaded' : 'Load More Frames';
+  const selections = _visibleProcessedWiseSelections(activeStation);
+  const allLoaded = selections.length > 0
+    && selections.every(selection => (historyMap.get(selection.comboKey) || []).length > 1);
+  btn.disabled = allLoaded;
+  btn.textContent = allLoaded ? 'Frames Loaded' : 'Load More Frames';
 }
 
 function _setRecentFramesMenuOpen(open) {
@@ -8752,6 +8795,7 @@ function setMultiPaneCount(count) {
   _restartPanePolling();
 }
 
+mapCellOneEl?.addEventListener('pointerdown', () => _setActivePane(1));
 mapCellOneEl?.addEventListener('mousedown', () => _setActivePane(1));
 map.on('mousedown', () => _setActivePane(1));
 map.on('move', () => _schedulePaneSyncFrom(1, map));
@@ -9720,9 +9764,6 @@ let nwwsBridgeStartPromise = null;
 let nwwsBridgeListenersReady = false;
 let nwwsLastStatusSig = '';
 let nwwsFatalStopInFlight = false;
-let warningDashboardMessagingReady = false;
-let warningDashboardChannel = null;
-const warningDashboardSeenMessages = new Set();
 let nwwsLastAlertsGeneratedAt = '';
 let nwwsUsername = '';
 let nwwsPassword = '';
@@ -9844,6 +9885,7 @@ const comboLatestKey = new Map();
 const historyMap = new Map();
 const comboHistoryTargetFrames = new Map();
 let historyIdx = -1; // current slider position; -1 = snap to latest
+let _timelineAnchorComboKey = '';
 
 function historyFrameLimitForCombo(comboKey) {
   const raw = Number(comboHistoryTargetFrames.get(comboKey) || DEFAULT_L3_HISTORY_FRAMES);
@@ -9857,8 +9899,48 @@ function historyFrameLimitForSelection(stationId, family, tilt) {
   return historyFrameLimitForCombo(`${sid}:${fam}:${tlt}`);
 }
 
+function _timelineComboKey() {
+  return String(_timelineAnchorComboKey || activeCacheKey() || '');
+}
+
+function _timelineHistory() {
+  const ck = _timelineComboKey();
+  return ck ? (historyMap.get(ck) || []) : [];
+}
+
+function _timelineCurrentIndex(history = _timelineHistory()) {
+  if (!Array.isArray(history) || !history.length) return -1;
+  return (historyIdx >= 0 && historyIdx < history.length)
+    ? historyIdx
+    : (history.length - 1);
+}
+
+function _timelineOffsetFromLatest(history = _timelineHistory()) {
+  if (!Array.isArray(history) || !history.length) return 0;
+  const latestIndex = Math.max(0, history.length - 1);
+  const currentIndex = _timelineCurrentIndex(history);
+  if (currentIndex < 0) return 0;
+  return Math.max(0, latestIndex - currentIndex);
+}
+
+function _historyIndexFromPlaybackOffset(entries, offsetFromLatest = _timelineOffsetFromLatest()) {
+  if (!Array.isArray(entries) || !entries.length) return -1;
+  const boundedOffset = Math.max(0, Math.min(entries.length - 1, Math.round(Number(offsetFromLatest) || 0)));
+  return Math.max(0, entries.length - 1 - boundedOffset);
+}
+
+function _shouldPreserveTimelineOffsetForCombo(comboKey) {
+  return !!comboKey
+    && comboKey === _timelineComboKey()
+    && (isPlaying || _isManualHistoryActive(comboKey) || historyIdx >= 0);
+}
+
 function _setL3HistoryEntries(comboKey, entries, preferredKey = null) {
   if (!comboKey) return;
+  const prevHistory = historyMap.get(comboKey) || [];
+  const prevOffsetFromLatest = _shouldPreserveTimelineOffsetForCombo(comboKey)
+    ? _timelineOffsetFromLatest(prevHistory)
+    : 0;
   const deduped = [];
   const seen = new Set();
   for (const entry of Array.isArray(entries) ? entries : []) {
@@ -9880,9 +9962,15 @@ function _setL3HistoryEntries(comboKey, entries, preferredKey = null) {
     ? preferredKey
     : nextHistory[nextHistory.length - 1].key;
   comboLatestKey.set(comboKey, keepKey);
-  historyIdx = Math.max(0, nextHistory.findIndex(entry => entry.key === keepKey));
-  updateSlider();
-  startFrameTracking(nextHistory.map(entry => entry.key));
+  if (comboKey === _timelineComboKey()) {
+    if (_shouldPreserveTimelineOffsetForCombo(comboKey)) {
+      historyIdx = _historyIndexFromPlaybackOffset(nextHistory, prevOffsetFromLatest);
+    } else {
+      historyIdx = Math.max(0, nextHistory.findIndex(entry => entry.key === keepKey));
+    }
+    updateSlider();
+    startFrameTracking(nextHistory.map(entry => entry.key));
+  }
 }
 
 function clearAllRuntimeCaches() {
@@ -9949,14 +10037,14 @@ function requestL3DecodeBurst(durationMs = L3_DECODE_BURST_MS) {
   startDecodeWorkers();
 }
 
-function _isManualHistoryBurstActive(comboKey = activeCacheKey()) {
+function _isManualHistoryBurstActive(comboKey = _timelineComboKey()) {
   return !!comboKey
     && comboKey === _manualHistoryBurstComboKey
     && comboKey === _manualHistoryComboKey
     && Date.now() < _manualHistoryBurstUntil;
 }
 
-function _refreshManualHistoryBurst(comboKey = activeCacheKey(), durationMs = MANUAL_HISTORY_BURST_MS) {
+function _refreshManualHistoryBurst(comboKey = _timelineComboKey(), durationMs = MANUAL_HISTORY_BURST_MS) {
   if (!comboKey) return;
   _manualHistoryBurstComboKey = comboKey;
   const ms = Math.max(1000, Math.round(Number(durationMs) || MANUAL_HISTORY_BURST_MS));
@@ -9981,6 +10069,9 @@ let decodeWorkerCount = 0;
 const decodeWaiters = new Map();
 const _l3WarmPending = new Set();
 let _l3WarmTimer = null;
+let _stationProductPreloadSeq = 0;
+let _stationVisiblePanePreloadTimer = null;
+let _stationAllProductPreloadTimer = null;
 
 function scheduleL3WarmFlush() {
   if (_l3WarmTimer) return;
@@ -10010,6 +10101,15 @@ function clearL3WarmQueue() {
     clearTimeout(_processedWiseWarmTimer);
     _processedWiseWarmTimer = null;
   }
+  if (_stationVisiblePanePreloadTimer) {
+    clearTimeout(_stationVisiblePanePreloadTimer);
+    _stationVisiblePanePreloadTimer = null;
+  }
+  if (_stationAllProductPreloadTimer) {
+    clearTimeout(_stationAllProductPreloadTimer);
+    _stationAllProductPreloadTimer = null;
+  }
+  _stationProductPreloadSeq += 1;
 }
 
 function _processedWiseWarmSelectionKey(stationId = activeStation, family = activeFamily, tilt = activeTilt) {
@@ -10023,6 +10123,7 @@ function scheduleProcessedWiseSiblingWarm(stationId = activeStation, family = ac
   const selectionKey = _processedWiseWarmSelectionKey(stationId, family, tilt);
   if (!selectionKey) return;
   if (_isManualHistoryActive(selectionKey)) return;
+  if (_stationVisiblePanePreloadTimer || _stationAllProductPreloadTimer) return;
   const force = opts?.force === true;
   const now = Date.now();
   if (!force
@@ -10063,6 +10164,105 @@ async function _warmProcessedWiseSiblingProducts(seq, stationId, family, tilt) {
       enqueueDecode(latestMeta.key, latestMeta, false);
     }
   }));
+}
+
+function _allProcessedWiseSelectionsForStation(stationId = activeStation, tilt = activeTilt) {
+  const sid = canonicalStationId(stationId);
+  if (!sid || levelII || isLocalRadarMode()) return [];
+  const families = supportedL3FamiliesForStation(sid);
+  const seen = new Set();
+  return families.reduce((list, family) => {
+    const normalizedFamily = String(family || '').trim().toUpperCase();
+    if (!normalizedFamily) return list;
+    const normalizedTilt = normalizeTiltForStationFamily(sid, normalizedFamily, tilt);
+    if (!_canUseProcessedWise(sid, normalizedFamily, normalizedTilt)) return list;
+    const comboKey = `${sid}:${normalizedFamily}:${normalizedTilt}`;
+    if (seen.has(comboKey)) return list;
+    seen.add(comboKey);
+    list.push({
+      station: sid,
+      family: normalizedFamily,
+      tilt: normalizedTilt,
+      comboKey,
+    });
+    return list;
+  }, []);
+}
+
+async function _runWithConcurrency(items, limit, worker) {
+  const list = Array.isArray(items) ? items : [];
+  if (!list.length || typeof worker !== 'function') return;
+  const concurrency = Math.max(1, Math.min(list.length, Math.round(Number(limit) || 1)));
+  let index = 0;
+  await Promise.allSettled(Array.from({ length: concurrency }, async () => {
+    while (true) {
+      const current = index;
+      index += 1;
+      if (current >= list.length) return;
+      await worker(list[current], current);
+    }
+  }));
+}
+
+async function _preloadLatestProcessedWiseSelections(seq, selections, { priority = false } = {}) {
+  const concurrency = priority ? 2 : 1;
+  await _runWithConcurrency(selections, concurrency, async selection => {
+    if (seq !== _stationProductPreloadSeq) return;
+    if (!activeStation || canonicalStationId(selection?.station) !== canonicalStationId(activeStation)) return;
+    const family = String(selection?.family || '').toUpperCase();
+    const tilt = String(selection?.tilt || '');
+    if (!family || !_canUseProcessedWise(activeStation, family, tilt)) return;
+    try {
+      let latestMeta = await findLatestKeyCurrentOnly(activeStation, { family, tilt });
+      if (!latestMeta?.key) {
+        latestMeta = await findLatestKey(activeStation, { family, tilt });
+      }
+      if (!latestMeta?.key || seq !== _stationProductPreloadSeq) return;
+      const comboKey = String(selection?.comboKey || `${canonicalStationId(activeStation)}:${family}:${tilt}`);
+      const prevKey = comboLatestKey.get(comboKey);
+      const prevTs = parseKeyTimestampMs(prevKey || '');
+      const nextTs = parseKeyTimestampMs(latestMeta.key);
+      if (prevKey && Number.isFinite(prevTs) && Number.isFinite(nextTs) && nextTs < prevTs) return;
+      _storePassiveComboHistoryEntries(
+        comboKey,
+        [...(historyMap.get(comboKey) || []), latestMeta],
+        latestMeta.key,
+        Math.max(1, historyFrameLimitForCombo(comboKey)),
+      );
+      if (!frameCache.has(latestMeta.key) && !_isDecodeQueued(latestMeta.key)) {
+        enqueueDecode(latestMeta.key, latestMeta, priority);
+      }
+    } catch (_) {}
+  });
+}
+
+function scheduleStationProductPreload(stationId = activeStation, family = activeFamily, tilt = activeTilt) {
+  const sid = canonicalStationId(stationId);
+  if (!_canUseProcessedWise(sid, family, tilt)) return;
+  const seq = ++_stationProductPreloadSeq;
+  if (_stationVisiblePanePreloadTimer) clearTimeout(_stationVisiblePanePreloadTimer);
+  if (_stationAllProductPreloadTimer) clearTimeout(_stationAllProductPreloadTimer);
+
+  const visibleSelections = _visibleProcessedWiseSelections(sid);
+  const visibleSecondarySelections = visibleSelections.filter(selection => !selection.isPrimary);
+  const allSelections = _allProcessedWiseSelectionsForStation(sid, tilt);
+  const visibleComboKeys = new Set(visibleSelections.map(selection => selection.comboKey));
+  const remainingSelections = allSelections.filter(selection => !visibleComboKeys.has(selection.comboKey));
+
+  _stationVisiblePanePreloadTimer = setTimeout(() => {
+    if (seq !== _stationProductPreloadSeq || sid !== canonicalStationId(activeStation)) return;
+    _stationVisiblePanePreloadTimer = null;
+    if (multiPaneCount > 1 && !levelII) {
+      void _loadVisibleSecondaryPanes({ force: true });
+    }
+    void _preloadLatestProcessedWiseSelections(seq, visibleSecondarySelections, { priority: true });
+  }, 180);
+
+  _stationAllProductPreloadTimer = setTimeout(() => {
+    if (seq !== _stationProductPreloadSeq || sid !== canonicalStationId(activeStation)) return;
+    _stationAllProductPreloadTimer = null;
+    void _preloadLatestProcessedWiseSelections(seq, remainingSelections, { priority: false });
+  }, 1200);
 }
 
 function queueL3WarmKey(key) {
@@ -10334,7 +10534,7 @@ async function ensureFrameDecoded(s3key, meta = {}, priority = false) {
 }
 
 function viewedKey() {
-  const ck = activeCacheKey();
+  const ck = _timelineComboKey();
   const history = historyMap.get(ck) || [];
   if (history.length > 0) {
     const idx = (historyIdx >= 0 && historyIdx < history.length) ? historyIdx : history.length - 1;
@@ -10406,7 +10606,7 @@ function _enqueueHistoryNeighborhood(entries, centerIndex, { direction = 0, radi
 function _prefetchVisiblePaneHistoryNeighborhood(centerIndex, direction = 0) {
   if (!activeStation) return;
   requestL3DecodeBurst();
-  const ck = activeCacheKey();
+  const ck = _timelineComboKey();
   const activeHistory = historyMap.get(ck) || [];
   const manualHistoryActive = _isManualHistoryActive(ck);
   if (activeHistory.length) {
@@ -10424,7 +10624,6 @@ function _prefetchVisiblePaneHistoryNeighborhood(centerIndex, direction = 0) {
       });
     }
   }
-  if (manualHistoryActive) return;
   if (multiPaneCount <= 1) return;
   for (const pane of secondaryPaneMaps.values()) {
     if (!pane || pane.id > multiPaneCount) continue;
@@ -10461,7 +10660,7 @@ const _tlTrackFill = document.getElementById('tl-track-fill');
 const _tlThumb     = document.getElementById('tl-thumb');
 const _tlLabels    = document.getElementById('tl-labels');
 
-function _isManualHistoryActive(comboKey = activeCacheKey()) {
+function _isManualHistoryActive(comboKey = _timelineComboKey()) {
   return !!comboKey && comboKey === _manualHistoryComboKey;
 }
 
@@ -10514,7 +10713,7 @@ function _manualHistoryBurstOrder(entries, targetIndex, includeBackfill = true) 
 
 function _queueManualHistoryBurst(entries, targetIndex, { includeBackfill = true, burstMs = MANUAL_HISTORY_BURST_MS } = {}) {
   if (!Array.isArray(entries) || !entries.length) return;
-  const ck = activeCacheKey();
+  const ck = _timelineComboKey();
   if (!_isManualHistoryActive(ck)) return;
   const ordered = _manualHistoryBurstOrder(entries, targetIndex, includeBackfill);
   if (!ordered.length) return;
@@ -10548,6 +10747,7 @@ function _setManualHistoryMode(comboKey, history) {
     _processedWiseWarmTimer = null;
   }
   _manualHistoryComboKey = comboKey;
+  _timelineAnchorComboKey = comboKey;
   _refreshManualHistoryBurst(comboKey);
   _initTimeline(comboKey, entries);
 }
@@ -10593,6 +10793,7 @@ function _hideTimeline() {
   _tlPreviewFrameKey = '';
   _clearManualHistoryBurst();
   _manualHistoryComboKey = '';
+  _timelineAnchorComboKey = '';
   if (_tlLabels) _tlLabels.innerHTML = '';
 }
 
@@ -10638,11 +10839,10 @@ function _updateTlProgress(key, failed = false) {
 }
 
 function _updateTlPosition() {
-  const ck = activeCacheKey();
+  const ck = _timelineComboKey();
   const history = historyMap.get(ck);
   if (!history?.length || !_hwFrameKeys.length) return;
-  const newIdx = (historyIdx >= 0 && historyIdx < history.length)
-    ? historyIdx : history.length - 1;
+  const newIdx = _timelineCurrentIndex(history);
   const n = history.length;
   const pct = n > 1 ? (newIdx / (n - 1)) * 100 : 0;
 
@@ -10731,7 +10931,7 @@ function _renderHistoryPlaceholderAt(idx, history) {
 function _settleTimelineTarget(idx, history, settleSeq) {
   if (settleSeq !== _tlSettleSeq) return;
   if (!Array.isArray(history) || idx < 0 || idx >= history.length) return;
-  const ck = activeCacheKey();
+  const ck = _timelineComboKey();
   if (!_isManualHistoryActive(ck)) return;
   const target = history[idx];
   if (!target?.key) return;
@@ -10743,7 +10943,13 @@ function _settleTimelineTarget(idx, history, settleSeq) {
     includeBackfill: true,
     burstMs: MANUAL_HISTORY_BURST_MS,
   });
-  _showHistoryFrameAt(idx, history, { fetchExact: true });
+  if (multiPaneCount > 1) {
+    if (!_tryRenderCachedSyncedMultiPaneHistoryFrame(idx, history, { immediateUpload: true })) {
+      _queueHistoryRender(idx, history, { priority: true });
+    }
+  } else {
+    _showHistoryFrameAt(idx, history, { fetchExact: true });
+  }
   _prefetchVisiblePaneHistoryNeighborhood(idx, 0);
 }
 
@@ -10762,7 +10968,7 @@ function _tlSeekFromPointer(clientX) {
   if (!_tlTrackWrap || !_hwFrameKeys.length) return;
   const rect = _tlTrackWrap.getBoundingClientRect();
   const frac = Math.max(0, Math.min(1, (clientX - rect.left) / rect.width));
-  const ck = activeCacheKey();
+  const ck = _timelineComboKey();
   const history = historyMap.get(ck) || [];
   if (!history.length) return;
   const newIdx = Math.round(frac * (history.length - 1));
@@ -10773,9 +10979,15 @@ function _tlSeekFromPointer(clientX) {
   cancelSweep();
   paneInteractionUntilMs = Date.now() + 1800;
   historyIdx = newIdx;
-  _renderHistoryPlaceholderAt(historyIdx, history);
   const target = history[historyIdx];
   _setHistoryFrameLabelForKey(target?.key);
+  if (multiPaneCount > 1) {
+    if (!_tryRenderCachedSyncedMultiPaneHistoryFrame(historyIdx, history, { immediateUpload: true })) {
+      _queueHistoryRender(historyIdx, history, { priority: true });
+    }
+  } else {
+    _renderHistoryPlaceholderAt(historyIdx, history);
+  }
   _updateTlPosition();
   _scheduleTimelineSettle(historyIdx, history, false);
 }
@@ -10800,7 +11012,7 @@ document.addEventListener('mousemove', e => {
 });
 document.addEventListener('mouseup', () => {
   if (_tlDragging) {
-    const ck = activeCacheKey();
+    const ck = _timelineComboKey();
     const history = historyMap.get(ck) || [];
     if (historyIdx >= 0 && historyIdx < history.length) {
       _scheduleTimelineSettle(historyIdx, history, true);
@@ -10815,7 +11027,7 @@ document.addEventListener('touchmove', e => {
 }, { passive: true });
 document.addEventListener('touchend', () => {
   if (_tlDragging) {
-    const ck = activeCacheKey();
+    const ck = _timelineComboKey();
     const history = historyMap.get(ck) || [];
     if (historyIdx >= 0 && historyIdx < history.length) {
       _scheduleTimelineSettle(historyIdx, history, true);
@@ -10831,7 +11043,7 @@ document.addEventListener('touchend', () => {
 // already-cached/queued frames. Callers are responsible for burst/timeline setup.
 function _preloadActiveComboHistory() {
   if (!activeStation || levelII || isLocalRadarMode()) return;
-  const ck = activeCacheKey();
+  const ck = _timelineComboKey();
   const history = historyMap.get(ck);
   if (!history?.length) return;
   const center = (historyIdx >= 0 && historyIdx < history.length)
@@ -10848,7 +11060,7 @@ function pruneFrameCache() {
   const limit = _frameCacheMax();
   if (frameCache.size <= limit) return;
   const protected_ = new Set();
-  const ck = activeCacheKey();
+  const ck = _timelineComboKey();
   (historyMap.get(ck) || []).forEach(f => protected_.add(f.key));
   for (const key of _collectVisiblePaneHistoryProtectionKeys()) protected_.add(key);
   if (sweepNewKey) protected_.add(sweepNewKey);
@@ -10975,12 +11187,12 @@ async function _runOneDecodeWorker() {
 // side so scrubbing feels instant without hammering the backend at load time.
 let _prefetchTimer = null;
 function scheduleNeighborPrefetch() {
-  if (!levelII && historyFrameLimitForCombo(activeCacheKey()) <= 1) return;
+  if (!levelII && historyFrameLimitForCombo(_timelineComboKey()) <= 1) return;
   if (_isL2PathForFamily(activeFamily)) return; // L2 decodes are expensive — skip prefetch
   clearTimeout(_prefetchTimer);
   _prefetchTimer = setTimeout(() => {
     if (_tlDragging) return;
-    const ck = activeCacheKey();
+    const ck = _timelineComboKey();
     const history = historyMap.get(ck) || [];
     if (!history.length) return;
     const idx = historyIdx >= 0 ? historyIdx : history.length - 1;
@@ -11025,7 +11237,7 @@ function showFrameMeta(s3key, data) {
     setFrameLabel(`${timeStr}  LOCAL`, 'ok');
     return;
   }
-  const ck = activeCacheKey();
+  const ck = _timelineComboKey();
   const history = historyMap.get(ck) || [];
   if (_tlDragging && _isManualHistoryActive(ck) && historyIdx >= 0 && historyIdx < history.length) {
     _setHistoryFrameLabelForKey(history[historyIdx]?.key);
@@ -11050,7 +11262,7 @@ function showCachedActiveCombo() {
     historyMap.set(ck, history);
   }
   if (history.length) {
-    const keepHistoryIdx = _isManualHistoryActive(ck) && historyIdx >= 0 && historyIdx < history.length;
+    const keepHistoryIdx = _isManualHistoryActive(_timelineComboKey()) && ck === _timelineComboKey() && historyIdx >= 0 && historyIdx < history.length;
     historyIdx = keepHistoryIdx ? historyIdx : (history.length - 1);
     updateSlider();
     const { key: curKey, ...curMeta } = history[historyIdx];
@@ -11114,7 +11326,6 @@ async function loadHistory(stationId, family, tilt, opts = {}) {
       const { key: curKey, ...curMeta } = cachedEntries[historyIdx];
       if (frameCache.has(curKey) && !sweepActive) showFrame(curKey);
       else enqueueDecode(curKey, curMeta, true);
-      if (!_isManualHistoryActive(ck)) scheduleProcessedWiseSiblingWarm(stationId, family, tilt);
       _syncLoadMoreBtn();
       return;
     }
@@ -11144,8 +11355,6 @@ async function loadHistory(stationId, family, tilt, opts = {}) {
     if (stationId !== activeStation || family !== activeFamily || tilt !== activeTilt) return;
 
     _setL3HistoryEntries(ck, [latestMeta], latestMeta.key);
-    if (!_isManualHistoryActive(ck)) scheduleProcessedWiseSiblingWarm(stationId, family, tilt);
-
     const history = historyMap.get(ck) || [latestMeta];
     const curKey = history[historyIdx].key;
     if (frameCache.has(curKey) && !sweepActive) showFrame(curKey);
@@ -11183,8 +11392,6 @@ async function pollActiveL3Latest(stationId) {
     // No new frame -> do nothing
     if (prevKey === latestMeta.key) return;
     if (Number.isFinite(prevTs) && Number.isFinite(nextTs) && nextTs < prevTs) return;
-    scheduleProcessedWiseSiblingWarm(stationId, family, tilt);
-
     // If already decoded, show it immediately
     if (frameCache.has(latestMeta.key)) {
       _setL3HistoryEntries(ck, [...(historyMap.get(ck) || []), latestMeta], latestMeta.key);
@@ -11307,11 +11514,17 @@ async function loadRecentWiseFrames(stationId = activeStation, family = activeFa
   const isActiveCombo = activeStation === sid && activeFamily === normalizedFamily && activeTilt === normalizedTilt && activeCacheKey() === ck;
   if (isActiveCombo) _setManualHistoryMode(ck, history);
   const latestIndex = Math.max(0, history.length - 1);
-  _queueManualHistoryBurst(history, latestIndex, {
+  const targetIndex = Math.max(0, Math.min(_targetHistoryIndexForEntries(history), latestIndex));
+  const targetEntry = history[targetIndex];
+  _queueManualHistoryBurst(history, targetIndex, {
     includeBackfill: true,
     burstMs: MANUAL_HISTORY_BURST_MS,
   });
-  const latestEntry = history[history.length - 1];
+  _enqueueHistoryNeighborhood(history, targetIndex, {
+    direction: historyHoldDirection,
+    radius: Math.min(history.length, Math.max(2, PLAYBACK_PREFETCH_WINDOW + 1)),
+    priorityCenter: shouldActivate,
+  });
   emitProgress({
     phase: 'downloading',
     requested: wanted,
@@ -11320,7 +11533,7 @@ async function loadRecentWiseFrames(stationId = activeStation, family = activeFa
     failed: 0,
   });
   try {
-    await ensureFrameDecoded(latestEntry.key, latestEntry, true);
+    await ensureFrameDecoded(targetEntry.key, targetEntry, true);
   } catch (err) {
     emitProgress({
       phase: 'complete-with-errors',
@@ -11332,8 +11545,8 @@ async function loadRecentWiseFrames(stationId = activeStation, family = activeFa
     throw err;
   }
   if (requestSeq !== null && requestSeq !== recentFramesLoadSeq) return entries;
-  if (shouldActivate && activeCacheKey() === ck && !sweepActive && frameCache.has(latestEntry.key)) {
-    showFrame(latestEntry.key, { skipPrefetch: true, immediateUpload: true });
+  if (shouldActivate && activeCacheKey() === ck && !sweepActive && frameCache.has(targetEntry.key)) {
+    showFrame(targetEntry.key, { skipPrefetch: true, immediateUpload: true });
   }
   _syncLoadMoreBtn();
   emitProgress({
@@ -11343,9 +11556,143 @@ async function loadRecentWiseFrames(stationId = activeStation, family = activeFa
     total: history.length,
     failed: 0,
   });
-  if (isActiveCombo) _scheduleTimelineSettle(history.length - 1, history, true);
+  if (isActiveCombo) _scheduleTimelineSettle(targetIndex, history, true);
   if (shouldActivate && updateFrameLabel) setFrameLabel(`Recent frames: ${history.length}`, 'live');
   return entries;
+}
+
+async function loadRecentWiseFramesForVisiblePanes(stationId = activeStation, count = RECENT_WISE_FRAME_COUNT, options = {}) {
+  const sid = canonicalStationId(stationId);
+  const selections = _visibleProcessedWiseSelections(sid);
+  if (!selections.length) {
+    throw new Error('Recent processed frames are unavailable for the visible panes.');
+  }
+
+  const requested = Math.max(2, Math.min(MAX_HISTORY_FRAMES, Math.round(Number(count) || RECENT_WISE_FRAME_COUNT)));
+  const primarySelection = selections.find(selection => selection.isPrimary) || selections[0];
+  const onProgress = typeof options?.onProgress === 'function' ? options.onProgress : null;
+  const updateFrameLabel = options?.updateFrameLabel !== false;
+  const requestSeq = Number.isFinite(Number(options?.requestSeq)) ? Number(options.requestSeq) : null;
+  const progressByCombo = new Map();
+
+  for (const selection of selections) {
+    progressByCombo.set(selection.comboKey, {
+      completed: 0,
+      total: requested,
+      failed: 0,
+      phase: 'resolving',
+    });
+  }
+
+  const emitAggregateProgress = () => {
+    if (typeof onProgress !== 'function') return;
+    let completed = 0;
+    let total = 0;
+    let failed = 0;
+    let hasError = false;
+    let allDone = true;
+
+    for (const state of progressByCombo.values()) {
+      completed += Math.max(0, Number(state?.completed) || 0);
+      total += Math.max(0, Number(state?.total) || 0);
+      failed += Math.max(0, Number(state?.failed) || 0);
+      if (state?.phase !== 'complete' && state?.phase !== 'complete-with-errors' && state?.phase !== 'error') {
+        allDone = false;
+      }
+      if (state?.failed > 0 || state?.phase === 'error' || state?.phase === 'complete-with-errors') {
+        hasError = true;
+      }
+    }
+
+    try {
+      onProgress({
+        phase: allDone ? (hasError ? 'complete-with-errors' : 'complete') : 'downloading',
+        completed,
+        total,
+        failed,
+        panes: selections.length,
+      });
+    } catch (_) {}
+  };
+
+  emitAggregateProgress();
+
+  const results = await Promise.allSettled(selections.map(async selection => {
+    try {
+      const entries = await loadRecentWiseFrames(sid, selection.family, selection.tilt, requested, {
+        activate: selection.comboKey === primarySelection.comboKey,
+        updateFrameLabel: false,
+        requestSeq,
+        onProgress: progress => {
+          progressByCombo.set(selection.comboKey, {
+            completed: Math.max(0, Number(progress?.completed) || 0),
+            total: Math.max(0, Number(progress?.total) || requested),
+            failed: Math.max(0, Number(progress?.failed) || 0),
+            phase: String(progress?.phase || 'downloading'),
+          });
+          emitAggregateProgress();
+        },
+      });
+      progressByCombo.set(selection.comboKey, {
+        completed: entries.length,
+        total: entries.length,
+        failed: 0,
+        phase: 'complete',
+      });
+      emitAggregateProgress();
+      return { selection, entries };
+    } catch (err) {
+      const prev = progressByCombo.get(selection.comboKey) || {};
+      progressByCombo.set(selection.comboKey, {
+        completed: Math.max(0, Number(prev.completed) || 0),
+        total: Math.max(requested, Number(prev.total) || requested),
+        failed: Math.max(requested, Number(prev.failed) || 0),
+        phase: 'error',
+      });
+      emitAggregateProgress();
+      throw err;
+    }
+  }));
+
+  if (requestSeq !== null && requestSeq !== recentFramesLoadSeq) {
+    return { activeEntries: [], selections, results };
+  }
+
+  const primaryResult = results.find(result =>
+    result.status === 'fulfilled' && result.value.selection.comboKey === primarySelection.comboKey
+  );
+  const fallbackResult = results.find(result => result.status === 'fulfilled');
+  const activeEntries = primaryResult?.status === 'fulfilled'
+    ? primaryResult.value.entries
+    : (fallbackResult?.status === 'fulfilled' ? fallbackResult.value.entries : []);
+
+  if (!activeEntries.length) {
+    const firstFailure = results.find(result => result.status === 'rejected');
+    throw firstFailure?.reason || new Error('Recent frames failed.');
+  }
+
+  const primaryHistory = historyMap.get(primarySelection.comboKey) || activeEntries;
+  if (primaryHistory.length >= 2) {
+    _setManualHistoryMode(primarySelection.comboKey, primaryHistory);
+    const targetIndex = (historyIdx >= 0 && historyIdx < primaryHistory.length)
+      ? historyIdx
+      : (primaryHistory.length - 1);
+    historyIdx = targetIndex;
+    if (multiPaneCount > 1) {
+      _queueHistoryRender(targetIndex, primaryHistory, { priority: true });
+    } else if (frameCache.has(primaryHistory[targetIndex]?.key)) {
+      showFrame(primaryHistory[targetIndex].key, { skipPrefetch: true, immediateUpload: true });
+    }
+    _scheduleTimelineSettle(targetIndex, primaryHistory, true);
+  }
+
+  _syncLoadMoreBtn();
+  if (updateFrameLabel) setFrameLabel(`Recent frames: ${activeEntries.length}`, 'live');
+  return {
+    activeEntries,
+    selections,
+    results,
+  };
 }
 
 async function loadRecentWiseFramesForAllProducts(stationId = activeStation, primaryFamily = activeFamily, tilt = activeTilt, count = RECENT_WISE_FRAME_COUNT, options = {}) {
@@ -11878,7 +12225,7 @@ function syncWarningPrefsUi() {
     const showToggle = makeToggle(pref.showOnMap !== false, (next) => {
       warningPrefs[meta.id].showOnMap = next;
       saveSettings();
-      _alertsScheduleSourceUpdate();
+      _alertsRefreshPresentationNow();
     });
     showChip.appendChild(showLabelText);
     showChip.appendChild(showToggle.label);
@@ -11896,12 +12243,12 @@ function syncWarningPrefsUi() {
       const nextColor = _normalizeSpcHex(colorInput.value) || ALERT_FALLBACK_COLOR;
       warningPrefs[meta.id].color = nextColor;
       card.style.setProperty('--warning-card-accent', nextColor);
-      _alertsScheduleSourceUpdate();
+      _alertsRefreshPresentationNow();
     });
     colorInput.addEventListener('change', () => {
       warningPrefs[meta.id].color = _normalizeSpcHex(colorInput.value) || ALERT_FALLBACK_COLOR;
       saveSettings();
-      _alertsScheduleSourceUpdate();
+      _alertsRefreshPresentationNow();
     });
     colorChip.appendChild(colorLabelText);
     colorChip.appendChild(colorInput);
@@ -12558,6 +12905,7 @@ if (toggleAlerts) {
   toggleAlerts.addEventListener('change', () => {
     alertsVisible = Boolean(toggleAlerts.checked);
     _setAlertLayersVisible(alertsVisible);
+    _alertsRefreshPresentationNow();
     saveSettings();
   });
 }
@@ -12801,8 +13149,9 @@ function _clearPlaybackPendingUpload() {
 
 function _primePlaybackWindow(history, startIdx) {
   if (!Array.isArray(history) || history.length < 2) return;
-  _refreshManualHistoryBurst(activeCacheKey(), MANUAL_HISTORY_PLAY_BURST_MS);
-  if (_isManualHistoryActive(activeCacheKey())) {
+  const ck = _timelineComboKey();
+  _refreshManualHistoryBurst(ck, MANUAL_HISTORY_PLAY_BURST_MS);
+  if (_isManualHistoryActive(ck)) {
     _queueManualHistoryBurst(history, startIdx, {
       includeBackfill: false,
       burstMs: MANUAL_HISTORY_PLAY_BURST_MS,
@@ -12822,7 +13171,7 @@ function _primePlaybackWindow(history, startIdx) {
       enqueueDecode(key, meta, step === 1);
     }
   }
-  _pruneQueuedHistoryJobs(activeCacheKey(), keepKeys);
+  _pruneQueuedHistoryJobs(ck, keepKeys);
 }
 
 function _requestPlaybackAdvance(idx, history) {
@@ -12831,7 +13180,7 @@ function _requestPlaybackAdvance(idx, history) {
   const key = String(entry?.key || '');
   if (!key) return false;
   const { key: _ignored, ...meta } = entry;
-  _refreshManualHistoryBurst(activeCacheKey(), MANUAL_HISTORY_PLAY_BURST_MS);
+  _refreshManualHistoryBurst(_timelineComboKey(), MANUAL_HISTORY_PLAY_BURST_MS);
   _primePlaybackWindow(history, idx);
   if (!frameCache.has(key)) {
     _setHistoryFrameLabelForKey(key);
@@ -12862,8 +13211,41 @@ function _requestPlaybackAdvance(idx, history) {
   return false;
 }
 
+function _requestMultiPanePlaybackAdvance(idx, history) {
+  if (!Array.isArray(history) || idx < 0 || idx >= history.length) return false;
+  const entry = history[idx];
+  const key = String(entry?.key || '');
+  if (!key) return false;
+
+  historyIdx = idx;
+  _setHistoryFrameLabelForKey(key);
+  _updateTlPosition();
+  _refreshManualHistoryBurst(_timelineComboKey(), MANUAL_HISTORY_PLAY_BURST_MS);
+  _primePlaybackWindow(history, idx);
+  _prefetchVisiblePaneHistoryNeighborhood(idx, historyHoldDirection);
+
+  if (_tryRenderCachedSyncedMultiPaneHistoryFrame(idx, history, { immediateUpload: true })) {
+    return true;
+  }
+
+  if (_playPendingUpload?.key === key) return false;
+
+  const seq = ++_playPendingUploadSeq;
+  _playPendingUpload = { seq, idx, key };
+  void _renderSyncedMultiPaneHistoryFrame(idx, history, {
+    priority: true,
+    immediateUpload: true,
+  }).catch(() => {
+  }).finally(() => {
+    if (!_playPendingUpload || _playPendingUpload.seq !== seq) return;
+    _playPendingUpload = null;
+    if (isPlaying) _updateTlPosition();
+  });
+  return false;
+}
+
 function playLoop(now = performance.now()) {
-  const ck = activeCacheKey();
+  const ck = _timelineComboKey();
   const history = historyMap.get(ck) || [];
   if (history.length < 2) { stopPlay(); return; }
   if (_playPendingUpload) return;
@@ -12882,9 +13264,7 @@ function playLoop(now = performance.now()) {
   }
   paneInteractionUntilMs = Date.now() + 1200;
   if (multiPaneCount > 1) {
-    historyIdx = nextIdx;
-    _queueHistoryRender(historyIdx, history, { priority: true });
-    _primePlaybackWindow(history, historyIdx);
+    _requestMultiPanePlaybackAdvance(nextIdx, history);
   } else {
     _requestPlaybackAdvance(nextIdx, history);
   }
@@ -12901,7 +13281,7 @@ function _playRafLoop(now) {
 }
 
 function startPlay() {
-  const ck = activeCacheKey();
+  const ck = _timelineComboKey();
   const history = historyMap.get(ck) || [];
   if (history.length < 2) return;
   _clearPlaybackPendingUpload();
@@ -12938,7 +13318,7 @@ function _showHistoryFrameAt(idx, history, opts = {}) {
 
 function stepHistory(direction) {
   if (!activeStation) return;
-  const ck = activeCacheKey();
+  const ck = _timelineComboKey();
   const history = historyMap.get(ck) || [];
   if (history.length < 2) return;
 
@@ -13225,6 +13605,8 @@ function setActiveSelectionUi(family, tilt) {
     tiltSelect.value = normalizeTiltForStationFamily(activeStation, family, tilt);
   }
   syncProductPickerUi(family);
+  _syncIslandDropdown(familyDropdownState);
+  _syncIslandDropdown(tiltDropdownState);
 }
 
 function quickSwitchFamily(preferred) {
@@ -13573,7 +13955,6 @@ async function startRecentFramesDownload(count = recentWiseFrameCount) {
   recentWiseFrameCount = requested;
   _updateRecentFramesMenuSelection();
   closeToolsMenu();
-  const requestedTotal = requested;
   if (!activeStation) {
     setFrameLabel('Select a radar first', 'error');
     _setRecentFramesProgress({
@@ -13595,6 +13976,8 @@ async function startRecentFramesDownload(count = recentWiseFrameCount) {
     return;
   }
   const seq = ++recentFramesLoadSeq;
+  const visibleSelections = _visibleProcessedWiseSelections(activeStation);
+  const requestedTotal = Math.max(requested, requested * Math.max(1, visibleSelections.length));
   let lastProgress = { completed: 0, total: requested, failed: 0 };
   _setRecentFramesProgress({
     state: 'loading',
@@ -13603,7 +13986,7 @@ async function startRecentFramesDownload(count = recentWiseFrameCount) {
   });
   setFrameLabel('Loading recent frames...', 'loading');
   try {
-    const entries = await loadRecentWiseFrames(activeStation, activeFamily, activeTilt, requested, {
+    const result = await loadRecentWiseFramesForVisiblePanes(activeStation, requested, {
       updateFrameLabel: false,
       requestSeq: seq,
       onProgress: progress => {
@@ -13641,6 +14024,7 @@ async function startRecentFramesDownload(count = recentWiseFrameCount) {
       },
     });
     if (seq !== recentFramesLoadSeq) return;
+    const entries = Array.isArray(result?.activeEntries) ? result.activeEntries : [];
     setFrameLabel(`Recent frames: ${entries.length}`, 'live');
     if (lastProgress.failed > 0) {
       _setRecentFramesProgress({
@@ -13688,12 +14072,11 @@ _updateRecentFramesMenuSelection();
 document.getElementById('load-more-frames-btn')?.addEventListener('click', () => {
   if (!activeStation || levelII) return;
   if (!_canUseProcessedWise(activeStation, activeFamily, activeTilt)) return;
-  const ck = activeCacheKey();
-  const history = historyMap.get(ck) || [];
-  if (history.length > 1) return;
-  comboHistoryTargetFrames.set(ck, RECENT_WISE_FRAME_COUNT);
-  _syncLoadMoreBtn();
-  void _backfillHistory(activeStation, activeFamily, activeTilt, _l3LoadSeq);
+  const selections = _visibleProcessedWiseSelections(activeStation);
+  if (selections.length && selections.every(selection => (historyMap.get(selection.comboKey) || []).length > 1)) {
+    return;
+  }
+  void startRecentFramesDownload(RECENT_WISE_FRAME_COUNT);
 });
 
 multiPaneBtnEl?.addEventListener('click', e => {
@@ -13861,9 +14244,6 @@ function selectStation(id, opts = {}) {
     loadAll(stationId, true);
     pollTimer = setInterval(() => loadAll(stationId, false), activeRadarPollMs());
   });
-  if (multiPaneCount > 1 && !levelII) {
-    void _loadVisibleSecondaryPanes({ force: true });
-  }
   _scheduleCurrentStationResidencyTrim();
   _restartPanePolling();
 }
@@ -14076,6 +14456,15 @@ var trafficLoadPromise = null;
 var weatherLoadPromise = null;
 var wxwiseLoadPromise = null;
 var roLoadPromise = null;
+let _trafficCameraWorker = null;
+const _trafficCameraWorkerPending = new Map();
+let _trafficCameraWorkerSeq = 0;
+let _cameraApplyQueued = false;
+const _cameraApplyPendingKinds = {
+  traffic: false,
+  weather: false,
+  chasers: false,
+};
 const WXWISE_CHASER_POLL_MS = 1000;
 const RO_CHASER_POLL_MS = 3000;
 const CAMERA_STARTUP_RETRY_MS = 1500;
@@ -14214,6 +14603,36 @@ function _cameraFeatureHasVideo(props = {}) {
   if (/fl511\.com\/map\/Cctv\/\d+/i.test(imageUrl)) return true;
 
   return false;
+}
+
+function _ensureTrafficCameraWorker() {
+  if (_trafficCameraWorker) return _trafficCameraWorker;
+  _trafficCameraWorker = new Worker('./camera-worker.js');
+  _trafficCameraWorker.onmessage = ev => {
+    const { id, features, error } = ev?.data || {};
+    const pending = _trafficCameraWorkerPending.get(id);
+    if (!pending) return;
+    _trafficCameraWorkerPending.delete(id);
+    if (error) pending.reject(new Error(error));
+    else pending.resolve(Array.isArray(features) ? features : []);
+  };
+  _trafficCameraWorker.onerror = ev => {
+    const msg = ev?.message || 'camera worker error';
+    for (const pending of _trafficCameraWorkerPending.values()) {
+      pending.reject(new Error(msg));
+    }
+    _trafficCameraWorkerPending.clear();
+    _trafficCameraWorker = null;
+  };
+  return _trafficCameraWorker;
+}
+
+function _composeTrafficCameraFeaturesOffMain(datasets = {}) {
+  const id = ++_trafficCameraWorkerSeq;
+  return new Promise((resolve, reject) => {
+    _trafficCameraWorkerPending.set(id, { resolve, reject });
+    _ensureTrafficCameraWorker().postMessage({ id, datasets });
+  });
 }
 
 function _rebuildKnownCameraStates() {
@@ -14361,10 +14780,13 @@ function _replaceCameraPointLayer(sourceId, layerId, data, color) {
   _bindCameraLayerEvents(layerId);
 }
 
-function _applyCameraSourcesBatch() {
+function _applyCameraSourcesBatch(kinds = null) {
   if (!_isMapReadyForCameraLayers()) return;
+  const applyTraffic = !kinds || kinds.traffic;
+  const applyWeather = !kinds || kinds.weather;
+  const applyChasers = !kinds || kinds.chasers;
 
-  if (trafficCameraFeatures.length) {
+  if (applyTraffic && trafficCameraFeatures.length) {
     _addCameraPointLayer(
       TRAFFIC_CAMERA_SOURCE_ID,
       TRAFFIC_CAMERA_LAYER_ID,
@@ -14372,7 +14794,7 @@ function _applyCameraSourcesBatch() {
       '#3b82f6',
     );
   }
-  if (weatherCameraFeatures.length) {
+  if (applyWeather && weatherCameraFeatures.length) {
     _addCameraPointLayer(
       WEATHER_CAMERA_SOURCE_ID,
       WEATHER_CAMERA_LAYER_ID,
@@ -14380,7 +14802,7 @@ function _applyCameraSourcesBatch() {
       '#22c55e',
     );
   }
-  if (wxwiseChasersLoaded) {
+  if (applyChasers && wxwiseChasersLoaded) {
     _addCameraPointLayer(
       WXWISE_CHASER_SOURCE_ID,
       WXWISE_CHASER_LAYER_ID,
@@ -14388,7 +14810,7 @@ function _applyCameraSourcesBatch() {
       '#ef4444',
     );
   }
-  if (roChasersLoaded) {
+  if (applyChasers && roChasersLoaded) {
     _addCameraPointLayer(
       RO_CHASER_SOURCE_ID,
       RO_CHASER_LAYER_ID,
@@ -14402,6 +14824,26 @@ function _applyCameraSourcesBatch() {
   setCamerasVisible(camerasOverlayVisible && _cameraFilterEnabled('traffic'));
   setWeatherCamerasVisible(camerasOverlayVisible && _cameraFilterEnabled('weather'));
   syncCameraFilterUi();
+}
+
+function _scheduleCameraSourceApply(kinds = { traffic: true, weather: true, chasers: true }) {
+  _cameraApplyPendingKinds.traffic ||= kinds.traffic === true;
+  _cameraApplyPendingKinds.weather ||= kinds.weather === true;
+  _cameraApplyPendingKinds.chasers ||= kinds.chasers === true;
+  if (_cameraApplyQueued) return;
+  _cameraApplyQueued = true;
+  requestAnimationFrame(() => {
+    _cameraApplyQueued = false;
+    const nextKinds = {
+      traffic: _cameraApplyPendingKinds.traffic,
+      weather: _cameraApplyPendingKinds.weather,
+      chasers: _cameraApplyPendingKinds.chasers,
+    };
+    _cameraApplyPendingKinds.traffic = false;
+    _cameraApplyPendingKinds.weather = false;
+    _cameraApplyPendingKinds.chasers = false;
+    _applyCameraSourcesBatch(nextKinds);
+  });
 }
 
 function _applyChaserSources(reason = 'poll') {
@@ -15118,7 +15560,13 @@ async function loadCameras(opts = {}) {
         console.warn('Colorado COtrip cameras failed to load:', coloradoResult.reason);
       }
 
-      const finalFeatures = _composeTrafficCameraFeatures(datasets);
+      let finalFeatures = [];
+      try {
+        finalFeatures = await _composeTrafficCameraFeaturesOffMain(datasets);
+      } catch (workerErr) {
+        console.warn('Traffic camera worker failed, falling back to main thread:', workerErr);
+        finalFeatures = _composeTrafficCameraFeatures(datasets);
+      }
       if (!finalFeatures.length) throw new Error('No camera features');
       trafficCameraFeatures = finalFeatures;
       console.info('[Camera][Traffic] load complete', {
@@ -15127,7 +15575,7 @@ async function loadCameras(opts = {}) {
         combinedLoaded: existingResult.status === 'fulfilled',
       });
       trafficCamerasLoaded = true;
-      if (!deferApply) _applyCameraSourcesBatch();
+      if (!deferApply) _scheduleCameraSourceApply({ traffic: true });
     } catch (err) {
       console.error('Traffic cameras failed to load:', err);
     }
@@ -15189,7 +15637,7 @@ async function loadWeatherCameras(opts = {}) {
       if (!features.length) throw new Error('No weather camera features');
       weatherCameraFeatures = features;
       weatherCamerasLoaded = true;
-      if (!deferApply) _applyCameraSourcesBatch();
+      if (!deferApply) _scheduleCameraSourceApply({ weather: true });
     } catch (err) {
       console.error('Weather cameras failed to load:', err);
     }
@@ -15448,7 +15896,7 @@ async function syncCameraLayersFromState() {
   if (showTraffic && !trafficCamerasLoaded) {
     await loadCameras({ deferApply: false });
     if (!syncStillCurrent()) return;
-    _applyCameraSourcesBatch();
+    _scheduleCameraSourceApply({ traffic: true });
     _applyCameraSyncVisibility(
       camerasOverlayVisible && _cameraFilterEnabled('traffic'),
       camerasOverlayVisible && _cameraFilterEnabled('weather'),
@@ -15461,7 +15909,7 @@ async function syncCameraLayersFromState() {
   if (showWeather && !weatherCamerasLoaded) {
     await loadWeatherCameras({ deferApply: true });
     if (!syncStillCurrent()) return;
-    _applyCameraSourcesBatch();
+    _scheduleCameraSourceApply({ weather: true });
     _applyCameraSyncVisibility(
       camerasOverlayVisible && _cameraFilterEnabled('traffic'),
       camerasOverlayVisible && _cameraFilterEnabled('weather'),
@@ -15489,7 +15937,7 @@ async function syncCameraLayersFromState() {
     }
   }
   if (showTraffic || showWeather) {
-    _applyCameraSourcesBatch();
+    _scheduleCameraSourceApply({ traffic: showTraffic, weather: showWeather });
   }
 
   const finalShowTraffic = camerasOverlayVisible && _cameraFilterEnabled('traffic');

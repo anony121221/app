@@ -4889,30 +4889,17 @@
 
   <script>
     (function () {
-      const dashboardMode = !!window.__RADAR_DASHBOARD_MODE__;
-      const scriptQueue = dashboardMode
-        ? ['dashboard-app.js']
-        : [
-            'hls.min.js',
-            'https://ajax.googleapis.com/ajax/libs/shaka-player/4.15.14/shaka-player.compiled.js',
-            'radar.js',
-          ];
-
-      if (dashboardMode) {
-        document.title = 'Warning Dashboard';
-        document.body.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;min-height:100vh;background:#000000;color:#eef3ff;font:600 14px Segoe UI,sans-serif;letter-spacing:.04em;">Launching Warning Dashboard...</div>';
-      }
+      const scriptQueue = [
+        'hls.min.js',
+        'https://ajax.googleapis.com/ajax/libs/shaka-player/4.15.14/shaka-player.compiled.js',
+        'radar.js',
+      ];
 
       function loadNext(index) {
         if (index >= scriptQueue.length) return;
         const script = document.createElement('script');
         script.src = scriptQueue[index];
         script.onload = function () { loadNext(index + 1); };
-        script.onerror = function () {
-          if (dashboardMode) {
-            document.body.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;min-height:100vh;background:#000000;color:#ff7b7b;font:600 14px Segoe UI,sans-serif;letter-spacing:.04em;">Warning Dashboard failed to load script: ' + String(scriptQueue[index]) + '</div>';
-          }
-        };
         document.body.appendChild(script);
       }
 
