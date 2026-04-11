@@ -10,8 +10,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
 use reqwest::header::{ACCEPT, AUTHORIZATION, USER_AGENT};
 use tauri::path::BaseDirectory;
-use tauri::webview::PageLoadEvent;
-use tauri::{AppHandle, Emitter, Manager, State, WebviewUrl, WebviewWindowBuilder};
+use tauri::{AppHandle, Emitter, Manager, State};
 
 #[cfg(target_os = "windows")]
 use std::os::windows::process::CommandExt;
@@ -2003,142 +2002,6 @@ fn stop_nwws_bridge(state: State<'_, NwwsBridgeState>) -> Result<(), String> {
 }
 
 #[tauri::command]
-fn open_warning_dashboard(app: AppHandle) -> Result<(), String> {
-    const LABEL: &str = "warning-dashboard";
-    const LOG_EVENT: &str = "dashboard-window-log";
-
-    let _ = app.emit(
-        LOG_EVENT,
-        serde_json::json!({
-            "phase": "command",
-            "detail": "open requested",
-            "label": LABEL
-        }),
-    );
-
-    if let Some(window) = app.get_webview_window(LABEL) {
-        let _ = window.unminimize();
-        let _ = window.show();
-        let _ = window.set_focus();
-        let _ = app.emit(
-            LOG_EVENT,
-            serde_json::json!({
-                "phase": "command",
-                "detail": "reused existing window",
-                "label": LABEL
-            }),
-        );
-        return Ok(());
-    }
-
-    let build_app = app.clone();
-    std::thread::Builder::new()
-        .name(String::from("warning-dashboard-builder"))
-        .spawn(move || {
-            let emit_log = |phase: &str, detail: &str, url: Option<String>, status: Option<u16>| {
-                let _ = build_app.emit(
-                    LOG_EVENT,
-                    serde_json::json!({
-                        "phase": phase,
-                        "detail": detail,
-                        "label": LABEL,
-                        "url": url,
-                        "status": status
-                    }),
-                );
-            };
-
-            emit_log("thread", "dashboard builder thread started", None, None);
-            emit_log("build", "creating warning dashboard window", Some(String::from("index.html")), None);
-
-            let nav_app = build_app.clone();
-            let req_app = build_app.clone();
-            let load_app = build_app.clone();
-
-            match WebviewWindowBuilder::new(&build_app, LABEL, WebviewUrl::App("index.html".into()))
-                .title("Warning Dashboard")
-                .inner_size(980.0, 760.0)
-                .min_inner_size(760.0, 520.0)
-                .resizable(true)
-                .center()
-                .initialization_script(
-                    r#"
-                    window.__RADAR_DASHBOARD_MODE__ = true;
-                    document.documentElement.setAttribute('data-dashboard-mode', '1');
-                    "#,
-                )
-                .on_navigation(move |url| {
-                    let _ = nav_app.emit(
-                        LOG_EVENT,
-                        serde_json::json!({
-                            "phase": "navigate",
-                            "detail": "navigation requested",
-                            "label": LABEL,
-                            "url": url.to_string()
-                        }),
-                    );
-                    true
-                })
-                .on_web_resource_request(move |request, response| {
-                    let uri = request.uri().to_string();
-                    let path = request.uri().path().to_string();
-                    if path == "/" || path.ends_with("index.html") || path.ends_with("dashboard-app.js") || path.ends_with("radar.js") {
-                        let _ = req_app.emit(
-                            LOG_EVENT,
-                            serde_json::json!({
-                                "phase": "resource",
-                                "detail": "resource requested",
-                                "label": LABEL,
-                                "url": uri,
-                                "status": response.status().as_u16()
-                            }),
-                        );
-                    }
-                })
-                .on_page_load(move |_window, payload| {
-                    let phase = match payload.event() {
-                        PageLoadEvent::Started => "started",
-                        PageLoadEvent::Finished => "finished",
-                    };
-                    let _ = load_app.emit(
-                        LOG_EVENT,
-                        serde_json::json!({
-                            "phase": phase,
-                            "url": payload.url(),
-                            "label": LABEL
-                        }),
-                    );
-                })
-                .build()
-            {
-                Ok(window) => {
-                    emit_log("build", "warning dashboard window created", Some(String::from("index.html")), None);
-                    if let Ok(url) = window.url() {
-                        emit_log("build", "window current url", Some(url.to_string()), None);
-                    }
-                    let _ = window.set_focus();
-                }
-                Err(e) => {
-                    emit_log("error", &format!("dashboard window create failed: {e}"), None, None);
-                }
-            }
-        })
-        .map_err(|e| format!("dashboard builder thread spawn failed: {e}"))?;
-
-    let _ = app.emit(
-        LOG_EVENT,
-        serde_json::json!({
-            "phase": "command",
-            "detail": "window build scheduled on worker thread",
-            "label": LABEL,
-            "url": "index.html"
-        }),
-    );
-
-    Ok(())
-}
-
-#[tauri::command]
 async fn decode_key(
     app: AppHandle,
     state: tauri::State<'_, Backend>,
@@ -3666,7 +3529,6 @@ pub fn run() {
             fetch_pendot_stream,
             start_nwws_bridge,
             stop_nwws_bridge,
-            open_warning_dashboard,
             decode_wise_key,
             list_wise_frames
         ])

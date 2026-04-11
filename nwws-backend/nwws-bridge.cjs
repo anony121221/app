@@ -118,13 +118,15 @@ function classifyEvent(eventName) {
   if (text.includes('tornado')) return 'tornado';
   if (text.includes('severe thunderstorm')) return 'severe-thunderstorm';
   if (text.includes('flash flood')) return 'flash-flood';
+  if (text.includes('special weather statement')) return 'special-weather';
   if (text.includes('special marine')) return 'special-marine';
   if (text.includes('snow squall')) return 'snow-squall';
   return 'warning';
 }
 
 function isWarningAlert(alert) {
-  return /warning/i.test(String(alert?.properties?.event || ''));
+  const eventText = String(alert?.properties?.event || '').toLowerCase();
+  return /warning/i.test(eventText) || eventText.includes('special weather statement');
 }
 
 function isSuppressedFloodWarning(alert) {
