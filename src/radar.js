@@ -5,12 +5,12 @@ const S3           = 'https://unidata-nexrad-level3.s3.amazonaws.com';
 const POLL_MS      = 5000;
 const L2_POLL_MS   = 10000;
 const PROCESSED_WISE_POLL_MS = 2000;
-const L3_FAMILIES  = ['REF', 'VEL', 'SRV', 'CC', 'ZDR', 'SW', 'PRT', 'DTA'];
+const L3_FAMILIES  = ['REF', 'VEL', 'SRV', 'CC', 'ZDR', 'SW', 'EET', 'PRT', 'DTA'];
 const L3_TILTS     = ['0.5', '1.5', '2.4', '3.1'];
 const REMOTE_HYBRID_L2_PRODUCTS = ['CC', 'ZDR'];
 const HYBRID_L2_FAMILIES = new Set(REMOTE_HYBRID_L2_PRODUCTS);
 const PROCESSED_WISE_BASE_URL = 'https://data2.weatherwise.app/radar/processed';
-const PROCESSED_WISE_FAMILIES = Object.freeze(['REF', 'VEL', 'SRV', 'CC', 'ZDR', 'SW', 'PRT', 'DTA']);
+const PROCESSED_WISE_FAMILIES = Object.freeze(['REF', 'VEL', 'SRV', 'CC', 'ZDR', 'SW', 'EET', 'PRT', 'DTA']);
 const PROCESSED_WISE_FAMILY_SET = new Set(PROCESSED_WISE_FAMILIES);
 const PROCESSED_WISE_TILTS = Object.freeze(['0.5', '0.9', '1.3', '1.8', '2.5', '3.1']);
 const PROCESSED_WISE_TILT_TO_INDEX = Object.freeze({
@@ -29,6 +29,7 @@ const PROCESSED_WISE_FAMILY_TILTS = Object.freeze({
   CC: PROCESSED_WISE_TILTS,
   ZDR: PROCESSED_WISE_TILTS,
   SW: PROCESSED_WISE_TILTS,
+  EET: PROCESSED_WISE_SINGLE_TILT,
   PRT: PROCESSED_WISE_SINGLE_TILT,
   DTA: PROCESSED_WISE_SINGLE_TILT,
 });
@@ -201,7 +202,52 @@ document.addEventListener('keydown', e => {
   }
 });
 
+function _shutdownFrontendResources() {
+  stopNwsApiPolling();
+
+  if (pollTimer !== null) {
+    clearInterval(pollTimer);
+    pollTimer = null;
+  }
+  if (panePollTimer != null) {
+    clearInterval(panePollTimer);
+    panePollTimer = null;
+  }
+  if (wxwiseChaserPollTimer != null) {
+    clearInterval(wxwiseChaserPollTimer);
+    wxwiseChaserPollTimer = null;
+  }
+  if (roChaserPollTimer != null) {
+    clearInterval(roChaserPollTimer);
+    roChaserPollTimer = null;
+  }
+  if (mpingPollTimer != null) {
+    clearInterval(mpingPollTimer);
+    mpingPollTimer = null;
+  }
+  if (spotterLocationsPollTimer != null) {
+    clearInterval(spotterLocationsPollTimer);
+    spotterLocationsPollTimer = null;
+  }
+
+  _clearCameraStartupRetry();
+  closeCamera();
+
+  if (_wiseWorker) {
+    _wiseWorker.terminate();
+    _wiseWorker = null;
+  }
+  _wiseWorkerPending.clear();
+
+  if (_trafficCameraWorker) {
+    _trafficCameraWorker.terminate();
+    _trafficCameraWorker = null;
+  }
+  _trafficCameraWorkerPending.clear();
+}
+
 window.addEventListener('beforeunload', () => {
+  _shutdownFrontendResources();
   try {
     invoke('stop_nwws_bridge').catch(() => {});
   } catch (_) {}
@@ -618,6 +664,7 @@ const FAMILY_PRODUCTS = {
   },
   ZDR: { '0.5': ['NAX', 'N0X'], '1.5': ['N1X'], '2.4': ['N2X'], '3.1': ['N3X'] },
   ET: { '0.5': ['EET'] },
+  EET: { '0.5': ['EET'] },
 };
 
 const STATION_LAYER_IDS = ['stations-dot', 'stations-hover', 'stations-active', 'stations-label'];
@@ -725,10 +772,11 @@ const SPC_EMPTY_GEOJSON = { type: 'FeatureCollection', features: [] };
 const SPC_LAYER_IDS = ['spc-base-fill', 'spc-base-line', 'spc-cig-fill', 'spc-cig-line'];
 const SPC_GEOJSON_CACHE = new Map();
 
-const MESO_DISCUSSION_URL = 'https://mapservices.weather.noaa.gov/vector/rest/services/outlooks/spc_mesoscale_discussion/MapServer/0/query?where=1%3D1&outFields=*&returnGeometry=true&f=geojson';
+const MESO_DISCUSSION_URL = 'https://mesoscalediscussionserver.colewx.workers.dev/';
 const SPC_MESO_INDEX_URL = 'https://www.spc.noaa.gov/products/md/';
 const MESO_EMPTY_GEOJSON = { type: 'FeatureCollection', features: [] };
-const MESO_LAYER_IDS = ['meso-discussions-line'];
+const MESO_LAYER_IDS = ['meso-discussions-line-under', 'meso-discussions-line'];
+const MESO_KIND_IDS = ['precip', 'convective', 'winter'];
 const SPC_WATCHES_URL = 'https://mesonet.agron.iastate.edu/json/spcwatch.py';
 const WATCHES_EMPTY_GEOJSON = { type: 'FeatureCollection', features: [] };
 const WATCH_LAYER_IDS = ['spc-watch-line-under', 'spc-watch-line'];
@@ -811,6 +859,20 @@ const STORM_REPORT_CATEGORY_ID_SET = new Set(STORM_REPORT_CATEGORY_IDS);
 const STORM_REPORT_LAYER_IDS = ['storm-reports-dot'];
 const STORM_EMPTY_GEOJSON = { type: 'FeatureCollection', features: [] };
 const STORM_REPORT_CACHE_MS = 90_000;
+
+const MPING_URL = 'https://mping.ou.edu/mping/api/v2/reports.geojson';
+const MPING_SOURCE_ID = 'mping-reports-src';
+const MPING_LAYER_ID = 'mping-reports-dot';
+const MPING_EMPTY_GEOJSON = { type: 'FeatureCollection', features: [] };
+const MPING_POLL_MS = 300_000;
+const MPING_CACHE_MS = 270_000;
+
+const SPOTTER_LOCATIONS_URL = 'https://spotternetworkpositions.cole173616.workers.dev/';
+const SPOTTER_LOCATIONS_SOURCE_ID = 'spotter-locations-src';
+const SPOTTER_LOCATIONS_LAYER_ID = 'spotter-locations-dot';
+const SPOTTER_LOCATIONS_EMPTY_GEOJSON = { type: 'FeatureCollection', features: [] };
+const SPOTTER_LOCATIONS_POLL_MS = 120_000;
+const SPOTTER_LOCATIONS_CACHE_MS = 90_000;
 
 const ALERT_LAYER_IDS = ['alerts-line-under', 'alerts-line', 'alerts-point'];
 const ALERTS_EMPTY_GEOJSON = { type: 'FeatureCollection', features: [] };
@@ -933,13 +995,24 @@ const NWS_API_ALERTS_URL = 'https://api.weather.gov/alerts/active';
 const NWS_API_POLL_MS = 60_000;
 const ALERT_BOOTSTRAP_GRACE_MS = 30_000;
 function _defaultWarningPrefs() {
+  const defaultSounds = {
+    TORE: 'confirmed-tornado-issued',
+    TORP: 'pds-tornado-issued',
+    TORR: 'confirmed-tornado-issued',
+    TOR:  'radar-tornado-issued',
+    SVRD: 'severe-destructive-issued',
+    SVRC: 'severe-considerable-issued',
+    SVR:  'severe-issued',
+    FFW:  'flash-flood-issued',
+  };
   const prefs = {};
   WARNING_PREF_CONFIG.forEach(item => {
+    const sound = defaultSounds[item.id] || 'silent';
     prefs[item.id] = {
       showOnMap: true,
       color: ALERT_EVENT_COLOR_MAP[item.id] || ALERT_FALLBACK_COLOR,
-      notifications: false,
-      sound: 'silent',
+      notifications: sound !== 'silent',
+      sound,
     };
   });
   return prefs;
@@ -1159,6 +1232,95 @@ function _warningShowOnMap(props = {}) {
 
 function _warningEnabledForUi(props = {}) {
   return alertsVisible && _warningShowOnMap(props);
+}
+
+function _alertsHasMeaningfulSpsValue(value) {
+  if (Array.isArray(value)) return value.some(_alertsHasMeaningfulSpsValue);
+  const text = String(value || '').trim().toLowerCase();
+  return !!text && text !== 'n/a' && text !== 'na' && text !== 'none' && text !== 'no';
+}
+
+function _alertsParseSpsNumericMax(value) {
+  const text = Array.isArray(value) ? value.join(' ') : String(value || '');
+  const matches = text.match(/-?\d+(?:\.\d+)?/g);
+  if (!matches || !matches.length) return NaN;
+  const nums = matches.map(v => Number.parseFloat(v)).filter(Number.isFinite);
+  if (!nums.length) return NaN;
+  return Math.max(...nums);
+}
+
+function _alertsIsStormBasedSpecialWeatherStatement(props = {}) {
+  const eventText = String(props?.event || props?.eventRaw || '').trim().toLowerCase();
+  if (!eventText.includes('special weather statement')) return false;
+  const params = props?.parameters && typeof props.parameters === 'object'
+    ? props.parameters
+    : {};
+  const combinedText = [
+    props?.headline,
+    props?.description,
+    props?.instruction,
+    params?.NWSheadline,
+  ].filter(Boolean).join(' ').toLowerCase();
+  if ([
+    'fire danger',
+    'wildfire',
+    'burn ban',
+    'relative humidity',
+    'snow accumulation',
+    'rain and snow',
+    'freezing',
+    'fog',
+    'smoke',
+    'wind chill',
+  ].some(term => combinedText.includes(term))) {
+    return false;
+  }
+  const hailSize = _alertsParseSpsNumericMax(
+    params.maxHailSize
+    ?? params.maxHail
+    ?? params.hail
+    ?? params.hailSize
+  );
+  const windGust = _alertsParseSpsNumericMax(
+    params.maxWindGust
+    ?? params.windThreat
+    ?? params.windGust
+    ?? params.wind
+  );
+  const hasConvectiveText = [
+    'strong thunderstorm',
+    'severe thunderstorm',
+    'radar was tracking',
+    'thunderstorm',
+    'hail',
+    'funnel cloud',
+    'landspout',
+    'waterspout',
+    'rotation',
+    'storm moving',
+  ].some(term => combinedText.includes(term));
+  if (
+    _alertsHasMeaningfulSpsValue(
+      params.tornadoDetection
+      ?? params.tornadoThreat
+      ?? params.tornadoTag
+      ?? params.tornado
+    )
+    || _alertsHasMeaningfulSpsValue(
+      params.thunderstormDamageThreat
+      ?? params.damageThreat
+      ?? params.thunderstormWindThreat
+    )
+    || _alertsHasMeaningfulSpsValue(params.eventMotionDescription)
+  ) {
+    return true;
+  }
+  if (Number.isFinite(hailSize) && hailSize >= 0.5) return true;
+  if (Number.isFinite(windGust) && windGust >= 40 && hasConvectiveText) return true;
+  if (hasConvectiveText && (combinedText.includes('wind gust') || combinedText.includes('half inch hail') || combinedText.includes('quarter size hail'))) {
+    return true;
+  }
+  return false;
 }
 
 function _extractSpcPolygons(geometry, out) {
@@ -1739,6 +1901,142 @@ function _spcMesoImageUrl(number) {
   return `https://www.spc.noaa.gov/products/md/mcd${String(num).padStart(4, '0')}.png`;
 }
 
+function _wpcMpdImageUrl(number) {
+  const num = Number.parseInt(String(number || '').trim(), 10);
+  if (!Number.isFinite(num) || num <= 0) return '';
+  return `https://www.wpc.ncep.noaa.gov/metwatch/images/mcd${String(num).padStart(4, '0')}.gif`;
+}
+
+function _normalizeWrappedParagraphs(text) {
+  return String(text || '')
+    .replace(/\r/g, '')
+    .split(/\n\s*\n+/)
+    .map(part => part.split('\n').map(line => line.trim()).filter(Boolean).join(' ').trim())
+    .filter(Boolean)
+    .join('\n\n')
+    .trim();
+}
+
+function _normalizeWrappedInline(text) {
+  return _normalizeWrappedParagraphs(text).replace(/\s*\n\s*/g, ' ').trim();
+}
+
+function _extractWpcTextBlock(rawText, label, nextLabels = []) {
+  const source = String(rawText || '').replace(/\r/g, '');
+  if (!source) return '';
+  const esc = s => String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const next = Array.isArray(nextLabels) && nextLabels.length
+    ? `(?=\\n\\n(?:${nextLabels.map(esc).join('|')})|$)`
+    : '$';
+  const re = new RegExp(`${esc(label)}\\s*([\\s\\S]*?)${next}`, 'i');
+  const m = source.match(re);
+  return m ? String(m[1] || '').trim() : '';
+}
+
+function _extractWpcMpdNumber(...values) {
+  for (const value of values) {
+    const text = String(value || '').trim();
+    if (!text) continue;
+    const match = text.match(/(\d{1,4})/);
+    if (match) {
+      const num = Number.parseInt(match[1], 10);
+      if (Number.isFinite(num) && num > 0) return num;
+    }
+  }
+  return null;
+}
+
+function _resolveWpcMpdDetailUrl(props = {}) {
+  const direct = String(props?.detail_url || props?._url || '').trim();
+  if (direct) {
+    if (/^https?:\/\//i.test(direct)) return direct;
+    if (direct.startsWith('/')) return `https://www.wpc.ncep.noaa.gov${direct}`;
+  }
+  const num = _extractWpcMpdNumber(props?._number, props?.number, props?.id, props?._name, props?.title);
+  if (!Number.isFinite(num) || num <= 0) return '';
+  const issuedText = String(props?.issued || props?._issued || '').trim();
+  const issuedYear = (issuedText.match(/\b(20\d{2})\b/) || [])[1];
+  const year = Number.parseInt(String(props?.year || props?._year || issuedYear || new Date().getFullYear()), 10);
+  if (!Number.isFinite(year) || year <= 0) return '';
+  return `https://www.wpc.ncep.noaa.gov/metwatch/metwatch_mpd_multi.php?md=${num}&yr=${year}`;
+}
+
+function _isWpcMpdProps(props = {}) {
+  const source = String(props?.source || props?._source || '').trim().toLowerCase();
+  if (source === 'wpc') return true;
+  const url = _resolveWpcMpdDetailUrl(props).toLowerCase();
+  return url.includes('wpc.ncep.noaa.gov/metwatch/metwatch_mpd');
+}
+
+const _wpcMpdDetailCache = new Map();
+
+async function _fetchWpcMpdDetail(detailUrl) {
+  const key = String(detailUrl || '').trim();
+  if (!key) throw new Error('Missing WPC MPD URL');
+  if (_wpcMpdDetailCache.has(key)) return _wpcMpdDetailCache.get(key);
+  const promise = (async () => {
+    const res = await invoke('fetch_url_base64', { url: key });
+    if (!res || res.status < 200 || res.status >= 400 || !res.body_base64) {
+      throw new Error(`HTTP ${res?.status || 0}`);
+    }
+    const html = _decodeBase64Utf8(res.body_base64);
+    const doc = new DOMParser().parseFromString(html, 'text/html');
+    const subtitle = _normalizeWrappedInline(doc.querySelector('.mwsubtitle')?.textContent || '');
+    const issuedHtml = _normalizeWrappedInline(String(doc.querySelector('.mwissuet')?.textContent || '').replace(/[()]/g, ''));
+    const rawPre = String(doc.querySelector('pre')?.textContent || '').replace(/\r/g, '').trim();
+    const rawLines = rawPre.split('\n').map(line => line.trim()).filter(Boolean);
+    const preTitle = rawLines[0] || '';
+    const preIssued = rawLines[2] || '';
+    const title = subtitle || preTitle || 'Mesoscale Precipitation Discussion';
+    const number = _extractWpcMpdNumber(title, preTitle, detailUrl);
+    const areasAffected = _normalizeWrappedInline(_extractWpcTextBlock(rawPre, 'Areas affected...', ['Concerning...', 'Valid', 'SUMMARY...', 'DISCUSSION...']));
+    const concerning = _normalizeWrappedInline(_extractWpcTextBlock(rawPre, 'Concerning...', ['Valid', 'SUMMARY...', 'DISCUSSION...']));
+    const valid = _normalizeWrappedInline(_extractWpcTextBlock(rawPre, 'Valid', ['SUMMARY...', 'DISCUSSION...']));
+    const summary = _normalizeWrappedParagraphs(_extractWpcTextBlock(rawPre, 'SUMMARY...', ['DISCUSSION...']));
+    let discussion = _extractWpcTextBlock(rawPre, 'DISCUSSION...');
+    discussion = discussion.replace(/\n\s*\n[A-Za-z][A-Za-z .'-]{1,40}\s*\n\s*ATTN\.\.\.[\s\S]*$/i, '');
+    discussion = discussion.replace(/\n\s*ATTN\.\.\.[\s\S]*$/i, '');
+    discussion = discussion.replace(/\n\s*LAT\.\.\.LON[\s\S]*$/i, '');
+    discussion = _normalizeWrappedParagraphs(discussion);
+    return {
+      title: title || 'Mesoscale Precipitation Discussion',
+      number: Number.isFinite(number) && number > 0 ? String(number).padStart(4, '0') : '',
+      issued: issuedHtml || preIssued || '',
+      areasAffected,
+      concerning,
+      valid,
+      summary,
+      discussion: discussion || '(No discussion text found on this page.)',
+      url: key,
+      imageUrl: _wpcMpdImageUrl(number),
+    };
+  })();
+  _wpcMpdDetailCache.set(key, promise);
+  try {
+    return await promise;
+  } catch (err) {
+    _wpcMpdDetailCache.delete(key);
+    throw err;
+  }
+}
+
+function _buildWpcMpdDiscussionText(detail = {}) {
+  const sections = [];
+  const pushField = (label, value) => {
+    const text = String(value || '').trim();
+    if (!text) return;
+    sections.push(`${label}\n${text}`);
+  };
+  pushField('ISSUED...', detail.issued);
+  pushField('MPD NUMBER...', detail.number);
+  pushField('AREAS AFFECTED...', detail.areasAffected);
+  pushField('CONCERNING...', detail.concerning);
+  pushField('VALID...', detail.valid);
+  pushField('SUMMARY...', detail.summary);
+  pushField('DISCUSSION...', detail.discussion);
+  return sections.join('\n\n').trim() || '(No discussion text found on this page.)';
+}
+
 function _spcViewerUpdateImage() {
   const overlay = document.getElementById('spc-viewer-overlay');
   if (!overlay?.classList.contains('open')) return;
@@ -1748,12 +2046,31 @@ function _spcViewerUpdateImage() {
   const imgStatus = document.getElementById('spc-viewer-img-status');
   if (img) {
     const imageUrl = type.imageUrl || _spcImageUrl(_spcViewerDay, type.id);
+    const directUrl = !!type.directUrl;
     const capturedKey = `${_spcViewerMode}|${_spcViewerDocKey}|${_spcViewerIdx}`;
     if (!imageUrl) {
       img.src = '';
       img.style.display = 'none';
       if (imgStatus) {
         imgStatus.textContent = 'No image available.';
+        imgStatus.style.display = 'block';
+      }
+      _updateSpcViewerNavButtons();
+      return;
+    }
+    if (directUrl) {
+      img.onload = () => { img.style.display = 'block'; if (imgStatus) imgStatus.style.display = 'none'; };
+      img.onerror = () => {
+        img.style.display = 'none';
+        if (imgStatus) {
+          imgStatus.textContent = 'Image unavailable.';
+          imgStatus.style.display = 'block';
+        }
+      };
+      img.src = imageUrl;
+      img.style.display = 'none';
+      if (imgStatus) {
+        imgStatus.textContent = 'Loading…';
         imgStatus.style.display = 'block';
       }
       _updateSpcViewerNavButtons();
@@ -1873,6 +2190,10 @@ function openSpcWatchViewer(props = {}) {
 }
 
 function openSpcMesoViewer(props = {}) {
+  if (_isWpcMpdProps(props)) {
+    openWpcMpdViewer(props);
+    return;
+  }
   const overlay = document.getElementById('spc-viewer-overlay');
   if (!overlay) return;
   const num = Number.parseInt(String(props?._number || '').trim(), 10);
@@ -1902,6 +2223,77 @@ function openSpcMesoViewer(props = {}) {
       textEl.textContent = text;
     });
   }
+}
+
+function openWpcMpdViewer(props = {}) {
+  const overlay = document.getElementById('spc-viewer-overlay');
+  if (!overlay) return;
+  const num = _extractWpcMpdNumber(props?._number, props?.number, props?.id, props?._name, props?.title);
+  const numberText = Number.isFinite(num) && num > 0 ? String(num).padStart(4, '0') : '';
+  const detailUrl = _resolveWpcMpdDetailUrl(props);
+  const imageUrl = _wpcMpdImageUrl(num);
+  _spcViewerMode = 'meso';
+  _spcViewerDay = 'MESO';
+  _spcViewerDocKey = detailUrl || numberText || String(props?._name || props?.title || 'wpc-mpd');
+  _spcViewerTypes = [{ id: 'meso', label: 'Discussion Image', imageUrl, directUrl: true }];
+  _spcViewerIdx = 0;
+  document.getElementById('spc-viewer-title').textContent = String(props?.title || props?._name || (numberText ? `WPC MPD ${numberText}` : 'WPC Mesoscale Precipitation Discussion'));
+  document.getElementById('spc-viewer-discussion-label').textContent = 'Discussion';
+  _setSpcViewerFacts([]);
+  overlay.classList.add('open');
+  _spcViewerUpdateImage();
+  const textEl = document.getElementById('spc-viewer-discussion-text');
+  if (textEl) textEl.textContent = 'Loading discussion...';
+  if (!detailUrl) {
+    if (textEl) {
+      textEl.textContent = _buildWpcMpdDiscussionText({
+        issued: props?.issued || '',
+        number: numberText || String(props?.number || props?._number || ''),
+        areasAffected: props?.areas_affected || '',
+        concerning: props?.concerning || '',
+        valid: props?.valid || '',
+        summary: props?.summary || '',
+        discussion: props?.discussion || '(WPC detail page unavailable.)',
+      });
+    }
+    return;
+  }
+  const currentKey = _spcViewerDocKey;
+  _fetchWpcMpdDetail(detailUrl).then(detail => {
+    if (!overlay.classList.contains('open')) return;
+    if (_spcViewerMode !== 'meso' || _spcViewerDocKey !== currentKey) return;
+    document.getElementById('spc-viewer-title').textContent = detail.title || `WPC MPD ${detail.number || numberText}`;
+    _spcViewerTypes = [{ id: 'meso', label: 'Discussion Image', imageUrl: detail.imageUrl || imageUrl, directUrl: true }];
+    _spcViewerIdx = 0;
+    _setSpcViewerFacts([]);
+    _spcViewerUpdateImage();
+    if (textEl) {
+      textEl.textContent = _buildWpcMpdDiscussionText({
+        issued: detail.issued || props?.issued || '',
+        number: detail.number || numberText || String(props?.number || props?._number || ''),
+        areasAffected: detail.areasAffected || props?.areas_affected || '',
+        concerning: detail.concerning || props?.concerning || '',
+        valid: detail.valid || props?.valid || '',
+        summary: detail.summary || props?.summary || '',
+        discussion: detail.discussion || props?.discussion || '',
+      });
+    }
+  }).catch(err => {
+    if (!overlay.classList.contains('open')) return;
+    if (_spcViewerMode !== 'meso' || _spcViewerDocKey !== currentKey) return;
+    _setSpcViewerFacts([]);
+    if (textEl) {
+      textEl.textContent = _buildWpcMpdDiscussionText({
+        issued: props?.issued || '',
+        number: numberText || String(props?.number || props?._number || ''),
+        areasAffected: props?.areas_affected || '',
+        concerning: props?.concerning || '',
+        valid: props?.valid || '',
+        summary: props?.summary || '',
+        discussion: props?.discussion || `(Failed to load WPC discussion: ${err?.message || err})`,
+      });
+    }
+  });
 }
 
 function closeSpcViewer() {
@@ -2085,6 +2477,7 @@ function _processedWiseTiltIndex(family, tilt) {
 function _processedWiseFolderName(stationId, family, tilt) {
   const product = _processedWiseProductCodeForFamily(family);
   if (product === 'DTA') return 'DTA';
+  if (product === 'EET') return 'EET';
   
   // TDWR stations use different folder names (TZ0, TV0, PRT0, TZL)
   if (isTerminalStation(stationId)) {
@@ -2811,104 +3204,83 @@ function _setMesoLayersVisible(visible) {
   });
 }
 
+function _mesoKindColorExpression() {
+  return [
+    'match',
+    ['downcase', ['coalesce', ['get', 'kind'], '']],
+    'precip', '#35C759',
+    'convective', '#4EA5FF',
+    'winter', '#4EA5FF',
+    '#4EA5FF',
+  ];
+}
+
+function _normalizeMesoKind(kind, source = '') {
+  const value = String(kind || '').trim().toLowerCase();
+  if (value === 'precipitation') return 'precip';
+  if (value === 'precip' || value === 'convective' || value === 'winter') return value;
+  if (String(source || '').trim().toLowerCase() === 'wpc') return 'precip';
+  return 'convective';
+}
+
+function _mesoKindEnabled(kind) {
+  const normalized = _normalizeMesoKind(kind);
+  return mesoFilterSelection?.[normalized] !== false;
+}
+
+function _filterMesoGeoJson(data) {
+  const features = Array.isArray(data?.features) ? data.features : [];
+  return {
+    type: 'FeatureCollection',
+    features: features.filter(feature => _mesoKindEnabled(feature?.properties?.kind || feature?.properties?._kind)),
+  };
+}
+
 function _buildMesoGeoJson(raw) {
   const out = [];
   const features = Array.isArray(raw?.features) ? raw.features : [];
   for (const feature of features) {
-    const geom = _asSpcPolygonGeometry(feature?.geometry);
-    if (!geom) continue;
+    const geom = feature?.geometry;
+    const geomType = String(geom?.type || '');
+    if (!['Polygon', 'MultiPolygon'].includes(geomType)) continue;
+    if (!Array.isArray(geom?.coordinates) || !geom.coordinates.length) continue;
     const p = feature?.properties || {};
-    const mdRaw = p.md_number ?? p.md_num ?? p.md ?? p.discussion_num ?? p.num ?? p.objectid ?? '';
+    const mdRaw = p.md_number ?? p.md_num ?? p.md ?? p.discussion_num ?? p.num ?? p.objectid ?? p.number ?? p.id ?? '';
     const mdNumber = Number.parseInt(String(mdRaw).trim(), 10);
     const mdText = Number.isFinite(mdNumber) && mdNumber > 0 ? String(mdNumber) : '';
-    const defaultUrl = mdText ? `https://www.spc.noaa.gov/products/md/md${mdText.padStart(4, '0')}.html` : '';
+    const source = String(p.source || '').trim().toLowerCase();
+    const defaultUrl = source === 'wpc'
+      ? _resolveWpcMpdDetailUrl({ ...p, _number: mdText })
+      : (mdText ? `https://www.spc.noaa.gov/products/md/md${mdText.padStart(4, '0')}.html` : '');
     const title = String(
       p.name
       || p.md_name
       || p.title
-      || (mdText ? `Mesoscale Discussion ${mdText}` : 'Mesoscale Discussion')
+      || (source === 'wpc'
+        ? (mdText ? `WPC MPD ${mdText.padStart(4, '0')}` : 'WPC Mesoscale Precipitation Discussion')
+        : (mdText ? `Mesoscale Discussion ${mdText}` : 'Mesoscale Discussion'))
     ).trim();
     out.push({
       type: 'Feature',
+      id: feature?.id ?? String(mdText || title || out.length),
       geometry: geom,
       properties: {
+        ...(p || {}),
+        kind: _normalizeMesoKind(p.kind, source),
+        _kind: _normalizeMesoKind(p.kind, source),
         _name: title || 'Mesoscale Discussion',
         _number: mdText,
-        _url: String(p.popupinfo || p.url || p.link || defaultUrl || '').trim(),
+        _source: source,
+        _url: String(p.detail_url || p.popupinfo || p.url || p.link || defaultUrl || '').trim(),
       },
     });
   }
   return { type: 'FeatureCollection', features: out };
 }
 
-async function _fetchCurrentMesoDiscussions() {
-  const res = await invoke('fetch_url_base64', { url: SPC_MESO_INDEX_URL });
-  if (!res || res.status < 200 || res.status >= 400 || !res.body_base64) {
-    throw new Error(`HTTP ${res?.status ?? 0}`);
-  }
-  const html = _decodeBase64Utf8(res.body_base64);
-  const parser = new DOMParser();
-  const doc = parser.parseFromString(html, 'text/html');
-  const bodyText = (doc.body?.textContent || '').replace(/\s+/g, ' ').trim();
-  const noActive = /No Mesoscale Discussions are currently in effect\./i.test(bodyText);
-  const links = [...doc.querySelectorAll('a[href]')]
-    .map(a => String(a.getAttribute('href') || '').trim())
-    .filter(href => /\/products\/md\/md\d{4}\.html$/i.test(href))
-    .map(href => {
-      const absolute = new URL(href, SPC_MESO_INDEX_URL).toString();
-      const match = absolute.match(/md(\d{4})\.html$/i);
-      return match ? { href: absolute, number: match[1] } : null;
-    })
-    .filter(Boolean);
-  const dedup = [];
-  const seen = new Set();
-  links.forEach(item => {
-    if (!item || seen.has(item.number)) return;
-    seen.add(item.number);
-    dedup.push(item);
-  });
-  return {
-    noActive,
-    active: noActive ? [] : dedup,
-    latest: dedup[0] || null,
-  };
-}
-
 async function _buildCurrentMesoGeoJson() {
-  const [raw, index] = await Promise.all([
-    _fetchGeoJsonViaTauri(MESO_DISCUSSION_URL),
-    _fetchCurrentMesoDiscussions(),
-  ]);
-
-  const data = _buildMesoGeoJson(raw);
-  const activeNumbers = new Set((index?.active || []).map(item => item.number));
-  const latestNumber = String(index?.latest?.number || '').trim();
-  const latestUrl = String(index?.latest?.href || '').trim();
-  const filtered = [];
-
-  for (const feature of Array.isArray(data?.features) ? data.features : []) {
-    const props = feature?.properties || {};
-    const num = String(props?._number || '').trim().padStart(4, '0');
-    if (activeNumbers.size) {
-      if (!activeNumbers.has(num)) continue;
-    } else if (latestNumber) {
-      if (num !== latestNumber) continue;
-    } else {
-      continue;
-    }
-    filtered.push({
-      ...feature,
-      properties: {
-        ...props,
-        _url: latestUrl && num === latestNumber ? latestUrl : String(props?._url || '').trim(),
-      },
-    });
-  }
-
-  return {
-    type: 'FeatureCollection',
-    features: filtered,
-  };
+  const raw = await _fetchGeoJsonViaTauri(MESO_DISCUSSION_URL);
+  return _buildMesoGeoJson(raw);
 }
 
 async function refreshMesoOverlay(force = false, opts = {}) {
@@ -2939,7 +3311,7 @@ async function refreshMesoOverlay(force = false, opts = {}) {
   }
 
   if (seq !== mesoLoadSeq) return;
-  map.getSource('meso-discussions-src')?.setData(data);
+  map.getSource('meso-discussions-src')?.setData(_filterMesoGeoJson(data));
   mesoRenderedKey = 'ready';
   _setMesoLayersVisible(true);
 }
@@ -2952,19 +3324,32 @@ function initMesoOverlayLayers() {
     data: MESO_EMPTY_GEOJSON,
   });
   map.addLayer({
+    id: 'meso-discussions-line-under',
+    type: 'line',
+    source: 'meso-discussions-src',
+    layout: { visibility: 'none' },
+    paint: {
+      'line-color': '#000000',
+      'line-width': 6,
+      'line-opacity': 0.98,
+    },
+  }, 'stations-dot');
+  map.addLayer({
     id: 'meso-discussions-line',
     type: 'line',
     source: 'meso-discussions-src',
     layout: { visibility: 'none' },
     paint: {
-      'line-color': '#4EA5FF',
-      'line-width': 1.3,
-      'line-opacity': 0.98,
+      'line-color': _mesoKindColorExpression(),
+      'line-width': 4,
+      'line-opacity': 0.96,
     },
   }, 'stations-dot');
 
-  map.on('mouseenter', 'meso-discussions-line', () => { map.getCanvas().style.cursor = 'pointer'; });
-  map.on('mouseleave', 'meso-discussions-line', () => { map.getCanvas().style.cursor = ''; });
+  ['meso-discussions-line-under', 'meso-discussions-line'].forEach(layerId => {
+    map.on('mouseenter', layerId, () => { map.getCanvas().style.cursor = 'pointer'; });
+    map.on('mouseleave', layerId, () => { map.getCanvas().style.cursor = ''; });
+  });
   map.on('click', 'meso-discussions-line', e => {
     if (!Array.isArray(e?.features) || !e.features.length) return;
     const f = e.features[0];
@@ -4122,6 +4507,188 @@ function initStormReportLayers() {
   if (stormReportsVisible) refreshStormReports(true, { forceNetwork: true });
 }
 
+// -- mPING layer ---------------------------------------------------------------
+function initMpingLayers() {
+  if (mpingMapReady) return;
+
+  map.addSource(MPING_SOURCE_ID, {
+    type: 'geojson',
+    data: MPING_EMPTY_GEOJSON,
+    generateId: true,
+  });
+
+  map.addLayer({
+    id: MPING_LAYER_ID,
+    type: 'circle',
+    source: MPING_SOURCE_ID,
+    layout: { visibility: 'none' },
+    paint: {
+      'circle-color': [
+        'match', ['get', 'category'],
+        'Rain/Snow',                        '#4499ff',
+        'Hail',                             '#00e5ff',
+        'Flood',                            '#00cc44',
+        'Wind Damage',                      '#ffdd00',
+        'Storm Damage',                     '#ff8800',
+        'Fog/Mist/Dust',                    '#aabbcc',
+        'Blowing Snow / Reduced Visibility','#ddddff',
+        'Freezing Rain/Drizzle',            '#88aaff',
+        'Ice Pellets/Sleet',                '#99ccff',
+        'Tornado',                          '#ff3333',
+        'None',                             '#555555',
+        'Test',                             '#333333',
+        '#888888',
+      ],
+      'circle-radius': ['interpolate', ['linear'], ['zoom'], 3, 3, 6, 4.2, 10, 6, 13, 8],
+      'circle-stroke-color': 'rgba(0,0,0,0.55)',
+      'circle-stroke-width': 1,
+      'circle-opacity': 0.9,
+    },
+  }, 'stations-dot');
+
+  map.on('mouseenter', MPING_LAYER_ID, () => { map.getCanvas().style.cursor = 'pointer'; });
+  map.on('mouseleave', MPING_LAYER_ID, () => { map.getCanvas().style.cursor = ''; });
+  map.on('click', MPING_LAYER_ID, e => {
+    if (!e.features?.length) return;
+    const f = e.features[0];
+    const p = f.properties || {};
+    const coords = f.geometry?.coordinates ? [...f.geometry.coordinates] : [e.lngLat.lng, e.lngLat.lat];
+    const time = p.obtime ? new Date(p.obtime).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }) : '—';
+    const accentMap = {
+      'Rain/Snow': '#4499ff', 'Hail': '#00e5ff', 'Flood': '#00cc44',
+      'Wind Damage': '#ffdd00', 'Storm Damage': '#ff8800', 'Tornado': '#ff3333',
+    };
+    const accent = accentMap[p.category] || '#888888';
+    const html = `<div class="storm-popup-card" style="--storm-accent:${accent}">
+      <div class="storm-popup-title">${p.description || p.category || 'mPING Report'}</div>
+      <div class="storm-popup-meta">mPING · ${p.category || ''}</div>
+      <div class="storm-popup-grid">
+        <span class="storm-popup-k">Time</span>
+        <span class="storm-popup-v">${time}</span>
+      </div>
+    </div>`;
+    if (mpingPopup) mpingPopup.remove();
+    mpingPopup = new mapboxgl.Popup({ closeButton: true, closeOnClick: true, className: 'storm-popup', maxWidth: '260px' })
+      .setLngLat(coords)
+      .setHTML(html)
+      .addTo(map);
+  });
+
+  mpingMapReady = true;
+  if (mpingVisible) refreshMpingLayer(true);
+}
+
+async function refreshMpingLayer(forceNetwork = false) {
+  if (!mpingMapReady) return;
+  if (!mpingVisible) {
+    map.getSource(MPING_SOURCE_ID)?.setData(MPING_EMPTY_GEOJSON);
+    if (map.getLayer(MPING_LAYER_ID)) map.setLayoutProperty(MPING_LAYER_ID, 'visibility', 'none');
+    return;
+  }
+  const now = Date.now();
+  const fresh = mpingCachedData && (now - mpingLastFetch) < MPING_CACHE_MS;
+  let data;
+  if (fresh && !forceNetwork) {
+    data = mpingCachedData;
+  } else {
+    try {
+      const res = await invoke('fetch_url_base64', { url: MPING_URL });
+      if (!res || res.status < 200 || res.status >= 400 || !res.body_base64) throw new Error(`HTTP ${res?.status || 0}`);
+      const bytes = Uint8Array.from(atob(res.body_base64), c => c.charCodeAt(0));
+      data = JSON.parse(new TextDecoder().decode(bytes));
+      mpingCachedData = data;
+      mpingLastFetch = now;
+    } catch (err) {
+      console.warn('[mPING] fetch error', err);
+      if (!mpingCachedData) return;
+      data = mpingCachedData;
+    }
+  }
+  map.getSource(MPING_SOURCE_ID)?.setData(data);
+  if (map.getLayer(MPING_LAYER_ID)) map.setLayoutProperty(MPING_LAYER_ID, 'visibility', 'visible');
+}
+
+// -- Spotter Locations layer ---------------------------------------------------
+function initSpotterLocationLayers() {
+  if (spotterLocationsMapReady) return;
+
+  map.addSource(SPOTTER_LOCATIONS_SOURCE_ID, {
+    type: 'geojson',
+    data: SPOTTER_LOCATIONS_EMPTY_GEOJSON,
+    generateId: true,
+  });
+
+  map.addLayer({
+    id: SPOTTER_LOCATIONS_LAYER_ID,
+    type: 'circle',
+    source: SPOTTER_LOCATIONS_SOURCE_ID,
+    layout: { visibility: 'none' },
+    paint: {
+      'circle-color': '#ff2222',
+      'circle-radius': ['interpolate', ['linear'], ['zoom'], 3, 3, 6, 4, 10, 5.5, 13, 7],
+      'circle-stroke-color': 'rgba(0,0,0,0.6)',
+      'circle-stroke-width': 1,
+      'circle-opacity': 0.9,
+    },
+  }, 'stations-dot');
+
+  map.on('mouseenter', SPOTTER_LOCATIONS_LAYER_ID, () => { map.getCanvas().style.cursor = 'pointer'; });
+  map.on('mouseleave', SPOTTER_LOCATIONS_LAYER_ID, () => { map.getCanvas().style.cursor = ''; });
+  map.on('click', SPOTTER_LOCATIONS_LAYER_ID, e => {
+    if (!e.features?.length) return;
+    const f = e.features[0];
+    const p = f.properties || {};
+    const coords = f.geometry?.coordinates ? [...f.geometry.coordinates] : [e.lngLat.lng, e.lngLat.lat];
+    const time = p.obtime_utc || '—';
+    const html = `<div class="storm-popup-card" style="--storm-accent:#ff2222">
+      <div class="storm-popup-title">${p.label || p.name || 'Spotter'}</div>
+      <div class="storm-popup-meta">Spotter Network · ${p.status || ''}</div>
+      <div class="storm-popup-grid">
+        <span class="storm-popup-k">Updated</span>
+        <span class="storm-popup-v">${time}</span>
+      </div>
+    </div>`;
+    if (spotterLocationsPopup) spotterLocationsPopup.remove();
+    spotterLocationsPopup = new mapboxgl.Popup({ closeButton: true, closeOnClick: true, className: 'storm-popup', maxWidth: '260px' })
+      .setLngLat(coords)
+      .setHTML(html)
+      .addTo(map);
+  });
+
+  spotterLocationsMapReady = true;
+  if (spotterLocationsVisible) refreshSpotterLocationLayer(true);
+}
+
+async function refreshSpotterLocationLayer(forceNetwork = false) {
+  if (!spotterLocationsMapReady) return;
+  if (!spotterLocationsVisible) {
+    map.getSource(SPOTTER_LOCATIONS_SOURCE_ID)?.setData(SPOTTER_LOCATIONS_EMPTY_GEOJSON);
+    if (map.getLayer(SPOTTER_LOCATIONS_LAYER_ID)) map.setLayoutProperty(SPOTTER_LOCATIONS_LAYER_ID, 'visibility', 'none');
+    return;
+  }
+  const now = Date.now();
+  const fresh = spotterLocationsCachedData && (now - spotterLocationsLastFetch) < SPOTTER_LOCATIONS_CACHE_MS;
+  let data;
+  if (fresh && !forceNetwork) {
+    data = spotterLocationsCachedData;
+  } else {
+    try {
+      const res = await invoke('fetch_url_base64', { url: SPOTTER_LOCATIONS_URL });
+      if (!res || res.status < 200 || res.status >= 400 || !res.body_base64) throw new Error(`HTTP ${res?.status || 0}`);
+      const bytes = Uint8Array.from(atob(res.body_base64), c => c.charCodeAt(0));
+      data = JSON.parse(new TextDecoder().decode(bytes));
+      spotterLocationsCachedData = data;
+      spotterLocationsLastFetch = now;
+    } catch (err) {
+      console.warn('[SpotterLocations] fetch error', err);
+      if (!spotterLocationsCachedData) return;
+      data = spotterLocationsCachedData;
+    }
+  }
+  map.getSource(SPOTTER_LOCATIONS_SOURCE_ID)?.setData(data);
+  if (map.getLayer(SPOTTER_LOCATIONS_LAYER_ID)) map.setLayoutProperty(SPOTTER_LOCATIONS_LAYER_ID, 'visibility', 'visible');
+}
+
 function _setAlertLayersVisible(visible) {
   const vis = visible ? 'visible' : 'none';
   ALERT_LAYER_IDS.forEach(id => {
@@ -4687,6 +5254,14 @@ function _alertsNormalizeFeature(payload) {
     ?? src?.properties?.event
     ?? 'Unknown',
   ).trim() || 'Unknown';
+  const eventRaw = String(payload?.eventRaw ?? src?.properties?.eventRaw ?? event).trim();
+  const mergedProps = {
+    ...(src.properties || {}),
+    event,
+    eventRaw,
+  };
+  if (/special weather statement/i.test(event) && !_alertsIsStormBasedSpecialWeatherStatement(mergedProps)) return null;
+  if (/special weather statement/i.test(event) && _alertsGeometryVertexCount(src?.geometry) > 25) return null;
   const sentMs = _alertsParseTimeMs(payload?.sent ?? src?.properties?.sent);
   const expiresMs = _alertsParseTimeMs(payload?.expires ?? src?.properties?.expires);
   const fallbackExpiry = Number.isFinite(sentMs) ? (sentMs + ALERT_DEFAULT_KEEP_MS) : (Date.now() + ALERT_DEFAULT_KEEP_MS);
@@ -4703,11 +5278,11 @@ function _alertsNormalizeFeature(payload) {
       ...(src.properties || {}),
       id,
       event,
-      eventRaw: String(payload?.eventRaw ?? src?.properties?.eventRaw ?? event),
+      eventRaw,
       _warnClass: _resolvedWarningClass({
         ...(src?.properties || {}),
         event,
-        eventRaw: String(payload?.eventRaw ?? src?.properties?.eventRaw ?? event),
+        eventRaw,
       }),
       messageType: String(payload?.messageType ?? src?.properties?.messageType ?? ''),
       sent: Number.isFinite(sentMs) ? new Date(sentMs).toISOString() : null,
@@ -4716,6 +5291,12 @@ function _alertsNormalizeFeature(payload) {
       _provider: ALERT_SOURCE_NWS_API,
     },
   };
+}
+
+function _alertsGeometryVertexCount(geometry) {
+  let count = 0;
+  _alertGeometryVisitLngLat(geometry, () => { count += 1; });
+  return count;
 }
 
 function _alertsFeatureExpired(feature, nowMs = Date.now()) {
@@ -5832,7 +6413,9 @@ function _alertsUpsertFromPayload(payload) {
 function _alertsNwsApiWarningEvent(eventName) {
   const raw = String(eventName || '').trim();
   if (!raw) return null;
-  return /warning/i.test(raw) ? raw : null;
+  if (/warning/i.test(raw)) return raw;
+  if (/special weather statement/i.test(raw)) return raw;
+  return null;
 }
 
 function _alertsNormalizeNwsApiFeature(feature, provider = ALERT_SOURCE_NWS_API) {
@@ -5845,6 +6428,8 @@ function _alertsNormalizeNwsApiFeature(feature, provider = ALERT_SOURCE_NWS_API)
   const eventRaw = String(props?.event || '').trim();
   const event = _alertsNwsApiWarningEvent(eventRaw);
   if (!event) return null;
+  if (/special weather statement/i.test(event) && !_alertsIsStormBasedSpecialWeatherStatement(props)) return null;
+  if (/special weather statement/i.test(event) && _alertsGeometryVertexCount(feature?.geometry) > 25) return null;
 
   const warnClass = _alertsWarnClass(event, props);
   if (!warnClass || !WARNING_PREF_ID_SET.has(warnClass)) return null;
@@ -5923,6 +6508,31 @@ function _alertsClearBootstrapPruneTimer() {
   alertsBootstrapPruneTimer = null;
 }
 
+function _alertsPruneProviderDuplicates(preferredProvider, duplicateProvider, logContext = '') {
+  const preferredIds = new Set();
+  const preferredKeys = new Set();
+  for (const feature of alertsById.values()) {
+    if (_alertsProviderForFeature(feature) !== preferredProvider) continue;
+    preferredIds.add(String(feature?.id || ''));
+    preferredKeys.add(_alertsIdentityKey(feature));
+  }
+
+  let changed = false;
+  let removed = 0;
+  for (const [id, feature] of alertsById.entries()) {
+    if (_alertsProviderForFeature(feature) !== duplicateProvider) continue;
+    if (preferredIds.has(String(id)) || preferredKeys.has(_alertsIdentityKey(feature))) {
+      alertsById.delete(id);
+      changed = true;
+      removed += 1;
+    }
+  }
+  if (removed > 0 && logContext) {
+    console.info(`[NWWS] dedupe removed ${removed} ${duplicateProvider} alert(s) after ${logContext}`);
+  }
+  if (changed) _alertsScheduleSourceUpdate();
+}
+
 function _alertsPruneBootstrapDuplicates() {
   const liveIds = new Set();
   const liveKeys = new Set();
@@ -5956,10 +6566,12 @@ function _isFatalNwwsStatusMessage(message) {
   const text = String(message || '').toLowerCase();
   return (
     text.includes('not-authorized')
+    || text.includes('not authorized')
     || text.includes('starttls_failure')
     || text.includes('packet length too long')
     || text.includes('tls_get_more_records')
     || text.includes('client network socket disconnected before secure tls connection was established')
+    || text.includes('connection is closing')
     || text.includes('error-reconnecting-too-fast')
     || text.includes('write after end')
     || text.includes('cannot read properties of null')
@@ -5971,11 +6583,16 @@ function _stopNwwsBridgeForFatal(message) {
   if (nwwsFatalStopInFlight) return;
   nwwsFatalStopInFlight = true;
   nwwsBridgeStartPromise = null;
+  nwwsLastStatusSig = '';
+  nwwsLastAlertsGeneratedAt = '';
+  nwwsHasPublishedSnapshot = false;
+  stopNwsApiPolling();
   invoke('stop_nwws_bridge')
     .catch(() => {})
     .finally(() => {
       const text = String(message || 'Fatal NWWS error');
-      setNwwsCredentialsStatus(`NWWS stopped: ${text}`, true);
+      console.warn('[NWWS] Fatal bridge error — bridge stopped:', text);
+      setNwwsCredentialsStatus(`NWWS bridge stopped: ${text}`, true);
     });
 }
 
@@ -6038,6 +6655,8 @@ function _alertsNormalizeExternalFeature(feature, provider = ALERT_SOURCE_NWWS) 
   const props = feature?.properties || {};
   const eventRaw = String(props?.eventRaw || props?.event || '').trim();
   const event = eventRaw || 'Unknown Alert';
+  if (/special weather statement/i.test(event) && !_alertsIsStormBasedSpecialWeatherStatement(props)) return null;
+  if (/special weather statement/i.test(event) && _alertsGeometryVertexCount(feature?.geometry) > 25) return null;
   const id = String(feature?.id || props?.id || props?.tracking || '').trim();
   if (!id) return null;
 
@@ -6157,6 +6776,7 @@ async function ensureNwwsBridge() {
       nwwsHasPublishedSnapshot = true;
       _scheduleWarningNotificationPriming();
       _alertsReplaceProviderCollection(payload, ALERT_SOURCE_NWWS);
+      _alertsPruneProviderDuplicates(ALERT_SOURCE_NWWS, ALERT_SOURCE_NWS_API, 'NWWS update');
       _alertsPruneBootstrapDuplicates();
       _alertsScheduleBootstrapPrune();
     });
@@ -6260,11 +6880,13 @@ async function refreshNwsApiAlerts(opts = {}) {
   if (changed) _alertsScheduleSourceUpdate();
   else _ensureOverlayFlashTicker();
   if (warningChanges.length) _announceWarningChanges(warningChanges);
+  console.info(`[NWS API] refreshed ${features.length} alert(s) for provider ${provider}`);
 }
 
 function startNwsApiPolling() {
   nwsApiPollEnforceMode = false;
-  nwsApiPollProvider = ALERT_SOURCE_NWS_API;
+  if (!nwsApiPollProvider) nwsApiPollProvider = ALERT_SOURCE_NWS_API;
+  console.info(`[NWWS] Starting NWS API alert polling (${nwsApiPollProvider}) every ${NWS_API_POLL_MS} ms`);
   if (nwsApiPollTimer == null) {
     nwsApiPollTimer = setInterval(() => {
       refreshNwsApiAlerts({
@@ -6291,7 +6913,8 @@ function applyAlertSourceMode() {
   alertSourceMode = ALERT_SOURCE_NWWS;
   stopNwsApiPolling();
   _alertsClearProviderFeatures(ALERT_SOURCE_NWS_API);
-  void bootstrapNwsApiWarnings();
+  _resetWarningNotificationPriming();
+  _scheduleWarningNotificationPriming();
   ensureNwwsBridge().catch(() => {});
 }
 
@@ -6803,6 +7426,7 @@ function _wiseFieldNameForFamily(family) {
   const f = String(family || '').trim().toUpperCase();
   if (f === 'CC') return 'cross_correlation_ratio';
   if (f === 'ZDR') return 'differential_reflectivity';
+  if (f === 'ET' || f === 'EET') return 'echo_top';
   if (f === 'SRV') return 'storm_relative_velocity';
   if (f === 'VEL') return 'velocity';
   if (f === 'SW') return 'spectrum_width';
@@ -7863,7 +8487,7 @@ const recentFramesMenuEl = document.getElementById('recent-frames-menu');
 const multiPaneBtnEl = document.getElementById('multi-pane-btn');
 const recentFramesBtnEl = document.getElementById('recent-frames-btn');
 const secondaryPaneMaps = new Map(); // paneId -> state
-const MULTI_PANE_DEFAULT_FAMILY = { 2: 'VEL', 3: 'CC', 4: 'ET' };
+const MULTI_PANE_DEFAULT_FAMILY = { 2: 'VEL', 3: 'CC', 4: 'EET' };
 let activePaneId = 1;
 let multiPaneCount = 1;
 let paneCameraSyncLock = false;
@@ -8651,7 +9275,7 @@ function _ensurePaneCell(id) {
   cell.className = 'map-cell';
   cell.id = `map-cell-${id}`;
   cell.dataset.pane = String(id);
-  cell.innerHTML = `<div id="map-pane-${id}" class="map-pane"></div><div class="pane-frame-time" id="pane-frame-time-${id}">--:--:--</div>`;
+  cell.innerHTML = `<div id="map-pane-${id}" class="map-pane"></div><div class="pane-frame-time" id="pane-frame-time-${id}">--:--:--</div><div class="pane-crosshair"></div>`;
   mapGridEl?.appendChild(cell);
   cell.addEventListener('pointerdown', () => _setActivePane(id));
   cell.addEventListener('mousedown', () => _setActivePane(id));
@@ -8881,8 +9505,8 @@ function _formatInspectorValue(fieldName, value) {
   const isEchoTop = f.includes('echo_top');
   const isVelocityStyle = f.includes('velocity') || f.includes('spectrum_width');
   const displayValue = isEchoTop
-    ? (scalarValue * 3.28084)
-    : (isVelocityStyle ? (scalarValue * 2.2369362920544) : scalarValue); // km -> kft, m/s -> mph
+    ? scalarValue
+    : (isVelocityStyle ? (scalarValue * 2.2369362920544) : scalarValue); // m/s -> mph
   const decimals = (f.includes('cross_correlation') || f.includes('correlation'))
     ? 3
     : ((f.includes('storm_total_precip') || f.includes('accumulation')) ? 2 : 1);
@@ -9391,6 +10015,15 @@ function activateCurrentComboLayer() {
   applyFilter();
 }
 
+function _clearVisiblePrimaryForPendingCombo(reason = '') {
+  if (!activeStation || _isL2PathForFamily(activeFamily)) return;
+  activateCurrentComboLayer();
+  try { radarLayer?.clearFrame(); } catch (_) {}
+  try { radarLayerSweep?.clearFrame(); } catch (_) {}
+  displayedPrimaryComboKey = activeCacheKey();
+  displayedPrimaryFamily = activeFamily;
+}
+
 function bringCityLabelsAboveRadar() {
   const layers = map.getStyle()?.layers;
   if (!Array.isArray(layers)) return;
@@ -9628,6 +10261,8 @@ map.on('load', () => {
     selectStation(stationId);
   });
 
+  setStationLayersVisible(radarSitesVisible);
+
   map.on('mousemove', e => _updateInspectorPointer(map, e, 1));
   map.on('mouseout', () => _clearInspectorPointer(1));
 
@@ -9664,6 +10299,8 @@ map.on('load', () => {
   initLightningOverlayLayers();
   initTvsOverlayLayers();
   initStormReportLayers();
+  initMpingLayers();
+  initSpotterLocationLayers();
   initAlertLayers();
   bringCityLabelsAboveRadar();
   syncCameraToggleUi();
@@ -9713,6 +10350,8 @@ let spcMapReady = false;
 let spcLoadSeq = 0;
 let spcRenderedKey = '';
 let mesoVisible = false;
+let mesoFilterSelection = { precip: true, convective: true, winter: true };
+let radarSitesVisible = true;
 let mesoMapReady = false;
 let mesoLoadSeq = 0;
 let mesoRenderedKey = '';
@@ -9743,6 +10382,19 @@ let stormReportsLoadSeq = 0;
 let stormReportsRenderedKey = '';
 const stormRawCache = new Map();
 let stormReportsPopup = null;
+let mpingApiToken = '';
+let mpingVisible = false;
+let mpingMapReady = false;
+let mpingPollTimer = null;
+let mpingLastFetch = 0;
+let mpingCachedData = null;
+let mpingPopup = null;
+let spotterLocationsVisible = false;
+let spotterLocationsMapReady = false;
+let spotterLocationsPollTimer = null;
+let spotterLocationsLastFetch = 0;
+let spotterLocationsCachedData = null;
+let spotterLocationsPopup = null;
 let alertsMapReady = false;
 let alertsFlushPending = false;
 const alertsById = new Map();
@@ -10384,7 +11036,7 @@ function _localFamilyFromField(field) {
   if (f.includes('differential_reflectivity')) return 'ZDR';
   if (f.includes('cross_correlation')) return 'CC';
   if (f.includes('velocity')) return 'VEL';
-  if (f.includes('echo_top')) return 'ET';
+  if (f.includes('echo_top')) return 'EET';
   return 'REF';
 }
 
@@ -11836,7 +12488,7 @@ function updateSlider() {}
 const settingsBtn     = document.getElementById('settings-btn');
 const settingsOverlay = document.getElementById('settings-overlay');
 const dbzSlider       = document.getElementById('dbz-slider');
-const dbzValEl        = document.getElementById('dbz-val');
+const dbzNumberInput  = document.getElementById('dbz-number');
 const citySearchWrap = document.getElementById('city-search-wrap');
 const citySearchBtn = document.getElementById('city-search-btn');
 const citySearchInput = document.getElementById('city-search-input');
@@ -11953,8 +12605,11 @@ function collapseAllSettingsGroups() {
 function resetSettingsSidebarState() {
   collapseAllSettingsGroups();
   setSpcFilterOpen(false);
+  setMesoFilterOpen(false);
+  setAlertsFilterOpen(false);
   setStormFilterOpen(false);
   setCameraFilterOpen(false);
+  setAppCacheDetailsOpen(false);
   setYouTubeEmbedOpen(false);
   setColorTablesOpen(false);
   setWarningPrefsOpen(false);
@@ -11966,9 +12621,11 @@ function setSettingsOpen(open) {
   if (open) {
     _setCitySearchOpen(false);
     syncSpcFilterUi();
+    syncMesoFilterUi();
     syncStormFilterUi();
     syncCameraFilterUi();
     syncMapStyleUi();
+    syncAppCacheUi();
     syncAppUpdateUi();
     syncNwwsSettingsUi();
     syncYouTubeEmbedUi();
@@ -12037,14 +12694,29 @@ SETTINGS_GROUP_IDS.forEach(groupId => {
   });
 });
 
+function _setDbzFilter(next, { apply = true, persist = true } = {}) {
+  const numeric = Number(next);
+  const clamped = Number.isFinite(numeric) ? Math.max(-30, Math.min(75, Math.round(numeric))) : -30;
+  dbzFilter = clamped;
+  if (dbzSlider && Number(dbzSlider.value) !== clamped) dbzSlider.value = String(clamped);
+  if (dbzNumberInput && Number(dbzNumberInput.value) !== clamped) dbzNumberInput.value = String(clamped);
+  if (apply) applyFilter();
+  if (persist) saveSettings();
+}
+
 if (dbzSlider) {
   dbzSlider.addEventListener('input', () => {
-    dbzFilter = Number(dbzSlider.value);
-    if (dbzValEl) dbzValEl.textContent = `${dbzFilter} dBZ`;
-    applyFilter();
-    saveSettings();
+    _setDbzFilter(dbzSlider.value);
   });
 }
+
+dbzNumberInput?.addEventListener('input', () => {
+  _setDbzFilter(dbzNumberInput.value, { apply: false, persist: false });
+});
+
+dbzNumberInput?.addEventListener('change', () => {
+  _setDbzFilter(dbzNumberInput.value);
+});
 
 const toggleSweep = document.getElementById('toggle-sweep');
 if (toggleSweep) {
@@ -12326,15 +12998,46 @@ if (cameraFilterBtn) {
   });
 }
 
+function setMesoFilterOpen(open) {
+  const panel = document.getElementById('settings-section-meso');
+  const btn = document.getElementById('meso-filter-btn');
+  if (!panel || !btn) return;
+  panel.classList.toggle('open', open);
+  btn.classList.toggle('open', open);
+  btn.setAttribute('aria-expanded', open ? 'true' : 'false');
+}
+
+function setAlertsFilterOpen(open) {
+  const panel = document.getElementById('settings-section-alerts');
+  const btn = document.getElementById('alerts-filter-btn');
+  if (!panel || !btn) return;
+  panel.classList.toggle('open', open);
+  btn.classList.toggle('open', open);
+  btn.setAttribute('aria-expanded', open ? 'true' : 'false');
+}
+
+function syncMesoFilterUi() {
+  if (toggleMesoPrecip) toggleMesoPrecip.checked = mesoFilterSelection.precip !== false;
+  if (toggleMesoConvective) toggleMesoConvective.checked = mesoFilterSelection.convective !== false;
+  if (toggleMesoWinter) toggleMesoWinter.checked = mesoFilterSelection.winter !== false;
+}
+
 const toggleSpc = document.getElementById('toggle-spc');
 const toggleMeso = document.getElementById('toggle-meso');
+const toggleMesoPrecip = document.getElementById('toggle-meso-precip');
+const toggleMesoConvective = document.getElementById('toggle-meso-convective');
+const toggleMesoWinter = document.getElementById('toggle-meso-winter');
 const toggleAlerts = document.getElementById('toggle-alerts');
 const toggleWatches = document.getElementById('toggle-watches');
 const toggleLightning = document.getElementById('toggle-lightning');
 const toggleTvs = document.getElementById('toggle-tvs');
+const toggleRadarSites = document.getElementById('toggle-radar-sites');
 const toggleStormReportsLsr = document.getElementById('toggle-storm-reports-lsr');
 const toggleStormReportsSpotter = document.getElementById('toggle-storm-reports-spotter');
+const toggleMping = document.getElementById('toggle-mping');
+const toggleSpotterLocations = document.getElementById('toggle-spotter-locations');
 const spcFilterBtn = document.getElementById('spc-filter-btn');
+const mesoFilterBtn = document.getElementById('meso-filter-btn');
 const stormFilterBtn = document.getElementById('storm-filter-btn');
 const colorsFilterBtn = document.getElementById('colors-filter-btn');
 const warningPrefsBtn = document.getElementById('warning-prefs-btn');
@@ -12343,7 +13046,10 @@ const warningPrefsClose = document.getElementById('warning-prefs-close');
 const warningSettingsList = document.getElementById('warning-settings-list');
 const mapStyleSelect = document.getElementById('app-map-style');
 const appClearCacheBtn = document.getElementById('app-clear-cache');
+const appCacheExpandBtn = document.getElementById('app-cache-expand');
 const appCacheStatus = document.getElementById('app-cache-status');
+const appCacheUsage = document.getElementById('app-cache-usage');
+const appCacheFiles = document.getElementById('app-cache-files');
 const appUpdateCheckBtn = document.getElementById('app-update-check');
 const appUpdateStatus = document.getElementById('app-update-status');
 const appUpdateOverlay = document.getElementById('app-update-overlay');
@@ -12492,6 +13198,45 @@ function syncMapStyleUi() {
 
 function setAppCacheStatus(text) {
   if (appCacheStatus) appCacheStatus.textContent = text;
+}
+
+let appCacheDetailsOpen = false;
+let appCacheStatsBusy = false;
+
+function setAppCacheDetailsOpen(open) {
+  appCacheDetailsOpen = !!open;
+  const panel = document.getElementById('settings-section-cache');
+  if (panel) panel.classList.toggle('open', appCacheDetailsOpen);
+  appCacheExpandBtn?.classList.toggle('open', appCacheDetailsOpen);
+  appCacheExpandBtn?.setAttribute('aria-expanded', appCacheDetailsOpen ? 'true' : 'false');
+  if (appCacheDetailsOpen) void refreshAppCacheStats();
+}
+
+function syncAppCacheUi() {
+  appCacheExpandBtn?.classList.toggle('open', appCacheDetailsOpen);
+  appCacheExpandBtn?.setAttribute('aria-expanded', appCacheDetailsOpen ? 'true' : 'false');
+}
+
+async function refreshAppCacheStats() {
+  if (appCacheStatsBusy) return;
+  appCacheStatsBusy = true;
+  if (appCacheUsage) appCacheUsage.textContent = 'Used storage: Loading...';
+  if (appCacheFiles) appCacheFiles.textContent = 'Files: Loading...';
+  try {
+    const stats = await invoke('get_decode_cache_stats');
+    const totalBytes = Number(stats?.totalBytes || 0);
+    const fileCount = Number(stats?.fileCount || 0);
+    if (appCacheUsage) appCacheUsage.textContent = `Used storage: ${formatCacheBytes(totalBytes)}`;
+    if (appCacheFiles) appCacheFiles.textContent = `Files: ${fileCount.toLocaleString()}`;
+    if (!appCacheStatus?.textContent) setAppCacheStatus(fileCount ? 'Cache details loaded' : 'Cache is empty');
+  } catch (err) {
+    const message = err?.message || String(err);
+    if (appCacheUsage) appCacheUsage.textContent = 'Used storage: Unavailable';
+    if (appCacheFiles) appCacheFiles.textContent = 'Files: Unavailable';
+    setAppCacheStatus(`Cache details failed: ${message.slice(0, 48)}`);
+  } finally {
+    appCacheStatsBusy = false;
+  }
 }
 
 function setAppUpdateStatus(text = '', tone = '') {
@@ -12826,11 +13571,17 @@ async function clearAppCaches() {
   } finally {
     clearCacheBusy = false;
     if (appClearCacheBtn) appClearCacheBtn.disabled = false;
+    if (appCacheDetailsOpen) void refreshAppCacheStats();
   }
 }
 
 appClearCacheBtn?.addEventListener('click', () => {
   void clearAppCaches();
+});
+
+appCacheExpandBtn?.addEventListener('click', e => {
+  e.stopPropagation();
+  setAppCacheDetailsOpen(!appCacheDetailsOpen);
 });
 
 warningDashboardBtn?.addEventListener('click', (e) => {
@@ -12901,6 +13652,33 @@ if (toggleMeso) {
   });
 }
 
+mesoFilterBtn?.addEventListener('click', e => {
+  e.stopPropagation();
+  const panel = document.getElementById('settings-section-meso');
+  const open = !panel?.classList.contains('open');
+  setMesoFilterOpen(open);
+});
+
+document.getElementById('alerts-filter-btn')?.addEventListener('click', e => {
+  e.stopPropagation();
+  const panel = document.getElementById('settings-section-alerts');
+  const open = !panel?.classList.contains('open');
+  setAlertsFilterOpen(open);
+});
+
+[
+  ['precip', toggleMesoPrecip],
+  ['convective', toggleMesoConvective],
+  ['winter', toggleMesoWinter],
+].forEach(([kind, input]) => {
+  input?.addEventListener('change', async () => {
+    mesoFilterSelection[kind] = !!input.checked;
+    if (mesoVisible) await refreshMesoOverlay(true);
+    else _setMesoLayersVisible(false);
+    saveSettings();
+  });
+});
+
 if (toggleAlerts) {
   toggleAlerts.addEventListener('change', () => {
     alertsVisible = Boolean(toggleAlerts.checked);
@@ -12933,6 +13711,14 @@ if (toggleTvs) {
     tvsVisible = Boolean(toggleTvs.checked);
     if (tvsVisible) await refreshTvsOverlay(true, { forceNetwork: true });
     else _setTvsLayersVisible(false);
+    saveSettings();
+  });
+}
+
+if (toggleRadarSites) {
+  toggleRadarSites.addEventListener('change', () => {
+    radarSitesVisible = Boolean(toggleRadarSites.checked);
+    setStationLayersVisible(radarSitesVisible);
     saveSettings();
   });
 }
@@ -12983,6 +13769,47 @@ if (toggleStormReportsSpotter) {
     stormReportsVisible = stormReportsLsrVisible || stormReportsSpotterVisible;
     if (stormReportsVisible) await refreshStormReports(true, { forceNetwork: true });
     else _setStormReportLayersVisible(false);
+    saveSettings();
+  });
+}
+
+document.getElementById('mping-api-token')?.addEventListener('change', e => {
+  mpingApiToken = e.target.value.trim();
+  saveSettings();
+  // Force a refresh if layer is visible so the new token takes effect
+  if (mpingVisible) { mpingLastFetch = 0; void refreshMpingLayer(true); }
+});
+
+if (toggleMping) {
+  toggleMping.addEventListener('change', async () => {
+    mpingVisible = Boolean(toggleMping.checked);
+    if (mpingVisible) {
+      await refreshMpingLayer(true);
+      if (mpingPollTimer == null) {
+        mpingPollTimer = setInterval(() => { if (mpingVisible) refreshMpingLayer(); }, MPING_POLL_MS);
+      }
+    } else {
+      await refreshMpingLayer();
+      clearInterval(mpingPollTimer);
+      mpingPollTimer = null;
+    }
+    saveSettings();
+  });
+}
+
+if (toggleSpotterLocations) {
+  toggleSpotterLocations.addEventListener('change', async () => {
+    spotterLocationsVisible = Boolean(toggleSpotterLocations.checked);
+    if (spotterLocationsVisible) {
+      await refreshSpotterLocationLayer(true);
+      if (spotterLocationsPollTimer == null) {
+        spotterLocationsPollTimer = setInterval(() => { if (spotterLocationsVisible) refreshSpotterLocationLayer(); }, SPOTTER_LOCATIONS_POLL_MS);
+      }
+    } else {
+      await refreshSpotterLocationLayer();
+      clearInterval(spotterLocationsPollTimer);
+      spotterLocationsPollTimer = null;
+    }
     saveSettings();
   });
 }
@@ -13709,7 +14536,7 @@ function _applyLocalRadarDecoded(path, fileName, data, opts = {}) {
   };
 
   setActiveSelectionUi(activeFamily, activeTilt);
-  setStationLayersVisible(true);
+  setStationLayersVisible(radarSitesVisible);
   if (map.getLayer('stations-active')) map.setFilter('stations-active', ['==', 'id', '']);
   if (map.getLayer('stations-hover')) map.setFilter('stations-hover', ['==', 'id', '']);
 
@@ -13855,7 +14682,7 @@ document.addEventListener('keydown', e => {
     let switched = false;
     if (k === 'r') switched = quickSwitchFamily(['REF']);
     else if (k === 'v') switched = quickSwitchFamily(['VEL']);
-    else if (k === 'e') switched = quickSwitchFamily(['ET', 'ET18']);
+    else if (k === 'e') switched = quickSwitchFamily(['EET', 'ET', 'ET18']);
     else if (k === 'c') switched = quickSwitchFamily(['CC']);
     if (switched) {
       e.preventDefault();
@@ -13948,6 +14775,44 @@ document.getElementById('tools-btn')?.addEventListener('click', (e) => {
 document.getElementById('draw-btn')?.addEventListener('click', () => {
   closeToolsMenu();
   if (drawMode) exitDrawMode(); else startDrawMode();
+});
+
+// -- My Location (client-side only, never transmitted) -------------------------
+let _locationMarker = null;
+let _locationWatchId = null;
+let _locationEnabled = false;
+
+function _setLocationEnabled(enabled) {
+  _locationEnabled = enabled;
+  const btn = document.getElementById('my-location-btn');
+  if (btn) btn.classList.toggle('active', enabled);
+  if (!enabled) {
+    if (_locationWatchId != null) { navigator.geolocation.clearWatch(_locationWatchId); _locationWatchId = null; }
+    if (_locationMarker) { _locationMarker.remove(); _locationMarker = null; }
+    return;
+  }
+  if (!navigator.geolocation) {
+    alert('Geolocation is not supported by this browser.');
+    _locationEnabled = false;
+    if (btn) btn.classList.remove('active');
+    return;
+  }
+  const dot = document.createElement('div');
+  dot.className = 'my-location-dot';
+  _locationMarker = new mapboxgl.Marker({ element: dot, anchor: 'center' });
+  _locationWatchId = navigator.geolocation.watchPosition(
+    pos => {
+      const { longitude, latitude } = pos.coords;
+      _locationMarker.setLngLat([longitude, latitude]).addTo(map);
+    },
+    err => { console.warn('[Location] error', err.message); },
+    { enableHighAccuracy: true, timeout: 15000, maximumAge: 10000 },
+  );
+}
+
+document.getElementById('my-location-btn')?.addEventListener('click', () => {
+  closeToolsMenu();
+  _setLocationEnabled(!_locationEnabled);
 });
 
 async function startRecentFramesDownload(count = recentWiseFrameCount) {
@@ -14322,6 +15187,7 @@ if (familySelect) {
       clearStaleQueueItems();
       restartActiveRadarPolling();
       if (!showCachedActiveCombo()) {
+        _clearVisiblePrimaryForPendingCombo('family-change');
         setFrameLabel('Loading...', 'loading');
         loadHistory(activeStation, next, activeTilt, { preferCache: false, currentOnly: true });
       }
@@ -14402,6 +15268,7 @@ if (tiltSelect) {
       clearStaleQueueItems();
       restartActiveRadarPolling();
       if (!showCachedActiveCombo()) {
+        _clearVisiblePrimaryForPendingCombo('tilt-change');
         setFrameLabel('Loading...', 'loading');
         loadHistory(activeStation, activeFamily, activeTilt, { preferCache: false, currentOnly: true });
       }
@@ -16911,7 +17778,14 @@ function _createYouTubePanel(parsed) {
 
   shareBtn.addEventListener('click', () => { void _copyTextWithFeedback(parsed.shareUrl || parsed.embedUrl, shareBtn); });
   fullscreenBtn.addEventListener('click', () => {
-    if (panel.requestFullscreen) panel.requestFullscreen();
+    if (document.fullscreenElement === panel) {
+      document.exitFullscreen();
+    } else if (panel.requestFullscreen) {
+      panel.requestFullscreen();
+    }
+  });
+  panel.addEventListener('fullscreenchange', () => {
+    _setFullscreenIcon(fullscreenBtn, document.fullscreenElement === panel);
   });
   closeBtn.addEventListener('click', () => {
     if (floatingPanelPointerState?.panel === panel) floatingPanelPointerState = null;
@@ -17397,9 +18271,27 @@ function closeCamera() {
 document.getElementById('camera-close')?.addEventListener('click', closeCamera);
 document.getElementById('camera-share')?.addEventListener('click', () => { void _copyCameraShareUrl(); });
 
+const _ICON_ENTER_FS = 'M4 9V4h5v2H6v3H4Zm10-5h6v6h-2V6h-4V4ZM4 15h2v3h3v2H4v-5Zm14 3v-3h2v5h-5v-2h3Z';
+const _ICON_EXIT_FS  = 'M5 16h3v3h2v-5H5v2Zm3-8H5v2h5V5H8v3Zm6 11h2v-3h3v-2h-5v5Zm2-11V5h-2v5h5V8h-3Z';
+
+function _setFullscreenIcon(btn, isFs) {
+  const path = btn?.querySelector('path');
+  if (path) path.setAttribute('d', isFs ? _ICON_EXIT_FS : _ICON_ENTER_FS);
+}
+
+document.addEventListener('fullscreenchange', () => {
+  const cameraBtn = document.getElementById('camera-fullscreen');
+  const popup = document.getElementById('camera-popup');
+  _setFullscreenIcon(cameraBtn, document.fullscreenElement === popup);
+});
+
 document.getElementById('camera-fullscreen')?.addEventListener('click', () => {
   const popup = document.getElementById('camera-popup');
-  if (popup?.requestFullscreen) popup.requestFullscreen();
+  if (document.fullscreenElement === popup) {
+    document.exitFullscreen();
+  } else if (popup?.requestFullscreen) {
+    popup.requestFullscreen();
+  }
 });
 
 _attachFloatingPanelInteractions(
@@ -17459,6 +18351,8 @@ function saveSettings() {
       spcDay,
       spcType,
       mesoVisible,
+      mesoFilterSelection,
+      radarSitesVisible,
       watchesVisible,
       lightningVisible,
       tvsVisible,
@@ -17467,6 +18361,9 @@ function saveSettings() {
       stormReportsWindow,
       stormReportsLsrVisible,
       stormReportsSpotterVisible,
+      mpingVisible,
+      mpingApiToken,
+      spotterLocationsVisible,
       camerasOverlayVisible,
       cameraFilterSelection,
       cameraVideoOnly,
@@ -17489,11 +18386,7 @@ function loadSettings() {
       mapStyle = s.mapStyle;
     }
     if (s.dbzFilter != null) {
-      dbzFilter = Number(s.dbzFilter);
-      const sl = document.getElementById('dbz-slider');
-      const vl = document.getElementById('dbz-val');
-      if (sl) sl.value = String(dbzFilter);
-      if (vl) vl.textContent = `${dbzFilter} dBZ`;
+      _setDbzFilter(s.dbzFilter, { apply: false, persist: false });
     }
     if (s.liveSweepEnabled != null) {
       liveSweepEnabled = Boolean(s.liveSweepEnabled);
@@ -17509,6 +18402,14 @@ function loadSettings() {
     }
     if (s.spcVisible != null) spcVisible = Boolean(s.spcVisible);
     if (s.mesoVisible != null) mesoVisible = Boolean(s.mesoVisible);
+    if (s.mesoFilterSelection && typeof s.mesoFilterSelection === 'object') {
+      mesoFilterSelection = {
+        precip: s.mesoFilterSelection.precip !== false,
+        convective: s.mesoFilterSelection.convective !== false,
+        winter: s.mesoFilterSelection.winter !== false,
+      };
+    }
+    if (s.radarSitesVisible != null) radarSitesVisible = Boolean(s.radarSitesVisible);
     if (s.watchesVisible != null) watchesVisible = Boolean(s.watchesVisible);
     if (s.lightningVisible != null) lightningVisible = Boolean(s.lightningVisible);
     if (s.tvsVisible != null) tvsVisible = Boolean(s.tvsVisible);
@@ -17532,6 +18433,13 @@ function loadSettings() {
       }
     }
     stormReportsVisible = stormReportsLsrVisible || stormReportsSpotterVisible;
+    if (s.mpingVisible != null) mpingVisible = Boolean(s.mpingVisible);
+    if (typeof s.mpingApiToken === 'string') {
+      mpingApiToken = s.mpingApiToken;
+      const tokenEl = document.getElementById('mping-api-token');
+      if (tokenEl) tokenEl.value = mpingApiToken;
+    }
+    if (s.spotterLocationsVisible != null) spotterLocationsVisible = Boolean(s.spotterLocationsVisible);
     if (s.camerasOverlayVisible != null) camerasOverlayVisible = Boolean(s.camerasOverlayVisible);
     if (s.cameraFilterSelection && typeof s.cameraFilterSelection === 'object') {
       cameraFilterSelection = {
@@ -17564,6 +18472,7 @@ function loadSettings() {
       camerasOverlayVisible = Object.values(cameraFilterSelection).some(Boolean);
     }
     syncSpcFilterUi();
+    syncMesoFilterUi();
     syncStormFilterUi();
     syncMapStyleUi();
     syncNwwsSettingsUi();
@@ -17579,6 +18488,8 @@ function loadSettings() {
     if (spcTog) spcTog.checked = spcVisible;
     const mesoTog = document.getElementById('toggle-meso');
     if (mesoTog) mesoTog.checked = mesoVisible;
+    const radarSitesTog = document.getElementById('toggle-radar-sites');
+    if (radarSitesTog) radarSitesTog.checked = radarSitesVisible;
     const watchTog = document.getElementById('toggle-watches');
     if (watchTog) watchTog.checked = watchesVisible;
     const lightningTog = document.getElementById('toggle-lightning');
@@ -17591,12 +18502,41 @@ function loadSettings() {
     if (stormLsrTog) stormLsrTog.checked = stormReportsLsrVisible;
     const stormSpotterTog = document.getElementById('toggle-storm-reports-spotter');
     if (stormSpotterTog) stormSpotterTog.checked = stormReportsSpotterVisible;
+    const mpingTog = document.getElementById('toggle-mping');
+    if (mpingTog) mpingTog.checked = mpingVisible;
+    const spotterLocTog = document.getElementById('toggle-spotter-locations');
+    if (spotterLocTog) spotterLocTog.checked = spotterLocationsVisible;
     _setAlertLayersVisible(alertsVisible);
   } catch (_) {}
 }
 
 // -- Color table management ----------------------------------------------------
 const CT_FAMILIES = ['REF', 'VEL', 'SRV', 'CC', 'ZDR', 'SW'];
+const EET_DEFAULT_PALETTE = {
+  product: 'ET',
+  units: 'KFT',
+  scale: 1,
+  step: 5,
+  stops: [
+    [10.0, 150, 225, 255, 255],
+    [15.0,  25, 215, 255, 255],
+    [20.0,  15, 125, 215, 255],
+    [25.0,  15, 100, 115, 255],
+    [30.0,  50, 255, 225, 255],
+    [35.0,  25, 180, 150, 255],
+    [40.0, 255, 255,   0, 255],
+    [45.0, 220, 180,   0, 255],
+    [50.0, 155,  65,   0, 255],
+    [52.0, 125,  65,   0, 255],
+    [55.0, 255,  55,   0, 255],
+    [57.0, 125,  25,   0, 255],
+    [59.0, 200,  50, 255, 255],
+    [63.0,  75,   0, 200, 255],
+    [65.0,  50,   0, 100, 255],
+    [66.0,  50,   0,  75, 255],
+    [70.0,  25,   0,  50, 255],
+  ],
+};
 const CT_DEFAULT_PALETTES = {
   REF: {
     product: 'REF',
@@ -17758,6 +18698,7 @@ const CT_DEFAULT_PALETTES = {
       [8.00, 236, 241, 247, 250],
     ],
   },
+  EET: EET_DEFAULT_PALETTE,
 };
 
 // Default gradient CSS for preview bars
@@ -18061,12 +19002,15 @@ setTimeout(() => {
 
 // Refresh dynamic overlays in the background while enabled.
 setInterval(() => {
-  if (mesoVisible) refreshMesoOverlay(true, { forceNetwork: true });
   if (watchesVisible) refreshWatchesOverlay(true, { forceNetwork: true });
   if (tvsVisible) refreshTvsOverlay(true, { forceNetwork: true });
   if (stormReportsVisible) refreshStormReports(true, { forceNetwork: true });
   if (_alertsCleanupExpired()) _alertsScheduleSourceUpdate();
 }, 120000);
+
+setInterval(() => {
+  if (mesoVisible) refreshMesoOverlay(true, { forceNetwork: true });
+}, 30000);
 
 setInterval(() => {
   if (lightningVisible) void refreshLightningOverlay(true, { forceNetwork: true });
@@ -18111,6 +19055,18 @@ function _runDeferredStartupSync() {
   else _setWatchLayersVisible(false);
   if (tvsVisible) void refreshTvsOverlay(true, { forceNetwork: true });
   else _setTvsLayersVisible(false);
+  if (mpingVisible) {
+    void refreshMpingLayer(true);
+    if (mpingPollTimer == null) {
+      mpingPollTimer = setInterval(() => { if (mpingVisible) refreshMpingLayer(); }, MPING_POLL_MS);
+    }
+  }
+  if (spotterLocationsVisible) {
+    void refreshSpotterLocationLayer(true);
+    if (spotterLocationsPollTimer == null) {
+      spotterLocationsPollTimer = setInterval(() => { if (spotterLocationsVisible) refreshSpotterLocationLayer(); }, SPOTTER_LOCATIONS_POLL_MS);
+    }
+  }
 }
 
 function _scheduleDeferredStartupSync() {
@@ -18651,7 +19607,7 @@ function enableLevelII() {
     cancelSweep();
     setDataLevelButtons(2);
     saveSettings();
-    setStationLayersVisible(true);
+    setStationLayersVisible(radarSitesVisible);
     populateFamilySelectL2();
     if (tiltSelect) tiltSelect.disabled = false;
     _reloadLocalRadarFile({ recenter: false });
@@ -18668,7 +19624,7 @@ function enableLevelII() {
   cancelSweep();
   setDataLevelButtons(2);
   saveSettings();
-  setStationLayersVisible(true);
+  setStationLayersVisible(radarSitesVisible);
   // Switch to L2 products in family select
   populateFamilySelectL2();
   // Switch tilt select to index-based (populated after first decode)
@@ -18698,7 +19654,7 @@ function enableLevelIII() {
     cancelSweep();
     setDataLevelButtons(3);
     saveSettings();
-    setStationLayersVisible(true);
+    setStationLayersVisible(radarSitesVisible);
     populateFamilySelectL3(activeStation);
     activeTilt = restoreTiltSelectL3(activeStation, activeFamily, activeTilt) || activeTilt;
     _reloadLocalRadarFile({ recenter: false });
@@ -18714,7 +19670,7 @@ function enableLevelIII() {
   cancelSweep();
   setDataLevelButtons(3);
   saveSettings();
-  setStationLayersVisible(true);
+  setStationLayersVisible(radarSitesVisible);
   // Restore L3 UI
   populateFamilySelectL3(activeStation);
   activeTilt = restoreTiltSelectL3(activeStation, activeFamily, activeTilt) || activeTilt;

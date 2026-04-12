@@ -4,6 +4,7 @@
   "private": true,
   "type": "commonjs",
   "dependencies": {
+    "@atmosx/event-product-parser": "^2.0.12",
     "atmosx-nwws-parser": "^1.0.1923"
   }
 }
