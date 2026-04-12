@@ -8,7 +8,7 @@
 
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 
-  <title>NEXRAD Radar</title>
+  <title>Radar Thingy Dingy</title>
 
   <link href="https://api.mapbox.com/mapbox-gl-js/v3.4.0/mapbox-gl.css" rel="stylesheet" />
 
@@ -155,7 +155,7 @@
 
       z-index: 35;
 
-      width: 66px; height: 30px;
+      width: 82px; height: 38px;
 
     }
 
@@ -167,7 +167,7 @@
 
       top: 0;
 
-      width: 30px; height: 30px;
+      width: 38px; height: 38px;
 
       border: 1px solid #2a2a2a; border-radius: 4px;
 
@@ -203,9 +203,9 @@
 
     .icon-search {
 
-      width: 15px;
+      width: 19px;
 
-      height: 15px;
+      height: 19px;
 
       display: block;
 
@@ -219,11 +219,11 @@
 
       top: 0;
 
-      left: 36px;
+      left: 44px;
 
-      width: 30px;
+      width: 38px;
 
-      height: 30px;
+      height: 38px;
 
     }
 
@@ -680,6 +680,11 @@
       pointer-events: auto;
     }
 
+    #settings-section-meso .settings-section-body,
+    #settings-section-alerts .settings-section-body {
+      background: rgba(0,0,0,0.6);
+    }
+
     .settings-section-inner {
       overflow: hidden;
       min-height: 0;
@@ -701,8 +706,53 @@
     }
 
     .settings-cache-row {
-      gap: 0;
+      gap: 8px;
       align-items: center;
+    }
+
+    .settings-section-head-static {
+      cursor: default;
+    }
+
+    .settings-section-body-static {
+      display: grid;
+      grid-template-rows: 1fr;
+      visibility: visible;
+      pointer-events: auto;
+    }
+
+    .settings-inline-actions {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      flex-wrap: wrap;
+      justify-content: flex-end;
+    }
+
+    .settings-inline-expander {
+      width: 30px;
+      min-width: 30px;
+      padding-left: 0;
+      padding-right: 0;
+    }
+
+    .settings-inline-expander svg {
+      width: 14px;
+      height: 14px;
+      transition: transform 0.18s ease;
+    }
+
+    .settings-inline-expander.open svg {
+      transform: rotate(90deg);
+    }
+
+    .settings-cache-meta {
+      display: grid;
+      gap: 6px;
+    }
+
+    .settings-cache-meta .sp-note {
+      text-align: left;
     }
 
     .toggle { position: relative; display: inline-block; width: 44px; height: 24px; flex-shrink: 0; }
@@ -778,6 +828,41 @@
       background: #1d6ef5;
       border: none;
       cursor: pointer;
+    }
+
+    .sp-number {
+      width: 68px;
+      height: 28px;
+      border: 1px solid #2a2a2a;
+      border-radius: 5px;
+      background: #0b0b0b;
+      color: #e7e7e7;
+      padding: 4px 8px;
+      outline: none;
+      box-sizing: border-box;
+      font: inherit;
+      font-size: 12px;
+      text-align: right;
+      font-variant-numeric: tabular-nums;
+      appearance: textfield;
+      -moz-appearance: textfield;
+    }
+
+    .sp-number:focus {
+      border-color: #4a78ff;
+    }
+
+    .sp-number::-webkit-outer-spin-button,
+    .sp-number::-webkit-inner-spin-button {
+      -webkit-appearance: none;
+      margin: 0;
+    }
+
+    .sp-unit {
+      font-size: 11px;
+      color: #8d8d8d;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
     }
 
     .sp-btn {
@@ -2392,6 +2477,39 @@
 
     }
 
+    /* Crosshair center dot — only visible in multi-pane mode */
+    .pane-crosshair {
+      position: absolute;
+      top: 50%; left: 50%;
+      transform: translate(-50%, -50%);
+      width: 8px; height: 8px;
+      border-radius: 50%;
+      background: rgba(255,255,255,0.9);
+      box-shadow: 0 0 0 1.5px rgba(0,0,0,0.55), 0 0 4px rgba(0,0,0,0.4);
+      z-index: 5;
+      pointer-events: none;
+      display: none;
+    }
+    #map-grid.panes-2 .pane-crosshair,
+    #map-grid.panes-3 .pane-crosshair,
+    #map-grid.panes-4 .pane-crosshair {
+      display: block;
+    }
+
+    /* My Location blue dot marker */
+    .my-location-dot {
+      width: 16px; height: 16px;
+      border-radius: 50%;
+      background: #4a90ff;
+      border: 2.5px solid #fff;
+      box-shadow: 0 0 0 2px rgba(74,144,255,0.4), 0 2px 6px rgba(0,0,0,0.5);
+      cursor: default;
+    }
+
+    #my-location-btn.active {
+      color: #4a90ff;
+    }
+
     #camera-popup,
     .youtube-panel {
 
@@ -2699,7 +2817,7 @@
     #warning-prefs-modal,
     #nwws-login-modal,
     #app-update-modal {
-      width: min(1120px, calc(100vw - 28px));
+      width: min(1040px, calc(100vw - 28px));
       max-height: min(86vh, calc(100vh - 36px));
       display: grid;
       grid-template-rows: auto 1fr;
@@ -2739,7 +2857,7 @@
       align-items: flex-start;
       justify-content: space-between;
       gap: 18px;
-      padding: 18px 20px 16px;
+      padding: 16px 18px 14px;
       border-bottom: 1px solid #1c1c1c;
     }
 
@@ -2770,7 +2888,7 @@
     }
 
     .warning-prefs-title {
-      font-size: 24px;
+      font-size: 22px;
       font-weight: 800;
       line-height: 1.05;
       color: #f0f0f0;
@@ -2844,7 +2962,7 @@
     #nwws-login-body,
     #app-update-body {
       overflow: auto;
-      padding: 14px;
+      padding: 12px;
       scrollbar-gutter: stable;
     }
 
@@ -2855,7 +2973,7 @@
     #app-update-body {
       padding: 14px 18px 18px;
       display: grid;
-      gap: 14px;
+      gap: 12px;
     }
 
     #warning-prefs-body::-webkit-scrollbar,
@@ -3002,7 +3120,7 @@
     }
 
     .warning-pref-category-header {
-      padding: 16px 2px 6px;
+      padding: 14px 2px 6px;
       font-size: 10px;
       font-weight: 700;
       letter-spacing: 0.14em;
@@ -3018,8 +3136,8 @@
     .warning-setting-card {
       position: relative;
       display: grid;
-      gap: 12px;
-      padding: 14px;
+      gap: 10px;
+      padding: 12px;
       border-radius: 8px;
       border: 1px solid #202020;
       background: linear-gradient(180deg, rgba(255,255,255,0.012), rgba(255,255,255,0)), #101010;
@@ -3050,14 +3168,14 @@
     }
 
     .warning-setting-title {
-      font-size: 14px;
+      font-size: 13px;
       font-weight: 700;
       line-height: 1.3;
       color: #f1f1f1;
     }
 
     .warning-setting-code {
-      font-size: 10px;
+      font-size: 9px;
       letter-spacing: 0.12em;
       text-transform: uppercase;
       color: #777;
@@ -3078,9 +3196,9 @@
     .warning-setting-color {
       display: flex;
       align-items: center;
-      gap: 10px;
-      min-height: 34px;
-      padding: 6px 10px;
+      gap: 8px;
+      min-height: 30px;
+      padding: 5px 9px;
       border-radius: 6px;
       border: 1px solid #262626;
       background: #0a0a0a;
@@ -3092,7 +3210,7 @@
 
     .warning-setting-chip-label,
     .warning-setting-sound-label {
-      font-size: 10px;
+      font-size: 9px;
       font-weight: 700;
       letter-spacing: 0.1em;
       text-transform: uppercase;
@@ -3101,8 +3219,8 @@
     }
 
     .warning-setting-color input[type="color"] {
-      width: 38px;
-      height: 24px;
+      width: 34px;
+      height: 22px;
       border: 1px solid #323232;
       border-radius: 4px;
       padding: 0;
@@ -3111,9 +3229,9 @@
     }
 
     .warning-setting-sound select {
-      min-width: 150px;
-      max-width: 220px;
-      height: 24px;
+      min-width: 142px;
+      max-width: 210px;
+      height: 22px;
       border: 1px solid #2a2a2a;
       border-radius: 3px;
       background: #000;
@@ -3134,7 +3252,10 @@
     }
 
     .warning-setting-preview {
-      min-width: 78px;
+      min-width: 70px;
+      min-height: 30px;
+      padding-top: 6px;
+      padding-bottom: 6px;
     }
 
     @media (max-width: 760px) {
@@ -3987,6 +4108,8 @@
 
       <div class="pane-frame-time" id="pane-frame-time-1">--:--:--</div>
 
+      <div class="pane-crosshair"></div>
+
     </div>
 
   </div>
@@ -4071,7 +4194,8 @@
                 <span class="sp-row-label">DBZ Filter</span>
                 <div class="sp-row-right">
                   <input class="sp-slider" type="range" id="dbz-slider" min="-30" max="75" value="-30" step="1">
-                  <span class="sp-val" id="dbz-val">-30 dBZ</span>
+                  <input class="sp-number" type="text" id="dbz-number" inputmode="numeric" value="-30">
+                  <span class="sp-unit">dBZ</span>
                 </div>
               </div>
 
@@ -4086,6 +4210,14 @@
                 <span class="sp-row-label">Live Sweep</span>
                 <label class="toggle">
                   <input type="checkbox" id="toggle-sweep">
+                  <span class="toggle-track"></span>
+                </label>
+              </div>
+
+              <div class="sp-row">
+                <span class="sp-row-label">Radar Sites</span>
+                <label class="toggle">
+                  <input type="checkbox" id="toggle-radar-sites">
                   <span class="toggle-track"></span>
                 </label>
               </div>
@@ -4131,20 +4263,73 @@
                 </div>
               </div>
 
-              <div class="sp-row">
-                <span class="sp-row-label">Mesoscale Discussions</span>
-                <label class="toggle">
-                  <input type="checkbox" id="toggle-meso">
-                  <span class="toggle-track"></span>
-                </label>
+              <div class="settings-section" id="settings-section-meso">
+                <div class="sp-row settings-section-head">
+                  <div class="settings-row-left">
+                    <button class="sp-btn sp-filter-btn settings-expander-btn" id="meso-filter-btn" type="button" title="Mesoscale Discussion Options" aria-expanded="false">
+                      <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+                        <path d="m9 6 6 6-6 6-1.41-1.41L12.17 12 7.59 7.41 9 6Z"/>
+                      </svg>
+                    </button>
+                    <span class="sp-row-label">Mesoscale Discussions</span>
+                  </div>
+                  <label class="toggle">
+                    <input type="checkbox" id="toggle-meso">
+                    <span class="toggle-track"></span>
+                  </label>
+                </div>
+                <div class="settings-section-body">
+                  <div class="settings-section-inner">
+                    <div class="sp-row settings-sub-row">
+                      <span class="sp-row-label">Precip</span>
+                      <label class="toggle">
+                        <input type="checkbox" id="toggle-meso-precip">
+                        <span class="toggle-track"></span>
+                      </label>
+                    </div>
+                    <div class="sp-row settings-sub-row">
+                      <span class="sp-row-label">Convective</span>
+                      <label class="toggle">
+                        <input type="checkbox" id="toggle-meso-convective">
+                        <span class="toggle-track"></span>
+                      </label>
+                    </div>
+                    <div class="sp-row settings-sub-row">
+                      <span class="sp-row-label">Winter</span>
+                      <label class="toggle">
+                        <input type="checkbox" id="toggle-meso-winter">
+                        <span class="toggle-track"></span>
+                      </label>
+                    </div>
+                  </div>
+                </div>
               </div>
 
-              <div class="sp-row">
-                <span class="sp-row-label">Warnings</span>
-                <label class="toggle">
-                  <input type="checkbox" id="toggle-alerts">
-                  <span class="toggle-track"></span>
-                </label>
+              <div class="settings-section" id="settings-section-alerts">
+                <div class="sp-row settings-section-head">
+                  <div class="settings-row-left">
+                    <button class="sp-btn sp-filter-btn settings-expander-btn" id="alerts-filter-btn" type="button" title="Warnings Options" aria-expanded="false">
+                      <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+                        <path d="m9 6 6 6-6 6-1.41-1.41L12.17 12 7.59 7.41 9 6Z"/>
+                      </svg>
+                    </button>
+                    <span class="sp-row-label">Warnings</span>
+                  </div>
+                  <label class="toggle">
+                    <input type="checkbox" id="toggle-alerts">
+                    <span class="toggle-track"></span>
+                  </label>
+                </div>
+                <div class="settings-section-body">
+                  <div class="settings-section-inner">
+                    <div class="sp-row settings-sub-row">
+                      <span class="sp-row-label">Customization</span>
+                      <div class="sp-row-right">
+                        <button class="sp-btn" id="warning-prefs-btn" type="button" aria-expanded="false">Customize</button>
+                      </div>
+                    </div>
+                  </div>
+                </div>
               </div>
 
               <div class="sp-row">
@@ -4206,6 +4391,22 @@
                     </div>
                   </div>
                 </div>
+              </div>
+
+              <div class="sp-row">
+                <span class="sp-row-label">mPING Reports</span>
+                <label class="toggle">
+                  <input type="checkbox" id="toggle-mping">
+                  <span class="toggle-track"></span>
+                </label>
+              </div>
+
+              <div class="sp-row">
+                <span class="sp-row-label">Spotter Locations</span>
+                <label class="toggle">
+                  <input type="checkbox" id="toggle-spotter-locations">
+                  <span class="toggle-track"></span>
+                </label>
               </div>
 
               <div class="settings-section" id="settings-section-camera">
@@ -4293,9 +4494,32 @@
               </div>
 
               <div class="sp-row">
+                <span class="sp-row-label">mPING API Token</span>
+                <div class="sp-row-right" style="flex:1;justify-content:flex-end;">
+                  <input type="password" id="mping-api-token" class="sp-number" style="width:120px;text-align:left;" placeholder="optional" autocomplete="off" spellcheck="false">
+                </div>
+              </div>
+
+              <div class="sp-row">
                 <span class="sp-row-label">Radar Data Cache</span>
                 <div class="sp-row-right settings-cache-row">
+                  <button class="sp-btn settings-inline-expander" id="app-cache-expand" type="button" aria-expanded="false" aria-controls="app-cache-details" title="Cache details">
+                    <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+                      <path d="m9 6 6 6-6 6-1.41-1.41L12.17 12 7.59 7.41 9 6Z"/>
+                    </svg>
+                  </button>
                   <button class="sp-btn" id="app-clear-cache" type="button">Delete Cache</button>
+                </div>
+              </div>
+              <div class="settings-section" id="settings-section-cache">
+                <div class="settings-section-body">
+                  <div class="settings-section-inner">
+                    <div class="settings-subblock settings-cache-meta" id="app-cache-details">
+                      <span class="sp-note" id="app-cache-status">Cache details unavailable</span>
+                      <span class="sp-note" id="app-cache-usage">Used storage: --</span>
+                      <span class="sp-note" id="app-cache-files">Files: --</span>
+                    </div>
+                  </div>
                 </div>
               </div>
 
@@ -4304,13 +4528,6 @@
                 <div class="sp-row-right" style="flex:1;justify-content:flex-end;gap:10px;">
                   <span class="sp-note" id="app-update-status">Not checked</span>
                   <button class="sp-btn" id="app-update-check" type="button">Check</button>
-                </div>
-              </div>
-
-              <div class="sp-row">
-                <span class="sp-row-label">Warnings</span>
-                <div class="sp-row-right">
-                  <button class="sp-btn" id="warning-prefs-btn" type="button" aria-expanded="false">Customize</button>
                 </div>
               </div>
 
@@ -4671,6 +4888,7 @@
             <button id="recent-frames-btn" class="tools-item" type="button">Download Recent Frames</button>
             <button id="draw-btn" class="tools-item" type="button">Drawing</button>
             <button id="multi-pane-btn" class="tools-item" type="button">Multi Pane</button>
+            <button id="my-location-btn" class="tools-item" type="button" title="Your location is never sent anywhere — stored on this device only">My Location</button>
           </div>
           <div id="recent-frames-menu">
             <div class="recent-frames-meta">Recent Frames</div>

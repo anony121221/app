@@ -95,6 +95,28 @@ fn stop_nwws_bridge_process_for_app(app: &AppHandle) {
     }
 }
 
+fn stop_backend_pool(pool: &Arc<Vec<Mutex<BackendState>>>) {
+    for backend in pool.iter() {
+        let mut guard = backend.lock().unwrap_or_else(|e| e.into_inner());
+        if let BackendState::Ready(inner) = &mut *guard {
+            terminate_child_process(&mut inner._child);
+        }
+        *guard = BackendState::Failed("Backend stopped".to_string());
+    }
+}
+
+fn stop_backend_pool_for_app(app: &AppHandle) {
+    if let Some(state) = app.try_state::<Backend>() {
+        stop_backend_pool(&state.0);
+    }
+}
+
+impl Drop for Backend {
+    fn drop(&mut self) {
+        stop_backend_pool(&self.0);
+    }
+}
+
 impl Drop for NwwsBridgeState {
     fn drop(&mut self) {
         stop_nwws_bridge_process(&self.child);
@@ -446,6 +468,13 @@ struct ClearDecodeCacheResponse {
     bytes_removed: u64,
 }
 
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DecodeCacheStatsResponse {
+    file_count: u64,
+    total_bytes: u64,
+}
+
 struct CacheFileEntry {
     path: PathBuf,
     size: u64,
@@ -685,6 +714,28 @@ fn clear_decode_cache_dir(app: &AppHandle) -> Result<ClearDecodeCacheResponse, S
     Ok(ClearDecodeCacheResponse {
         files_removed,
         bytes_removed,
+    })
+}
+
+fn decode_cache_stats_dir(app: &AppHandle) -> Result<DecodeCacheStatsResponse, String> {
+    let base_dir = decode_cache_base_dir(app)?;
+    if !base_dir.exists() {
+        return Ok(DecodeCacheStatsResponse {
+            file_count: 0,
+            total_bytes: 0,
+        });
+    }
+
+    let mut files = Vec::new();
+    collect_cache_files_recursive(&base_dir, &mut files)?;
+    let file_count = files.len() as u64;
+    let total_bytes = files
+        .iter()
+        .fold(0u64, |acc, entry| acc.saturating_add(entry.size));
+
+    Ok(DecodeCacheStatsResponse {
+        file_count,
+        total_bytes,
     })
 }
 
@@ -1892,6 +1943,10 @@ fn read_nwws_bridge_stdout(stdout: impl Read + Send + 'static, app: AppHandle) {
                 }
             }
         }
+        let _ = app.emit("nwws-log", serde_json::json!({
+            "level": "warn",
+            "message": "NWWS bridge stdout stream closed",
+        }));
     });
 }
 
@@ -1907,6 +1962,10 @@ fn read_nwws_bridge_stderr(stderr: impl Read + Send + 'static, app: AppHandle) {
                 }));
             }
         }
+        let _ = app.emit("nwws-log", serde_json::json!({
+            "level": "warn",
+            "message": "NWWS bridge stderr stream closed",
+        }));
     });
 }
 
@@ -1969,6 +2028,7 @@ fn start_nwws_bridge(
     let mut child = command
         .spawn()
         .map_err(|err| format!("Could not start Node NWWS bridge: {err}"))?;
+    let child_pid = child.id();
 
     let stdout = child
         .stdout
@@ -1988,6 +2048,18 @@ fn start_nwws_bridge(
             "phase": "starting",
             "message": "NWWS bridge launched",
             "alertCount": 0
+        }),
+    );
+    let _ = app.emit(
+        "nwws-log",
+        serde_json::json!({
+            "level": "info",
+            "message": format!(
+                "NWWS bridge process launched (pid={}, script={}, dataDir={})",
+                child_pid,
+                script.display(),
+                data_dir.display()
+            ),
         }),
     );
 
@@ -2275,6 +2347,11 @@ fn do_fetch_inner(url: String, depth: u8, timeout_ms: Option<u64>) -> Result<Fet
         return Err("Too many redirects while fetching URL".into());
     }
 
+    // mPING uses Django session auth — route through dedicated session client
+    if url.contains("mping.ou.edu") {
+        return do_fetch_mping(url);
+    }
+
     let timeout = timeout_ms
         .filter(|ms| *ms >= 1_000)
         .map(Duration::from_millis)
@@ -2468,6 +2545,74 @@ fn do_fetch_inner(url: String, depth: u8, timeout_ms: Option<u64>) -> Result<Fet
         body_base64: B64.encode(&bytes),
         final_url,
     })
+}
+
+// ── mPING session-cookie fetcher ──────────────────────────────────────────────
+// mPING uses Django session auth. Visiting /display/ sets a sessionid cookie
+// that authorises subsequent API calls on the same client instance.
+
+static MPING_CLIENT: OnceLock<reqwest::blocking::Client> = OnceLock::new();
+static MPING_SESSION_READY: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+fn get_mping_client() -> &'static reqwest::blocking::Client {
+    MPING_CLIENT.get_or_init(|| {
+        reqwest::blocking::Client::builder()
+            .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36")
+            .cookie_store(true)
+            .connect_timeout(Duration::from_secs(8))
+            .timeout(Duration::from_secs(20))
+            .build()
+            .expect("mPING HTTP client build failed")
+    })
+}
+
+fn ensure_mping_session() -> Result<(), String> {
+    if MPING_SESSION_READY.load(Ordering::Relaxed) {
+        return Ok(());
+    }
+    let client = get_mping_client();
+    // Visit the display page to receive a sessionid cookie
+    client
+        .get("https://mping.ou.edu/display/")
+        .header("Accept", "text/html,application/xhtml+xml,*/*;q=0.9")
+        .header("Referer", "https://mping.ou.edu/")
+        .send()
+        .map_err(|e| format!("mPING session init failed: {e}"))?;
+    MPING_SESSION_READY.store(true, Ordering::Relaxed);
+    Ok(())
+}
+
+fn do_fetch_mping(url: String) -> Result<FetchBase64Response, String> {
+    // Try up to twice: once with existing session, once after re-initialising it
+    for attempt in 0..2u8 {
+        if attempt == 1 {
+            // Force a fresh session on retry
+            MPING_SESSION_READY.store(false, Ordering::Relaxed);
+        }
+        ensure_mping_session()?;
+        let client = get_mping_client();
+        let resp = client
+            .get(&url)
+            .header("Accept", "application/json, text/javascript, */*; q=0.01")
+            .header("Referer", "https://mping.ou.edu/display/")
+            .header("X-Requested-With", "XMLHttpRequest")
+            .send()
+            .map_err(|e| e.to_string())?;
+        let status = resp.status().as_u16();
+        if status == 401 && attempt == 0 {
+            continue; // session expired — retry with fresh one
+        }
+        let final_url = resp.url().to_string();
+        let content_type = resp.headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("application/octet-stream")
+            .to_string();
+        let bytes = resp.bytes().map_err(|e| e.to_string())?;
+        return Ok(FetchBase64Response { status, content_type, body_base64: B64.encode(&bytes), final_url });
+    }
+    Err("mPING: could not establish session".into())
 }
 
 // Run the blocking HTTP fetch on a dedicated thread so it never stalls the async executor.
@@ -3151,6 +3296,13 @@ async fn clear_decode_cache(app: AppHandle) -> Result<ClearDecodeCacheResponse, 
 }
 
 #[tauri::command]
+async fn get_decode_cache_stats(app: AppHandle) -> Result<DecodeCacheStatsResponse, String> {
+    tauri::async_runtime::spawn_blocking(move || decode_cache_stats_dir(&app))
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
 fn get_app_version(app: AppHandle) -> String {
     app.package_info().version.to_string()
 }
@@ -3521,6 +3673,7 @@ pub fn run() {
             decode_local_file,
             prepare_local_file,
             clear_decode_cache,
+            get_decode_cache_stats,
             check_app_update,
             get_app_version,
             install_app_update,
@@ -3542,6 +3695,7 @@ pub fn run() {
             | tauri::RunEvent::ExitRequested { .. }
             | tauri::RunEvent::Exit => {
                 stop_nwws_bridge_process_for_app(app_handle);
+                stop_backend_pool_for_app(app_handle);
             }
             _ => {}
         }

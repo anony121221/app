@@ -1,6 +1,6 @@
 [package]
 name = "radar-app"
-version = "0.2.2"
+version = "0.2.4"
 description = "NEXRAD Level III Radar Viewer"
 authors = []
 edition = "2021"
@@ -20,6 +20,6 @@ tauri-build = { version = "2", features = [] }
 tauri = { version = "2", features = ["devtools"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-reqwest = { version = "0.12", features = ["blocking"] }
+reqwest = { version = "0.12", features = ["blocking", "cookies"] }
 base64 = "0.22"
 httpdate = "1"

@@ -49,6 +49,8 @@ TILT_INDEX = {
 FAMILY_FIELD = {
     'CC':  'cross_correlation_ratio',
     'ZDR': 'differential_reflectivity',
+    'ET':  'echo_top',
+    'EET': 'echo_top',
     'SRV': 'storm_relative_velocity',
     'VEL': 'velocity',
     'SW':  'spectrum_width',
@@ -77,6 +79,8 @@ def folder_name(station_id: str, family: str, tilt: str) -> str:
     f = family.upper()
     if f == 'DTA':
         return 'DTA'
+    if f in ('ET', 'EET'):
+        return 'EET'
     if _is_tdwr(station_id):
         return TDWR_FOLDER.get(f, '')
     idx = TILT_INDEX.get(str(tilt), 0)
@@ -87,6 +91,8 @@ def fetch_bytes(url: str, timeout: float = 15.0) -> bytes:
     req = urllib.request.Request(url, headers={
         'User-Agent': 'radar-app/1.0',
         'Accept-Encoding': 'gzip, deflate',
+        'Cache-Control': 'no-cache',
+        'Pragma': 'no-cache',
     })
     with urllib.request.urlopen(req, timeout=timeout) as r:
         data = r.read()
@@ -107,8 +113,12 @@ def fetch_dir_list(station_id: str, family: str, tilt: str):
     fold = folder_name(station_id, family, tilt)
     if not fold:
         raise ValueError(f'No folder for {station_id}/{family}/{tilt}')
-    url = f'{WISE_BASE}/{station_id}/{fold}/dir.list'
-    data = fetch_bytes(url, timeout=8.0)
+    base_url = f'{WISE_BASE}/{station_id}/{fold}/dir.list'
+    url = f'{base_url}?_={int(time.time() * 1000)}'
+    try:
+        data = fetch_bytes(url, timeout=8.0)
+    except Exception as err:
+        raise RuntimeError(f'{err} (url={base_url})') from err
     text = data.decode('utf-8', errors='replace').strip()
     # The listing is sometimes base64-encoded
     if '.wise' not in text.lower():
