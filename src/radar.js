@@ -881,6 +881,7 @@ const SPOTTER_LOCATIONS_POLL_MS = 120_000;
 const SPOTTER_LOCATIONS_CACHE_MS = 90_000;
 
 const ALERT_LAYER_IDS = ['alerts-line-under', 'alerts-fill-hit', 'alerts-line', 'alerts-point'];
+const ALERT_POPUP_LAYER_IDS = ['alerts-point', 'alerts-line', 'alerts-fill-hit'];
 const ALERTS_EMPTY_GEOJSON = { type: 'FeatureCollection', features: [] };
 const ALERT_EVENT_COLOR_MAP = {
   SVR: '#FFE600',
@@ -5652,6 +5653,11 @@ function _alertPopupYieldLayerIds(targetMap) {
   return ids.filter(id => targetMap.getLayer(id));
 }
 
+function _alertPopupLayerIds(targetMap) {
+  if (!targetMap) return [];
+  return ALERT_POPUP_LAYER_IDS.filter(id => targetMap.getLayer(id));
+}
+
 function _alertPopupShouldYieldClick(targetMap, point) {
   if (!targetMap || point == null) return false;
   const layers = _alertPopupYieldLayerIds(targetMap);
@@ -5664,11 +5670,66 @@ function _alertPopupShouldYieldClick(targetMap, point) {
   }
 }
 
+function _alertPopupFeatureKey(feature) {
+  const identity = _alertsIdentityKey(feature);
+  if (identity) return identity;
+  const id = String(feature?.id || feature?.properties?.id || '').trim();
+  if (id) return `id:${id}`;
+  const geometryType = String(feature?.geometry?.type || '').trim();
+  const event = String(feature?.properties?.event || feature?.properties?.eventRaw || '').trim();
+  return geometryType || event ? `${geometryType}|${event}` : '';
+}
+
+function _alertPopupTryConsumeClick(targetMap, event) {
+  if (!targetMap) return true;
+  const point = event?.point && typeof event.point === 'object' ? event.point : {};
+  const x = Number(point?.x);
+  const y = Number(point?.y);
+  const rawTimeStamp = Number(event?.originalEvent?.timeStamp);
+  const timeStamp = Number.isFinite(rawTimeStamp) ? rawTimeStamp : Date.now();
+  const clickKey = [
+    Number.isFinite(x) ? Math.round(x) : 'x',
+    Number.isFinite(y) ? Math.round(y) : 'y',
+    Math.round(timeStamp),
+  ].join(':');
+  const prevKey = alertPopupClickStateByMap.get(targetMap);
+  if (prevKey === clickKey) return false;
+  alertPopupClickStateByMap.set(targetMap, clickKey);
+  return true;
+}
+
+function _alertPopupPickFeature(targetMap, event) {
+  let features = Array.isArray(event?.features) ? event.features.filter(Boolean) : [];
+  const point = event?.point;
+  const layers = _alertPopupLayerIds(targetMap);
+  if (targetMap && point != null && layers.length) {
+    try {
+      const queried = targetMap.queryRenderedFeatures(point, { layers });
+      if (Array.isArray(queried) && queried.length) features = queried;
+    } catch (_) {}
+  }
+  if (!features.length) return null;
+  const seen = new Set();
+  for (const feature of features) {
+    if (!feature) continue;
+    const key = _alertPopupFeatureKey(feature);
+    if (key) {
+      if (seen.has(key)) continue;
+      seen.add(key);
+    }
+    return feature;
+  }
+  return features[0] || null;
+}
+
 function _openAlertPopupOnMap(targetMap, event) {
-  if (!Array.isArray(event?.features) || !event.features.length) return;
+  if (!_alertPopupTryConsumeClick(targetMap, event)) return;
   if (_alertPopupShouldYieldClick(targetMap, event?.point)) return;
-  const feature = event.features[0];
+  const feature = _alertPopupPickFeature(targetMap, event);
+  if (!feature) return;
   const props = feature?.properties || {};
+  const prevPopup = alertPopupByMap.get(targetMap);
+  if (prevPopup) prevPopup.remove();
   const popup = new mapboxgl.Popup({
     closeButton: true,
     closeOnClick: true,
@@ -5678,6 +5739,12 @@ function _openAlertPopupOnMap(targetMap, event) {
     .setLngLat(event.lngLat)
     .setHTML(_alertsPopupHtml(feature))
     .addTo(targetMap);
+  alertPopupByMap.set(targetMap, popup);
+  popup.on('close', () => {
+    if (alertPopupByMap.get(targetMap) === popup) {
+      alertPopupByMap.delete(targetMap);
+    }
+  });
   const popupEl = popup.getElement();
   ['pointerdown', 'mousedown', 'mouseup', 'click', 'dblclick'].forEach(type => {
     popupEl?.addEventListener(type, evt => {
@@ -11320,6 +11387,8 @@ let spotterLocationsCachedData = null;
 let spotterLocationsPopup = null;
 let alertsMapReady = false;
 let alertsFlushPending = false;
+const alertPopupByMap = new WeakMap();
+const alertPopupClickStateByMap = new WeakMap();
 const alertsById = new Map();
 const alertsPendingTimingById = new Map();
 let alertsExpiryTimer = null;
