@@ -10,8 +10,10 @@ const L3_TILTS     = ['0.5', '1.5', '2.4', '3.1'];
 const REMOTE_HYBRID_L2_PRODUCTS = ['CC', 'ZDR'];
 const HYBRID_L2_FAMILIES = new Set(REMOTE_HYBRID_L2_PRODUCTS);
 const PROCESSED_WISE_BASE_URL = 'https://data2.weatherwise.app/radar/processed';
-const PROCESSED_WISE_FAMILIES = Object.freeze(['REF', 'VEL', 'SRV', 'CC', 'ZDR', 'SW', 'EET', 'PRT', 'DTA']);
+const PROCESSED_WISE_FAMILIES = Object.freeze(['REF', 'VEL', 'SRV', 'CC', 'ZDR', 'SW', 'EET', 'PRT', 'DTA', 'KDP', 'NROT', 'REFE', 'SHR']);
 const PROCESSED_WISE_FAMILY_SET = new Set(PROCESSED_WISE_FAMILIES);
+// Products that only use a single tilt (tilt index always 0 in folder name)
+const PROCESSED_WISE_SINGLE_TILT_FAMILIES = new Set(['EET', 'PRT', 'DTA']);
 const PROCESSED_WISE_TILTS = Object.freeze(['0.5', '0.9', '1.3', '1.8', '2.5', '3.1']);
 const PROCESSED_WISE_TILT_TO_INDEX = Object.freeze({
   '0.5': 0,
@@ -32,6 +34,10 @@ const PROCESSED_WISE_FAMILY_TILTS = Object.freeze({
   EET: PROCESSED_WISE_SINGLE_TILT,
   PRT: PROCESSED_WISE_SINGLE_TILT,
   DTA: PROCESSED_WISE_SINGLE_TILT,
+  KDP: PROCESSED_WISE_TILTS,
+  NROT: PROCESSED_WISE_TILTS,
+  REFE: PROCESSED_WISE_TILTS,
+  SHR: PROCESSED_WISE_TILTS,
 });
 
 // TDWR (Terminal Doppler Weather Radar) uses different folder names
@@ -874,7 +880,7 @@ const SPOTTER_LOCATIONS_EMPTY_GEOJSON = { type: 'FeatureCollection', features: [
 const SPOTTER_LOCATIONS_POLL_MS = 120_000;
 const SPOTTER_LOCATIONS_CACHE_MS = 90_000;
 
-const ALERT_LAYER_IDS = ['alerts-line-under', 'alerts-line', 'alerts-point'];
+const ALERT_LAYER_IDS = ['alerts-line-under', 'alerts-fill-hit', 'alerts-line', 'alerts-point'];
 const ALERTS_EMPTY_GEOJSON = { type: 'FeatureCollection', features: [] };
 const ALERT_EVENT_COLOR_MAP = {
   SVR: '#FFE600',
@@ -1504,8 +1510,10 @@ function _spcRenderKey() {
 
 function _setSpcLayersVisible(visible) {
   const vis = visible ? 'visible' : 'none';
-  SPC_LAYER_IDS.forEach(id => {
-    if (map.getLayer(id)) map.setLayoutProperty(id, 'visibility', vis);
+  _overlayMaps().forEach(m => {
+    SPC_LAYER_IDS.forEach(id => {
+      if (m.getLayer(id)) m.setLayoutProperty(id, 'visibility', vis);
+    });
   });
 }
 
@@ -1661,8 +1669,11 @@ async function refreshSpcOverlay(force = false) {
   }
 
   if (seq !== spcLoadSeq) return;
-  map.getSource('spc-base-src')?.setData(baseStyled);
-  map.getSource('spc-cig-src')?.setData(cigStyled);
+  if (!spcVisible) return;
+  _overlayMaps().forEach(m => {
+    m.getSource('spc-base-src')?.setData(baseStyled);
+    m.getSource('spc-cig-src')?.setData(cigStyled);
+  });
   spcRenderedKey = nextKey;
   _setSpcLayersVisible(true);
 }
@@ -2335,6 +2346,13 @@ function _decodeBase64Bytes(base64) {
 
 async function _fetchGeoJsonViaTauri(url, opts = {}) {
   const timeoutMs = Number(opts?.timeoutMs);
+  const preferDirect = opts?.preferDirect !== false && _shouldPreferDirectGeoFetch(url);
+  if (preferDirect) {
+    try {
+      const text = await _fetchTextDirect(url, { timeoutMs, cacheMode: opts?.cacheMode });
+      return JSON.parse(text);
+    } catch (_) {}
+  }
   const res = await invoke('fetch_url_base64', {
     url,
     timeoutMs: Number.isFinite(timeoutMs) && timeoutMs > 0 ? Math.round(timeoutMs) : null,
@@ -2345,20 +2363,24 @@ async function _fetchGeoJsonViaTauri(url, opts = {}) {
   return JSON.parse(_decodeBase64Utf8(res.body_base64));
 }
 
-function _shouldPreferDirectWeatherWiseFetch(url) {
+function _shouldPreferDirectGeoFetch(url) {
   const raw = String(url || '').trim();
-  return /^https:\/\/data2\.weatherwise\.app\//i.test(raw);
+  return /^https:\/\/data2\.weatherwise\.app\//i.test(raw)
+    || /^https:\/\/raw\.githubusercontent\.com\//i.test(raw);
 }
 
 async function _fetchTextDirect(url, opts = {}) {
   const timeoutMs = Number(opts?.timeoutMs);
+  const cacheMode = typeof opts?.cacheMode === 'string' && opts.cacheMode.trim()
+    ? opts.cacheMode.trim()
+    : 'no-store';
   const controller = new AbortController();
   const timer = Number.isFinite(timeoutMs) && timeoutMs > 0
     ? setTimeout(() => controller.abort(), Math.round(timeoutMs))
     : null;
   try {
     const res = await fetch(url, {
-      cache: 'no-store',
+      cache: cacheMode,
       credentials: 'omit',
       signal: controller.signal,
     });
@@ -2377,13 +2399,16 @@ async function _fetchTextDirect(url, opts = {}) {
 
 async function _fetchBytesDirect(url, opts = {}) {
   const timeoutMs = Number(opts?.timeoutMs);
+  const cacheMode = typeof opts?.cacheMode === 'string' && opts.cacheMode.trim()
+    ? opts.cacheMode.trim()
+    : 'no-store';
   const controller = new AbortController();
   const timer = Number.isFinite(timeoutMs) && timeoutMs > 0
     ? setTimeout(() => controller.abort(), Math.round(timeoutMs))
     : null;
   try {
     const res = await fetch(url, {
-      cache: 'no-store',
+      cache: cacheMode,
       credentials: 'omit',
       signal: controller.signal,
     });
@@ -2402,10 +2427,10 @@ async function _fetchBytesDirect(url, opts = {}) {
 }
 
 async function _fetchTextViaTauri(url, opts = {}) {
-  const preferDirect = opts?.preferDirect !== false && _shouldPreferDirectWeatherWiseFetch(url);
+  const preferDirect = opts?.preferDirect !== false && _shouldPreferDirectGeoFetch(url);
   if (preferDirect) {
     try {
-      return await _fetchTextDirect(url, { timeoutMs: 8000 });
+      return await _fetchTextDirect(url, { timeoutMs: 8000, cacheMode: opts?.cacheMode });
     } catch (_) {}
   }
   const res = await invoke('fetch_url_base64', { url });
@@ -2421,10 +2446,10 @@ async function _fetchTextViaTauri(url, opts = {}) {
 
 async function _fetchBytesViaTauri(url, opts = {}) {
   const timeoutMs = Number(opts?.timeoutMs);
-  const preferDirect = opts?.preferDirect !== false && _shouldPreferDirectWeatherWiseFetch(url);
+  const preferDirect = opts?.preferDirect !== false && _shouldPreferDirectGeoFetch(url);
   if (preferDirect) {
     try {
-      return await _fetchBytesDirect(url, { timeoutMs });
+      return await _fetchBytesDirect(url, { timeoutMs, cacheMode: opts?.cacheMode });
     } catch (_) {}
   }
   const res = await invoke('fetch_url_base64', {
@@ -2458,8 +2483,8 @@ const _weatherWiseRelayState = {
   namespaceReady: false,
   desiredRoom: '',         // count:radar:{STATION}
   joinedRoom: '',
-  desiredProductRoom: '',  // radar:{STATION}:{FOLDER} — direct file-ready pushes
-  joinedProductRoom: '',
+  desiredProductRooms: new Set(),  // radar:{STATION}:{FOLDER} — one per active pane
+  joinedProductRooms: new Set(),
   countByStation: new Map(),
 };
 
@@ -2651,13 +2676,26 @@ function _weatherWiseRelayCurrentCountRoom() {
   return `count:radar:${canonicalStationId(activeStation)}`;
 }
 
-function _weatherWiseRelayCurrentProductRoom() {
-  if (!WEATHERWISE_RELAY_ENABLED) return '';
-  if (!activeStation || isLocalRadarMode()) return '';
-  if (!_canUseProcessedWise(activeStation, activeFamily, activeTilt)) return '';
-  const folder = _processedWiseFolderName(activeStation, activeFamily, activeTilt);
-  if (!folder) return '';
-  return `radar:${canonicalStationId(activeStation)}:${folder}`;
+function _weatherWiseRelayCurrentProductRooms() {
+  const rooms = new Set();
+  if (!WEATHERWISE_RELAY_ENABLED || !activeStation || isLocalRadarMode()) return rooms;
+  const sid = canonicalStationId(activeStation);
+  // Primary pane
+  if (_canUseProcessedWise(activeStation, activeFamily, activeTilt)) {
+    const folder = _processedWiseFolderName(activeStation, activeFamily, activeTilt);
+    if (folder) rooms.add(`radar:${sid}:${folder}`);
+  }
+  // Secondary panes — subscribe to each pane's own product room
+  for (const [, pane] of secondaryPaneMaps) {
+    if (!pane.ready || !pane.productSelected) continue;
+    const f = String(pane.family || '').trim().toUpperCase();
+    const t = normalizeTilt(pane.tilt || '0.5');
+    if (_canUseProcessedWise(activeStation, f, t)) {
+      const folder = _processedWiseFolderName(activeStation, f, t);
+      if (folder) rooms.add(`radar:${sid}:${folder}`);
+    }
+  }
+  return rooms;
 }
 
 // Guards for the relay-triggered fast-activate path.
@@ -2783,15 +2821,18 @@ function _weatherWiseRelayJoinDesiredRoom() {
     }
   }
 
-  // Product room (product-specific: fires with exact filename when a new scan lands)
-  const desiredProduct = String(_weatherWiseRelayState.desiredProductRoom || '');
-  if (_weatherWiseRelayState.joinedProductRoom !== desiredProduct) {
-    if (_weatherWiseRelayState.joinedProductRoom) {
-      _weatherWiseRelaySend(`42["room:leave","${_weatherWiseRelayState.joinedProductRoom}"]`);
-      _weatherWiseRelayState.joinedProductRoom = '';
+  // Product rooms (one per active pane — fires with exact filename when a new scan lands)
+  const desired = _weatherWiseRelayState.desiredProductRooms;
+  const joined  = _weatherWiseRelayState.joinedProductRooms;
+  for (const room of [...joined]) {
+    if (!desired.has(room)) {
+      _weatherWiseRelaySend(`42["room:leave","${room}"]`);
+      joined.delete(room);
     }
-    if (desiredProduct && _weatherWiseRelaySend(`42["room:join","${desiredProduct}"]`)) {
-      _weatherWiseRelayState.joinedProductRoom = desiredProduct;
+  }
+  for (const room of desired) {
+    if (!joined.has(room) && _weatherWiseRelaySend(`42["room:join","${room}"]`)) {
+      joined.add(room);
     }
   }
 }
@@ -2818,7 +2859,7 @@ function _weatherWiseRelayClose(scheduleReconnect = false) {
   _weatherWiseRelayState.ws = null;
   _weatherWiseRelayState.namespaceReady = false;
   _weatherWiseRelayState.joinedRoom = '';
-  _weatherWiseRelayState.joinedProductRoom = '';
+  _weatherWiseRelayState.joinedProductRooms.clear();
   _weatherWiseRelayState.pollingSid = '';
   if (ws) {
     ws.onmessage = null;
@@ -2835,17 +2876,35 @@ function _weatherWiseRelayHandleEvent(eventName, payload) {
   // Product room: "radar:{STATION}:{FOLDER}" — fires the instant a new .wise file lands.
   // This gives us the filename directly, so no dir.list or probing is needed.
   if (name.startsWith('radar:') && !name.startsWith('radar-')) {
-    if (name === _weatherWiseRelayState.joinedProductRoom
-        && activeStation
+    if (!_weatherWiseRelayState.joinedProductRooms.has(name) || !activeStation) return;
+    const filename = String(payload?.filename || payload?.file || payload?.name || '').trim();
+    const sid = canonicalStationId(activeStation);
+    // Primary pane
+    const primaryFolder = _processedWiseFolderName(activeStation, activeFamily, activeTilt);
+    if (primaryFolder && name === `radar:${sid}:${primaryFolder}`
         && _canUseProcessedWise(activeStation, activeFamily, activeTilt)) {
-      const filename = String(payload?.filename || payload?.file || payload?.name || '').trim();
       void _relayActivateNewFrame(activeStation, activeFamily, activeTilt, filename || null).catch(() => {});
+    }
+    // Secondary panes — activate each pane whose product room just fired, passing filename directly
+    if (multiPaneCount > 1 && !_isManualHistoryActive() && !isPlaying) {
+      for (const [paneId, pane] of secondaryPaneMaps) {
+        if (!pane.ready || !pane.productSelected) continue;
+        const f = String(pane.family || '').trim().toUpperCase();
+        const t = normalizeTilt(pane.tilt || '0.5');
+        if (!_canUseProcessedWise(activeStation, f, t)) continue;
+        const folder = _processedWiseFolderName(activeStation, f, t);
+        if (!folder || `radar:${sid}:${folder}` !== name) continue;
+        const knownMeta = filename
+          ? _buildProcessedWiseMeta(sid, f, _normalizeProcessedWiseTiltForStation(sid, f, t), filename)
+          : null;
+        void _loadSecondaryPaneLatest(paneId, { force: false, knownMeta }).catch(() => {});
+      }
     }
     return;
   }
 
   // Count room: "count:radar:{STATION}" — fires when any product's count changes.
-  // Use as a fallback trigger when the product room hasn't fired yet.
+  // Use as a fallback trigger when the product room didn't already handle this scan
   if (!name.startsWith('count:radar:')) return;
   const stationId = canonicalStationId(name.slice('count:radar:'.length));
   if (!stationId) return;
@@ -2858,8 +2917,21 @@ function _weatherWiseRelayHandleEvent(eventName, payload) {
   if (!changed) return;
   if (stationId !== canonicalStationId(activeStation)) return;
   if (!_canUseProcessedWise(activeStation, activeFamily, activeTilt)) return;
-  // Only use count-room as trigger if the product room didn't already handle this scan
   void _relayActivateNewFrame(activeStation, activeFamily, activeTilt, null).catch(() => {});
+  // Also kick secondary panes on count-room changes (only if they don't have their own product room).
+  if (multiPaneCount > 1 && !_isManualHistoryActive() && !isPlaying) {
+    const sid = canonicalStationId(activeStation);
+    for (const [paneId, pane] of secondaryPaneMaps) {
+      if (!pane.ready || !pane.productSelected) continue;
+      const f = String(pane.family || '').trim().toUpperCase();
+      const t = normalizeTilt(pane.tilt || '0.5');
+      if (!_canUseProcessedWise(activeStation, f, t)) continue;
+      const folder = _processedWiseFolderName(activeStation, f, t);
+      // Skip if already handled by the pane's own product room subscription
+      if (folder && _weatherWiseRelayState.joinedProductRooms.has(`radar:${sid}:${folder}`)) continue;
+      void _loadSecondaryPaneLatest(paneId, { force: false }).catch(() => {});
+    }
+  }
 }
 
 function _weatherWiseRelayHandleMessage(raw) {
@@ -2970,15 +3042,17 @@ async function _weatherWiseRelayEnsureConnected() {
 }
 
 function _syncProcessedWiseRealtime() {
-  const desiredCount   = _weatherWiseRelayCurrentCountRoom();
-  const desiredProduct = _weatherWiseRelayCurrentProductRoom();
-  _weatherWiseRelayState.desiredRoom        = desiredCount;
-  _weatherWiseRelayState.desiredProductRoom = desiredProduct;
-  if (!desiredCount && !desiredProduct) {
+  const desiredCount    = _weatherWiseRelayCurrentCountRoom();
+  const desiredProducts = _weatherWiseRelayCurrentProductRooms();
+  _weatherWiseRelayState.desiredRoom         = desiredCount;
+  _weatherWiseRelayState.desiredProductRooms = desiredProducts;
+  if (!desiredCount && !desiredProducts.size) {
     _weatherWiseRelayClose(false);
     return;
   }
   void _weatherWiseRelayEnsureConnected().catch(() => {});
+  // Re-sync rooms immediately if the socket is already open
+  _weatherWiseRelayJoinDesiredRoom();
 }
 
 async function _probeLatestProcessedWiseMeta(stationId, family, tilt, lastFileName, opts = {}) {
@@ -3199,8 +3273,10 @@ async function _findLatestHybridL2Meta(stationId, family, tilt) {
 
 function _setMesoLayersVisible(visible) {
   const vis = visible ? 'visible' : 'none';
-  MESO_LAYER_IDS.forEach(id => {
-    if (map.getLayer(id)) map.setLayoutProperty(id, 'visibility', vis);
+  _overlayMaps().forEach(m => {
+    MESO_LAYER_IDS.forEach(id => {
+      if (m.getLayer(id)) m.setLayoutProperty(id, 'visibility', vis);
+    });
   });
 }
 
@@ -3311,7 +3387,8 @@ async function refreshMesoOverlay(force = false, opts = {}) {
   }
 
   if (seq !== mesoLoadSeq) return;
-  map.getSource('meso-discussions-src')?.setData(_filterMesoGeoJson(data));
+  if (!mesoVisible) return;
+  _overlayMaps().forEach(m => m.getSource('meso-discussions-src')?.setData(_filterMesoGeoJson(data)));
   mesoRenderedKey = 'ready';
   _setMesoLayersVisible(true);
 }
@@ -3362,8 +3439,10 @@ function initMesoOverlayLayers() {
 
 function _setWatchLayersVisible(visible) {
   const vis = visible ? 'visible' : 'none';
-  WATCH_LAYER_IDS.forEach(id => {
-    if (map.getLayer(id)) map.setLayoutProperty(id, 'visibility', vis);
+  _overlayMaps().forEach(m => {
+    WATCH_LAYER_IDS.forEach(id => {
+      if (m.getLayer(id)) m.setLayoutProperty(id, 'visibility', vis);
+    });
   });
 }
 
@@ -3454,6 +3533,7 @@ async function refreshWatchesOverlay(force = false, opts = {}) {
   }
 
   if (seq !== watchesLoadSeq) return;
+  if (!watchesVisible) return;
   const nowMs = Date.now();
   const currentIds = new Set();
   const features = Array.isArray(data?.features) ? data.features : [];
@@ -3488,7 +3568,7 @@ async function refreshWatchesOverlay(force = false, opts = {}) {
   });
   if (!watchesSeeded) watchesSeeded = true;
 
-  map.getSource('spc-watch-src')?.setData(data);
+  _overlayMaps().forEach(m => m.getSource('spc-watch-src')?.setData(data));
   watchesRenderedKey = `ready:${data.features.length}`;
   _setWatchLayersVisible(true);
   _ensureOverlayFlashTicker();
@@ -3551,8 +3631,10 @@ function initWatchOverlayLayers() {
 
 function _setTvsLayersVisible(visible) {
   const vis = visible ? 'visible' : 'none';
-  TVS_LAYER_IDS.forEach(id => {
-    if (map.getLayer(id)) map.setLayoutProperty(id, 'visibility', vis);
+  _overlayMaps().forEach(m => {
+    TVS_LAYER_IDS.forEach(id => {
+      if (m.getLayer(id)) m.setLayoutProperty(id, 'visibility', vis);
+    });
   });
 }
 
@@ -3730,7 +3812,8 @@ async function refreshTvsOverlay(force = false, opts = {}) {
   }
 
   if (seq !== tvsLoadSeq) return;
-  map.getSource('tvs-icons-src')?.setData(data);
+  if (!tvsVisible) return;
+  _overlayMaps().forEach(m => m.getSource('tvs-icons-src')?.setData(data));
   tvsRenderedKey = `ready:${data.features.length}`;
   _setTvsLayersVisible(true);
 }
@@ -4262,15 +4345,17 @@ function _buildStormStyledGeoJson(raw, sourceId) {
 
 function _setLightningLayersVisible(visible) {
   const vis = visible ? 'visible' : 'none';
-  LIGHTNING_LAYER_IDS.forEach(id => {
-    if (map.getLayer(id)) map.setLayoutProperty(id, 'visibility', vis);
+  _overlayMaps().forEach(m => {
+    LIGHTNING_LAYER_IDS.forEach(id => {
+      if (m.getLayer(id)) m.setLayoutProperty(id, 'visibility', vis);
+    });
   });
 }
 
 async function refreshLightningOverlay(force = false, opts = {}) {
   if (!lightningMapReady) return;
   if (!lightningVisible) {
-    map.getSource('lightning-src')?.setData(LIGHTNING_EMPTY_GEOJSON);
+    _overlayMaps().forEach(m => m.getSource('lightning-src')?.setData(LIGHTNING_EMPTY_GEOJSON));
     _setLightningLayersVisible(false);
     return;
   }
@@ -4294,7 +4379,8 @@ async function refreshLightningOverlay(force = false, opts = {}) {
   }
 
   if (seq !== lightningLoadSeq) return;
-  map.getSource('lightning-src')?.setData(data);
+  if (!lightningVisible) return;
+  _overlayMaps().forEach(m => m.getSource('lightning-src')?.setData(data));
   _setLightningLayersVisible(true);
 }
 
@@ -4335,8 +4421,10 @@ function initLightningOverlayLayers() {
 
 function _setStormReportLayersVisible(visible) {
   const vis = visible ? 'visible' : 'none';
-  STORM_REPORT_LAYER_IDS.forEach(id => {
-    if (map.getLayer(id)) map.setLayoutProperty(id, 'visibility', vis);
+  _overlayMaps().forEach(m => {
+    STORM_REPORT_LAYER_IDS.forEach(id => {
+      if (m.getLayer(id)) m.setLayoutProperty(id, 'visibility', vis);
+    });
   });
   if (!visible && stormReportsPopup) {
     stormReportsPopup.remove();
@@ -4383,7 +4471,7 @@ async function refreshStormReports(force = false, opts = {}) {
   if (!stormReportsMapReady) return;
   stormReportsVisible = stormReportsLsrVisible || stormReportsSpotterVisible;
   if (!stormReportsVisible) {
-    map.getSource('storm-reports-src')?.setData(STORM_EMPTY_GEOJSON);
+    _overlayMaps().forEach(m => m.getSource('storm-reports-src')?.setData(STORM_EMPTY_GEOJSON));
     _setStormReportLayersVisible(false);
     stormReportsRenderedKey = '';
     return;
@@ -4407,6 +4495,7 @@ async function refreshStormReports(force = false, opts = {}) {
     requestedSources.map(sourceId => _loadStormRaw(sourceId, forceNetwork).then(raw => ({ sourceId, raw }))),
   );
   if (seq !== stormReportsLoadSeq) return;
+  if (!stormReportsVisible) return;
 
   const merged = [];
   const counts = [];
@@ -4421,7 +4510,7 @@ async function refreshStormReports(force = false, opts = {}) {
     counts.push(`${sourceId}:${Array.isArray(styled?.features) ? styled.features.length : 0}`);
   });
   const styled = { type: 'FeatureCollection', features: merged };
-  map.getSource('storm-reports-src')?.setData(styled);
+  _overlayMaps().forEach(m => m.getSource('storm-reports-src')?.setData(styled));
   console.info('[REPORTS] shown=%d window=%s sources=%s',
     Array.isArray(styled?.features) ? styled.features.length : 0,
     stormReportsWindow,
@@ -4581,8 +4670,10 @@ function initMpingLayers() {
 async function refreshMpingLayer(forceNetwork = false) {
   if (!mpingMapReady) return;
   if (!mpingVisible) {
-    map.getSource(MPING_SOURCE_ID)?.setData(MPING_EMPTY_GEOJSON);
-    if (map.getLayer(MPING_LAYER_ID)) map.setLayoutProperty(MPING_LAYER_ID, 'visibility', 'none');
+    _overlayMaps().forEach(m => {
+      m.getSource(MPING_SOURCE_ID)?.setData(MPING_EMPTY_GEOJSON);
+      if (m.getLayer(MPING_LAYER_ID)) m.setLayoutProperty(MPING_LAYER_ID, 'visibility', 'none');
+    });
     return;
   }
   const now = Date.now();
@@ -4604,8 +4695,11 @@ async function refreshMpingLayer(forceNetwork = false) {
       data = mpingCachedData;
     }
   }
-  map.getSource(MPING_SOURCE_ID)?.setData(data);
-  if (map.getLayer(MPING_LAYER_ID)) map.setLayoutProperty(MPING_LAYER_ID, 'visibility', 'visible');
+  if (!mpingVisible) return;
+  _overlayMaps().forEach(m => {
+    m.getSource(MPING_SOURCE_ID)?.setData(data);
+    if (m.getLayer(MPING_LAYER_ID)) m.setLayoutProperty(MPING_LAYER_ID, 'visibility', 'visible');
+  });
 }
 
 // -- Spotter Locations layer ---------------------------------------------------
@@ -4662,8 +4756,10 @@ function initSpotterLocationLayers() {
 async function refreshSpotterLocationLayer(forceNetwork = false) {
   if (!spotterLocationsMapReady) return;
   if (!spotterLocationsVisible) {
-    map.getSource(SPOTTER_LOCATIONS_SOURCE_ID)?.setData(SPOTTER_LOCATIONS_EMPTY_GEOJSON);
-    if (map.getLayer(SPOTTER_LOCATIONS_LAYER_ID)) map.setLayoutProperty(SPOTTER_LOCATIONS_LAYER_ID, 'visibility', 'none');
+    _overlayMaps().forEach(m => {
+      m.getSource(SPOTTER_LOCATIONS_SOURCE_ID)?.setData(SPOTTER_LOCATIONS_EMPTY_GEOJSON);
+      if (m.getLayer(SPOTTER_LOCATIONS_LAYER_ID)) m.setLayoutProperty(SPOTTER_LOCATIONS_LAYER_ID, 'visibility', 'none');
+    });
     return;
   }
   const now = Date.now();
@@ -4685,14 +4781,19 @@ async function refreshSpotterLocationLayer(forceNetwork = false) {
       data = spotterLocationsCachedData;
     }
   }
-  map.getSource(SPOTTER_LOCATIONS_SOURCE_ID)?.setData(data);
-  if (map.getLayer(SPOTTER_LOCATIONS_LAYER_ID)) map.setLayoutProperty(SPOTTER_LOCATIONS_LAYER_ID, 'visibility', 'visible');
+  if (!spotterLocationsVisible) return;
+  _overlayMaps().forEach(m => {
+    m.getSource(SPOTTER_LOCATIONS_SOURCE_ID)?.setData(data);
+    if (m.getLayer(SPOTTER_LOCATIONS_LAYER_ID)) m.setLayoutProperty(SPOTTER_LOCATIONS_LAYER_ID, 'visibility', 'visible');
+  });
 }
 
 function _setAlertLayersVisible(visible) {
   const vis = visible ? 'visible' : 'none';
-  ALERT_LAYER_IDS.forEach(id => {
-    if (map.getLayer(id)) map.setLayoutProperty(id, 'visibility', vis);
+  _overlayMaps().forEach(m => {
+    ALERT_LAYER_IDS.forEach(id => {
+      if (m.getLayer(id)) m.setLayoutProperty(id, 'visibility', vis);
+    });
   });
 }
 
@@ -4720,9 +4821,11 @@ function _alertsOrWatchesHaveActiveFlash(nowMs = Date.now()) {
 
 function _applyOverlayFlashPaints() {
   if (!map) return;
-  if (map.getLayer('alerts-line')) map.setPaintProperty('alerts-line', 'line-color', _alertsColorExpr('#FFFFFF'));
-  if (map.getLayer('alerts-point')) map.setPaintProperty('alerts-point', 'circle-color', _alertsColorExpr('#FFFFFF'));
-  if (map.getLayer('spc-watch-line')) map.setPaintProperty('spc-watch-line', 'line-color', _watchLineColorExpr());
+  _overlayMaps().forEach(m => {
+    if (m.getLayer('alerts-line')) m.setPaintProperty('alerts-line', 'line-color', _alertsColorExpr('#FFFFFF'));
+    if (m.getLayer('alerts-point')) m.setPaintProperty('alerts-point', 'circle-color', _alertsColorExpr('#FFFFFF'));
+    if (m.getLayer('spc-watch-line')) m.setPaintProperty('spc-watch-line', 'line-color', _watchLineColorExpr());
+  });
 }
 
 function _ensureOverlayFlashTicker() {
@@ -4990,6 +5093,10 @@ function _alertsDashboardTitle(props = {}) {
   const warnClass = String(props?._warnClass || '').trim().toUpperCase();
   if (warnClass === 'TORE') return 'Tornado Emergency';
   if (warnClass === 'TORP') return 'PDS Tornado Warning';
+  if (warnClass === 'TORR') {
+    const detect = _alertsParamText(props, 'tornadoDetection');
+    return detect.includes('OBSERVED') ? 'Observed Tornado Warning' : 'Confirmed Tornado Warning';
+  }
   if (warnClass === 'SVRD') return 'Destructive Severe Thunderstorm Warning';
   if (warnClass === 'SVRC') return 'Considerable Severe Thunderstorm Warning';
   return event;
@@ -5030,16 +5137,36 @@ function _alertsDashboardHazardsText(props = {}) {
   return headline || '--';
 }
 
-function _alertsPopupHtml(props = {}) {
+function _alertsPopupNearestRadarsHtml(feature = null) {
+  const geo = _alertFeatureBoundsCenter(feature);
+  const center = Array.isArray(geo?.center) ? geo.center : null;
+  const stationIds = center ? _nearestRadarStationIds(Number(center[0]), Number(center[1]), 2) : [];
+  if (!stationIds.length) return '';
+  const items = stationIds.map(stationId => {
+    const station = VIEWABLE_STATIONS[stationId];
+    const label = displayStationId(stationId);
+    const title = station
+      ? `${label} - ${String(station?.[2] || '').trim()}`
+      : label;
+    return `<button type="button" class="alert-popup-radar-btn" data-alert-station-id="${_escapeHtml(stationId)}" title="${_escapeHtml(title)}">${_escapeHtml(label)}</button>`;
+  }).join('');
+  return `<div class="alert-popup-radars-list">${items}</div>`;
+}
+
+function _alertsPopupHtml(featureOrProps = {}) {
+  const feature = featureOrProps?.geometry ? featureOrProps : null;
+  const props = feature?.properties || featureOrProps || {};
   const warnClass = String(props?._warnClass || '').trim();
   const event = String(props?.event || warnClass || 'Alert').trim();
   const accent = ALERT_EVENT_COLOR_MAP[warnClass] || ALERT_EVENT_COLOR_MAP[event] || ALERT_FALLBACK_COLOR;
   const expiresMs = _alertsParseTimeMs(props?.expires);
   const expiresLive = _popupExpiresLiveHtml(expiresMs);
+  const radarHtml = feature ? _alertsPopupNearestRadarsHtml(feature) : '';
 
   return `<div class="storm-popup-card" style="--storm-accent:${_escapeHtml(accent)}">
-    <div class="storm-popup-title">${_escapeHtml(event)}</div>
+    <div class="storm-popup-title">${_escapeHtml(_alertsDashboardTitle(props))}</div>
     <div class="alert-popup-expiry">${expiresLive}</div>
+    ${radarHtml}
     <button type="button" class="alert-popup-details-btn">View Details</button>
   </div>`;
 }
@@ -5092,7 +5219,7 @@ function _alertsDetailHtml(props = {}) {
     : '';
 
   return {
-    title: event,
+    title: _alertsDashboardTitle(props),
     meta: area,
     body: `<div class="alert-details-time">Issued ${_escapeHtml(issued)} • ${expiresLive}</div>
       <div class="alert-details-grid">${rows}</div>
@@ -5317,6 +5444,42 @@ function _alertsCleanupExpired(nowMs = Date.now()) {
   return removed;
 }
 
+function _alertsClearExpiryTimer() {
+  if (alertsExpiryTimer == null) return;
+  clearTimeout(alertsExpiryTimer);
+  alertsExpiryTimer = null;
+}
+
+function _alertsNextExpiryMs() {
+  let nextExpiryMs = Infinity;
+  for (const feature of alertsById.values()) {
+    const keepUntilMs = _alertsParseTimeMs(feature?.properties?._keepUntilMs);
+    const expiresMs = _alertsParseTimeMs(feature?.properties?.expires);
+    const candidate = Number.isFinite(keepUntilMs)
+      ? keepUntilMs
+      : (Number.isFinite(expiresMs) ? expiresMs : NaN);
+    if (Number.isFinite(candidate) && candidate < nextExpiryMs) nextExpiryMs = candidate;
+  }
+  return Number.isFinite(nextExpiryMs) ? nextExpiryMs : NaN;
+}
+
+function _alertsScheduleExpiryCheck() {
+  _alertsClearExpiryTimer();
+  const nextExpiryMs = _alertsNextExpiryMs();
+  if (!Number.isFinite(nextExpiryMs)) return;
+  const delayMs = Math.max(50, Math.min(2147483647, nextExpiryMs - Date.now() + 50));
+  alertsExpiryTimer = setTimeout(() => {
+    alertsExpiryTimer = null;
+    const removed = _alertsCleanupExpired();
+    if (removed) {
+      if (alertsMapReady) _alertsRefreshPresentationNow();
+      else _alertsScheduleExpiryCheck();
+      return;
+    }
+    _alertsScheduleExpiryCheck();
+  }, delayMs);
+}
+
 function _alertGeometryVisitLngLat(geometry, visitor) {
   if (!geometry || typeof visitor !== 'function') return;
   const type = String(geometry?.type || '');
@@ -5477,6 +5640,69 @@ function _nearestWsrRadarStationId(lng, lat) {
   return bestId;
 }
 
+function _alertPopupYieldLayerIds(targetMap) {
+  if (!targetMap) return [];
+  const ids = [
+    ...WATCH_LAYER_IDS,
+    TRAFFIC_CAMERA_LAYER_ID,
+    WEATHER_CAMERA_LAYER_ID,
+    WXWISE_CHASER_LAYER_ID,
+    RO_CHASER_LAYER_ID,
+  ];
+  return ids.filter(id => targetMap.getLayer(id));
+}
+
+function _alertPopupShouldYieldClick(targetMap, point) {
+  if (!targetMap || point == null) return false;
+  const layers = _alertPopupYieldLayerIds(targetMap);
+  if (!layers.length) return false;
+  try {
+    const features = targetMap.queryRenderedFeatures(point, { layers });
+    return Array.isArray(features) && features.length > 0;
+  } catch (_) {
+    return false;
+  }
+}
+
+function _openAlertPopupOnMap(targetMap, event) {
+  if (!Array.isArray(event?.features) || !event.features.length) return;
+  if (_alertPopupShouldYieldClick(targetMap, event?.point)) return;
+  const feature = event.features[0];
+  const props = feature?.properties || {};
+  const popup = new mapboxgl.Popup({
+    closeButton: true,
+    closeOnClick: true,
+    className: 'storm-popup',
+    maxWidth: '330px',
+  })
+    .setLngLat(event.lngLat)
+    .setHTML(_alertsPopupHtml(feature))
+    .addTo(targetMap);
+  const popupEl = popup.getElement();
+  ['pointerdown', 'mousedown', 'mouseup', 'click', 'dblclick'].forEach(type => {
+    popupEl?.addEventListener(type, evt => {
+      evt.stopPropagation();
+    });
+  });
+  popupEl?.querySelector('.alert-popup-details-btn')?.addEventListener('click', evt => {
+    evt.preventDefault();
+    evt.stopPropagation();
+    openAlertDetailsModal(props);
+    popup.remove();
+  });
+  popupEl?.querySelectorAll('[data-alert-station-id]').forEach(btn => {
+    btn.addEventListener('click', evt => {
+      evt.preventDefault();
+      evt.stopPropagation();
+      const stationId = String(btn?.dataset?.alertStationId || '').trim();
+      if (!stationId) return;
+      selectStation(stationId, { recenter: false });
+    });
+  });
+  _ensurePopupExpiresTicker();
+  _refreshPopupExpiresLive();
+}
+
 function _warningIssuedMs(props = {}) {
   return _alertsParseTimeMs(
     props?.sent
@@ -5614,12 +5840,15 @@ function _warningChangeKind(prevFeature, nextFeature, opts = {}) {
   if (!_warningToastEligibleProps(props)) return '';
 
   const actionText = _warningActionText(props, opts?.payload);
+  const prevSource = String(prevFeature?.properties?._source || '').trim().toLowerCase();
+  const nextSource = String(nextFeature?.properties?._source || '').trim().toLowerCase();
   if (opts?.removed) {
     const expiresMs = _warningExpiresMs(props);
     if (Number.isFinite(expiresMs) && expiresMs > (Date.now() + 60_000)) return 'cancelled';
     return '';
   }
   if (!prevFeature) return 'new';
+  if (prevSource === 'nws-api' && nextSource === 'nwws') return 'new';
   if (/continu|extend|extension/.test(actionText)) return 'continued';
   if (/update|updated|correct|corrected|amend|amended|replace|replaced|renew/.test(actionText)) return '';
   return '';
@@ -5685,6 +5914,80 @@ function _dismissWarningToast(toastEl, immediate = false) {
   }, 180);
 }
 
+function _warningToastGeometryOuterRings(feature) {
+  const geometry = feature?.geometry;
+  const type = String(geometry?.type || '');
+  const coordinates = geometry?.coordinates;
+  if (!Array.isArray(coordinates) || !coordinates.length) return [];
+  if (type === 'Polygon') return Array.isArray(coordinates[0]) ? [coordinates[0]] : [];
+  if (type === 'MultiPolygon') {
+    return coordinates
+      .map(polygon => (Array.isArray(polygon) && Array.isArray(polygon[0]) ? polygon[0] : null))
+      .filter(Boolean);
+  }
+  return [];
+}
+
+function _warningToastGeometrySvg(feature, accent) {
+  const stroke = _escapeHtml(accent || '#ffcc33');
+  const pointCoords = feature?.geometry?.type === 'Point' ? feature?.geometry?.coordinates : null;
+  if (Array.isArray(pointCoords) && pointCoords.length >= 2) {
+    return `<svg class="warning-toast-icon-geometry" viewBox="0 0 24 24" aria-hidden="true">
+      <circle cx="12" cy="12" r="6.5" fill="${stroke}" fill-opacity="0.18" stroke="${stroke}" stroke-width="2.25"></circle>
+    </svg>`;
+  }
+
+  const rings = _warningToastGeometryOuterRings(feature)
+    .map(ring => ring
+      .map(pair => (
+        Array.isArray(pair) && pair.length >= 2
+          ? [Number(pair[0]), Number(pair[1])]
+          : null
+      ))
+      .filter(pair => pair && Number.isFinite(pair[0]) && Number.isFinite(pair[1])))
+    .filter(ring => ring.length >= 3);
+
+  if (!rings.length) {
+    return `<svg class="warning-toast-icon-geometry" viewBox="0 0 24 24" aria-hidden="true">
+      <rect x="3" y="3" width="18" height="18" rx="2" fill="${stroke}" fill-opacity="0.18" stroke="${stroke}" stroke-width="2.25"></rect>
+    </svg>`;
+  }
+
+  let minLng = Infinity;
+  let minLat = Infinity;
+  let maxLng = -Infinity;
+  let maxLat = -Infinity;
+  for (const ring of rings) {
+    for (const [lng, lat] of ring) {
+      if (lng < minLng) minLng = lng;
+      if (lng > maxLng) maxLng = lng;
+      if (lat < minLat) minLat = lat;
+      if (lat > maxLat) maxLat = lat;
+    }
+  }
+
+  const spanLng = Math.max(maxLng - minLng, 0.000001);
+  const spanLat = Math.max(maxLat - minLat, 0.000001);
+  const viewSize = 24;
+  const padding = 1.75;
+  const drawSize = viewSize - (padding * 2);
+  const scale = Math.min(drawSize / spanLng, drawSize / spanLat);
+  const drawWidth = spanLng * scale;
+  const drawHeight = spanLat * scale;
+  const offsetX = (viewSize - drawWidth) / 2;
+  const offsetY = (viewSize - drawHeight) / 2;
+  const polygons = rings.map(ring => {
+    const points = ring.map(([lng, lat]) => {
+      const x = offsetX + ((lng - minLng) * scale);
+      const y = (viewSize - offsetY) - ((lat - minLat) * scale);
+      return `${x.toFixed(1)},${y.toFixed(1)}`;
+    }).join(' ');
+    return `<polygon points="${points}" fill="${stroke}" fill-opacity="0.18" stroke="${stroke}" stroke-width="2" stroke-linejoin="round"></polygon>`;
+  }).join('');
+
+  return `<svg class="warning-toast-icon-geometry" viewBox="0 0 24 24" aria-hidden="true">${polygons}</svg>`;
+}
+
 function _showWarningToast(feature, options = {}) {
   const host = warningToastHost || document.getElementById('warning-toast-host');
   if (!host || !feature) return;
@@ -5744,9 +6047,7 @@ function _showWarningToast(feature, options = {}) {
       </svg>
     </button>
     <div class="warning-toast-header">
-      <svg class="warning-toast-icon" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
-        <path d="M13 2 5 13h5l-1 9 8-11h-5l1-9Z"/>
-      </svg>
+      ${_warningToastGeometrySvg(feature, accent)}
       <div class="warning-toast-header-text">
         <div class="warning-toast-kicker">${_escapeHtml(kicker)}</div>
         <div class="warning-toast-title">${_escapeHtml(title)}</div>
@@ -6327,33 +6628,31 @@ function _alertsQueueTiming(alertId, timing) {
 function _alertsApplySourceDataNow() {
   const features = _alertsStyledFeatures();
   if (alertsMapReady) {
-    const src = map.getSource('alerts-src');
-    if (src) {
-      src.setData({
-        type: 'FeatureCollection',
-        features,
-      });
-    }
+    _overlayMaps().forEach(m => {
+      const src = m.getSource('alerts-src');
+      if (src) src.setData({ type: 'FeatureCollection', features });
+    });
   }
+  _alertsScheduleExpiryCheck();
   _ensureOverlayFlashTicker();
   _emitWarningDashboardSnapshot();
 }
 
 function _alertsScheduleSourceUpdate() {
+  _alertsScheduleExpiryCheck();
   if (!alertsMapReady || alertsFlushPending) return;
   alertsFlushPending = true;
   requestAnimationFrame(() => {
     alertsFlushPending = false;
     _alertsCleanupExpired();
 
-    const src = map.getSource('alerts-src');
-    if (!src) return;
-
-    src.setData({
-      type: 'FeatureCollection',
-      features: _alertsStyledFeatures(),
+    const features = _alertsStyledFeatures();
+    _overlayMaps().forEach(m => {
+      const src = m.getSource('alerts-src');
+      if (src) src.setData({ type: 'FeatureCollection', features });
     });
     alertsPendingTimingById.clear();
+    _alertsScheduleExpiryCheck();
     _ensureOverlayFlashTicker();
     _emitWarningDashboardSnapshot();
   });
@@ -6474,16 +6773,31 @@ function _alertsProviderForFeature(feature) {
   return String(feature?.properties?._provider || '').trim();
 }
 
+function _alertsStableVtecKey(props) {
+  const vtecRaw = props?.parameters?.VTEC ?? props?.parameters?.vtec;
+  const first = Array.isArray(vtecRaw)
+    ? (vtecRaw.map(v => String(v || '').trim().toUpperCase()).filter(Boolean)[0] || '')
+    : String(vtecRaw || '').trim().toUpperCase();
+  if (!first) return '';
+  // VTEC: /O.NEW.KTLX.TO.W.0001.dates/ → parts: [O, NEW, KTLX, TO, W, 0001, ...]
+  const parts = first.replace(/^\//, '').split('.');
+  if (parts.length < 6) return '';
+  // Stable key: org.WFO.phenom.sig.eventNum — ignores action (index 1) and time range (index 6+)
+  return [parts[0], parts[2], parts[3], parts[4], parts[5]].join('.');
+}
+
 function _alertsIdentityKey(feature) {
   const props = feature?.properties || {};
+  // Use stable VTEC key (org.WFO.phenom.sig.eventNum) as sole identity for VTEC-bearing alerts.
+  // This matches the same warning across upgrades (NEW→CON→UPG) regardless of action or times.
+  const stableVtec = _alertsStableVtecKey(props);
+  if (stableVtec) return `vtec:${stableVtec}`;
+
+  // Fallback for alerts without VTEC
   const warnClass = _warningClassId(props);
   const event = String(props?.event || props?.eventRaw || '').trim().toUpperCase();
   const headline = String(props?.headline || '').replace(/\s+/g, ' ').trim().toUpperCase();
   const areaDesc = String(props?.areaDesc || props?.area || '').replace(/\s+/g, ' ').trim().toUpperCase();
-  const vtecRaw = props?.parameters?.VTEC ?? props?.parameters?.vtec;
-  const vtec = Array.isArray(vtecRaw)
-    ? vtecRaw.map(v => String(v || '').trim().toUpperCase()).filter(Boolean).join(',')
-    : String(vtecRaw || '').trim().toUpperCase();
   const ugcRaw = props?.parameters?.UGC ?? props?.parameters?.ugc;
   const ugc = Array.isArray(ugcRaw)
     ? ugcRaw.map(v => String(v || '').trim().toUpperCase()).filter(Boolean).join(',')
@@ -6492,14 +6806,83 @@ function _alertsIdentityKey(feature) {
   const expiresMs = _alertsParseTimeMs(props?.expires);
   const issuedBucket = Number.isFinite(issuedMs) ? Math.floor(issuedMs / 60000) : 0;
   const expiresBucket = Number.isFinite(expiresMs) ? Math.floor(expiresMs / 60000) : 0;
-  return [
-    warnClass || event,
-    vtec,
-    ugc || areaDesc,
-    issuedBucket,
-    expiresBucket,
-    headline,
-  ].join('|');
+  return [warnClass || event, ugc || areaDesc, issuedBucket, expiresBucket, headline].join('|');
+}
+
+function _alertsFeatureSourceRank(feature) {
+  const source = String(feature?.properties?._source || '').trim().toLowerCase();
+  if (source === 'nwws') return 3;
+  if (source === 'nws-api') return 2;
+  return 1;
+}
+
+function _alertsFeatureIssuedRank(feature) {
+  const props = feature?.properties || {};
+  const issuedMs = _alertsParseTimeMs(props?.sent ?? props?.issued ?? props?.effective ?? props?.onset);
+  return Number.isFinite(issuedMs) ? issuedMs : 0;
+}
+
+function _alertsPreferredIdentityFeature(current, candidate) {
+  if (!candidate) return current || null;
+  if (!current) return candidate;
+
+  const sourceDiff = _alertsFeatureSourceRank(candidate) - _alertsFeatureSourceRank(current);
+  if (sourceDiff !== 0) return sourceDiff > 0 ? candidate : current;
+
+  const vertexDiff = _alertsGeometryVertexCount(candidate?.geometry) - _alertsGeometryVertexCount(current?.geometry);
+  if (vertexDiff !== 0) return vertexDiff > 0 ? candidate : current;
+
+  const issuedDiff = _alertsFeatureIssuedRank(candidate) - _alertsFeatureIssuedRank(current);
+  if (issuedDiff !== 0) return issuedDiff > 0 ? candidate : current;
+
+  return candidate;
+}
+
+function _alertsCollapseFeaturesByIdentity(features) {
+  const collapsed = [];
+  const identityIndex = new Map();
+  for (const feature of Array.isArray(features) ? features : []) {
+    if (!feature) continue;
+    const identity = _alertsIdentityKey(feature);
+    if (!identity) {
+      collapsed.push(feature);
+      continue;
+    }
+    const existingIndex = identityIndex.get(identity);
+    if (existingIndex == null) {
+      identityIndex.set(identity, collapsed.length);
+      collapsed.push(feature);
+      continue;
+    }
+    collapsed[existingIndex] = _alertsPreferredIdentityFeature(collapsed[existingIndex], feature);
+  }
+  return collapsed;
+}
+
+function _alertsFindProviderFeatureByIdentity(provider, identity, excludeId = '') {
+  if (!identity) return null;
+  const excluded = String(excludeId || '');
+  for (const feature of alertsById.values()) {
+    if (_alertsProviderForFeature(feature) !== provider) continue;
+    const featureId = String(feature?.id || feature?.properties?.id || '');
+    if (excluded && featureId === excluded) continue;
+    if (_alertsIdentityKey(feature) === identity) return feature;
+  }
+  return null;
+}
+
+function _alertsDeleteProviderIdentityAliases(provider, identity, keepId = '') {
+  if (!identity) return 0;
+  const kept = String(keepId || '');
+  let removed = 0;
+  for (const [id, feature] of alertsById.entries()) {
+    if (_alertsProviderForFeature(feature) !== provider) continue;
+    if (kept && String(id) === kept) continue;
+    if (_alertsIdentityKey(feature) !== identity) continue;
+    alertsById.delete(id);
+    removed += 1;
+  }
+  return removed;
 }
 
 function _alertsClearBootstrapPruneTimer() {
@@ -6597,7 +6980,9 @@ function _stopNwwsBridgeForFatal(message) {
 }
 
 function _alertsReplaceNormalizedCollection(features, provider, opts = {}) {
-  const normalized = Array.isArray(features) ? features.filter(Boolean) : [];
+  const normalized = _alertsCollapseFeaturesByIdentity(
+    Array.isArray(features) ? features.filter(Boolean) : [],
+  );
   const removeMissing = opts.removeMissing !== false;
   const activeIds = new Set();
   let changed = false;
@@ -6608,7 +6993,18 @@ function _alertsReplaceNormalizedCollection(features, provider, opts = {}) {
   for (const next of normalized) {
     activeIds.add(next.id);
 
-    const prev = alertsById.get(next.id);
+    const identity = _alertsIdentityKey(next);
+    let prev = alertsById.get(next.id);
+    if (!prev && identity) {
+      prev = _alertsFindProviderFeatureByIdentity(provider, identity, next.id);
+    }
+    if (identity) {
+      const removedAliases = _alertsDeleteProviderIdentityAliases(provider, identity, next.id);
+      if (removedAliases > 0) changed = true;
+    }
+
+    const prevId = String(prev?.id || prev?.properties?.id || '');
+    const sameIdentityReplacement = !!prev && !!prevId && prevId !== String(next.id);
     const prevFlashUntil = Number(prev?.properties?._flashUntilMs);
     if (Number.isFinite(prevFlashUntil) && prevFlashUntil > nowMs) {
       next.properties._flashUntilMs = prevFlashUntil;
@@ -6616,7 +7012,12 @@ function _alertsReplaceNormalizedCollection(features, provider, opts = {}) {
       next.properties._flashUntilMs = nowMs + 10_000;
     }
 
-    if (!prev || JSON.stringify(prev.properties) !== JSON.stringify(next.properties) || JSON.stringify(prev.geometry) !== JSON.stringify(next.geometry)) {
+    if (
+      !prev
+      || sameIdentityReplacement
+      || JSON.stringify(prev.properties) !== JSON.stringify(next.properties)
+      || JSON.stringify(prev.geometry) !== JSON.stringify(next.geometry)
+    ) {
       alertsById.set(next.id, next);
       changed = true;
       if (warningNotificationsPrimed && !seedMode) {
@@ -6833,53 +7234,10 @@ async function refreshNwsApiAlerts(opts = {}) {
   }
 
   const features = Array.isArray(raw?.features) ? raw.features : [];
-  const activeIds = new Set();
-  let changed = false;
-  const nowMs = Date.now();
-  const seedMode = !alertsSeeded;
-  const warningChanges = [];
-
-  for (const f of features) {
-    const next = _alertsNormalizeNwsApiFeature(f, provider);
-    if (!next) continue;
-    activeIds.add(next.id);
-
-    const prev = alertsById.get(next.id);
-    const prevFlashUntil = Number(prev?.properties?._flashUntilMs);
-    if (Number.isFinite(prevFlashUntil) && prevFlashUntil > nowMs) {
-      next.properties._flashUntilMs = prevFlashUntil;
-    } else if (!prev && !seedMode) {
-      next.properties._flashUntilMs = nowMs + 10_000;
-    }
-
-    if (!prev || JSON.stringify(prev.properties) !== JSON.stringify(next.properties) || JSON.stringify(prev.geometry) !== JSON.stringify(next.geometry)) {
-      alertsById.set(next.id, next);
-      changed = true;
-      if (warningNotificationsPrimed && !seedMode) {
-        const kind = _warningChangeKind(prev, next);
-        if (kind) warningChanges.push({ feature: next, kind });
-      }
-    }
-  }
-
-  if (removeMissing) {
-    for (const [id, feature] of alertsById.entries()) {
-      if (String(feature?.properties?._provider || '') !== provider) continue;
-      if (!activeIds.has(id)) {
-        if (warningNotificationsPrimed && !seedMode) {
-          const kind = _warningChangeKind(feature, null, { removed: true });
-          if (kind) warningChanges.push({ feature, kind });
-        }
-        alertsById.delete(id);
-        changed = true;
-      }
-    }
-  }
-
-  if (!alertsSeeded) alertsSeeded = true;
-  if (changed) _alertsScheduleSourceUpdate();
-  else _ensureOverlayFlashTicker();
-  if (warningChanges.length) _announceWarningChanges(warningChanges);
+  const normalized = features
+    .map(feature => _alertsNormalizeNwsApiFeature(feature, provider))
+    .filter(Boolean);
+  _alertsReplaceNormalizedCollection(normalized, provider, { removeMissing });
   console.info(`[NWS API] refreshed ${features.length} alert(s) for provider ${provider}`);
 }
 
@@ -6943,6 +7301,17 @@ function initAlertLayers() {
   }, 'stations-dot');
 
   map.addLayer({
+    id: 'alerts-fill-hit',
+    type: 'fill',
+    source: 'alerts-src',
+    filter: ['==', ['geometry-type'], 'Polygon'],
+    paint: {
+      'fill-color': '#000000',
+      'fill-opacity': 0.001,
+    },
+  }, 'stations-dot');
+
+  map.addLayer({
     id: 'alerts-line',
     type: 'line',
     source: 'alerts-src',
@@ -6974,28 +7343,10 @@ function initAlertLayers() {
     },
   }, 'stations-dot');
 
-  const openAlertPopup = e => {
-    if (!Array.isArray(e?.features) || !e.features.length) return;
-    const f = e.features[0];
-    const props = f?.properties || {};
-    const popup = new mapboxgl.Popup({
-      closeButton: true,
-      closeOnClick: true,
-      className: 'storm-popup',
-      maxWidth: '330px',
-    })
-      .setLngLat(e.lngLat)
-      .setHTML(_alertsPopupHtml(props))
-      .addTo(map);
-    popup.getElement()?.querySelector('.alert-popup-details-btn')?.addEventListener('click', evt => {
-      evt.preventDefault();
-      evt.stopPropagation();
-      openAlertDetailsModal(props);
-      popup.remove();
-    });
-    _ensurePopupExpiresTicker();
-    _refreshPopupExpiresLive();
-  };
+  const openAlertPopup = e => _openAlertPopupOnMap(map, e);
+  map.on('mouseenter', 'alerts-fill-hit', () => { map.getCanvas().style.cursor = 'pointer'; });
+  map.on('mouseleave', 'alerts-fill-hit', () => { map.getCanvas().style.cursor = ''; });
+  map.on('click', 'alerts-fill-hit', openAlertPopup);
   map.on('mouseenter', 'alerts-line', () => { map.getCanvas().style.cursor = 'pointer'; });
   map.on('mouseleave', 'alerts-line', () => { map.getCanvas().style.cursor = ''; });
   map.on('click', 'alerts-line', openAlertPopup);
@@ -8486,11 +8837,238 @@ const paneMenuEl = document.getElementById('pane-menu');
 const recentFramesMenuEl = document.getElementById('recent-frames-menu');
 const multiPaneBtnEl = document.getElementById('multi-pane-btn');
 const recentFramesBtnEl = document.getElementById('recent-frames-btn');
+const boardContextMenuEl = document.getElementById('board-context-menu');
+const boardNearestRadarsEl = document.getElementById('board-nearest-radars');
+const boardContextCoordsEl = document.getElementById('board-context-coords');
+const boardContextDividerEl = document.getElementById('board-context-divider');
+const boardNearestRadarBtnEls = [
+  document.getElementById('board-nearest-radar-1'),
+  document.getElementById('board-nearest-radar-2'),
+];
+const boardCopyImageBtnEl = document.getElementById('board-copy-image');
 const secondaryPaneMaps = new Map(); // paneId -> state
 const MULTI_PANE_DEFAULT_FAMILY = { 2: 'VEL', 3: 'CC', 4: 'EET' };
 let activePaneId = 1;
 let multiPaneCount = 1;
 let paneCameraSyncLock = false;
+let boardContextMenuOpen = false;
+let boardCopyLabelTimer = null;
+let boardContextRadarIds = [];
+
+function _setBoardContextMenuOpen(open, clientX = 0, clientY = 0) {
+  if (!boardContextMenuEl) return;
+  boardContextMenuOpen = !!open;
+  boardContextMenuEl.classList.toggle('open', boardContextMenuOpen);
+  boardContextMenuEl.setAttribute('aria-hidden', boardContextMenuOpen ? 'false' : 'true');
+  if (!boardContextMenuOpen) return;
+  const margin = 8;
+  const width = boardContextMenuEl.offsetWidth || 192;
+  const height = boardContextMenuEl.offsetHeight || 96;
+  const maxX = Math.max(margin, window.innerWidth - width - margin);
+  const maxY = Math.max(margin, window.innerHeight - height - margin);
+  const nextX = Math.min(Math.max(margin, clientX), maxX);
+  let nextY = clientY - height - 6;
+  if (nextY < margin) nextY = Math.min(maxY, clientY + 6);
+  boardContextMenuEl.style.left = `${nextX}px`;
+  boardContextMenuEl.style.top = `${Math.min(Math.max(margin, nextY), maxY)}px`;
+}
+
+function _paneMapForId(id) {
+  if (Number(id) === 1) return map;
+  return secondaryPaneMaps.get(Number(id))?.map || null;
+}
+
+function _nearestRadarStationIds(lng, lat, count = 2) {
+  if (!Number.isFinite(lng) || !Number.isFinite(lat)) return [];
+  return Object.entries(VIEWABLE_STATIONS)
+    .map(([stationId, station]) => {
+      const sLat = Number(station?.[0]);
+      const sLng = Number(station?.[1]);
+      if (!Number.isFinite(sLat) || !Number.isFinite(sLng)) return null;
+      return { stationId, distKm: _geoDistanceKm(lng, lat, sLng, sLat) };
+    })
+    .filter(Boolean)
+    .sort((a, b) => {
+      if (a.distKm !== b.distKm) return a.distKm - b.distKm;
+      return String(a.stationId).localeCompare(String(b.stationId));
+    })
+    .slice(0, Math.max(1, Number(count) || 2))
+    .map(item => item.stationId);
+}
+
+function _boardContextLocationFromEvent(event) {
+  const target = event?.target instanceof Element ? event.target : null;
+  const cell = target?.closest?.('.map-cell');
+  const paneId = Number(cell?.dataset?.pane || 1);
+  const paneMap = _paneMapForId(paneId);
+  const canvas = paneMap?.getCanvas?.();
+  if (!paneMap || !canvas) return null;
+  const rect = canvas.getBoundingClientRect();
+  const point = [event.clientX - rect.left, event.clientY - rect.top];
+  if (!(point[0] >= 0 && point[0] <= rect.width && point[1] >= 0 && point[1] <= rect.height)) return null;
+  let lngLat = null;
+  try { lngLat = paneMap.unproject(point); } catch (_) { lngLat = null; }
+  if (!lngLat) return null;
+  return { paneId, paneMap, lngLat };
+}
+
+function _formatBoardContextCoords(lng, lat) {
+  if (!Number.isFinite(lng) || !Number.isFinite(lat)) return '';
+  const latText = `${Math.abs(lat).toFixed(4)}\u00b0${lat < 0 ? 'S' : 'N'}`;
+  const lngText = `${Math.abs(lng).toFixed(4)}\u00b0${lng < 0 ? 'W' : 'E'}`;
+  return `${latText}  ${lngText}`;
+}
+
+function _syncBoardContextRadars(stationIds = [], lngLat = null) {
+  boardContextRadarIds = Array.isArray(stationIds) ? stationIds.slice(0, 2) : [];
+  let visibleCount = 0;
+  boardNearestRadarBtnEls.forEach((btn, index) => {
+    if (!btn) return;
+    const stationId = boardContextRadarIds[index] || '';
+    const station = VIEWABLE_STATIONS[stationId];
+    const labelEl = btn.querySelector('.board-context-radar-label');
+    if (stationId && station) {
+      btn.hidden = false;
+      btn.dataset.stationId = stationId;
+      btn.title = `${displayStationId(stationId)} - ${station[2] || ''}`.trim();
+      if (labelEl) labelEl.textContent = displayStationId(stationId);
+      visibleCount += 1;
+    } else {
+      btn.hidden = true;
+      btn.dataset.stationId = '';
+      btn.title = '';
+      if (labelEl) labelEl.textContent = '----';
+    }
+  });
+  if (boardNearestRadarsEl) boardNearestRadarsEl.hidden = visibleCount === 0;
+  const coordText = _formatBoardContextCoords(Number(lngLat?.lng), Number(lngLat?.lat));
+  if (boardContextCoordsEl) {
+    boardContextCoordsEl.hidden = !coordText;
+    boardContextCoordsEl.textContent = coordText || '';
+  }
+  const showMeta = visibleCount > 0 || !!coordText;
+  if (boardContextDividerEl) boardContextDividerEl.hidden = !showMeta;
+}
+
+function _visibleBoardPaneStates() {
+  const panes = [{ id: 1, map }];
+  for (const id of [2, 3, 4]) {
+    if (id > multiPaneCount) continue;
+    const pane = secondaryPaneMaps.get(id);
+    if (pane?.ready && pane.map) panes.push({ id, map: pane.map });
+  }
+  return panes;
+}
+
+function _canvasToBlob(canvas, type = 'image/png') {
+  return new Promise((resolve, reject) => {
+    canvas.toBlob(blob => {
+      if (blob) resolve(blob);
+      else reject(new Error('Could not encode board image.'));
+    }, type);
+  });
+}
+
+async function _snapshotBoardCanvas() {
+  const boardRect = mapGridEl?.getBoundingClientRect?.();
+  if (!boardRect || boardRect.width < 2 || boardRect.height < 2) {
+    throw new Error('Board is not ready.');
+  }
+  const scale = Math.max(1, Math.min(window.devicePixelRatio || 1, 2));
+  const out = document.createElement('canvas');
+  out.width = Math.max(1, Math.round(boardRect.width * scale));
+  out.height = Math.max(1, Math.round(boardRect.height * scale));
+  const ctx = out.getContext('2d');
+  if (!ctx) throw new Error('Could not create board image.');
+  ctx.scale(scale, scale);
+  ctx.fillStyle = '#000000';
+  ctx.fillRect(0, 0, boardRect.width, boardRect.height);
+
+  const paneStates = _visibleBoardPaneStates();
+  paneStates.forEach(pane => {
+    try { pane.map.triggerRepaint?.(); } catch (_) {}
+  });
+  await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+
+  for (const pane of paneStates) {
+    const cell = document.getElementById(`map-cell-${pane.id}`);
+    const srcCanvas = pane.map?.getCanvas?.();
+    if (!cell || !srcCanvas) continue;
+    const rect = cell.getBoundingClientRect();
+    const dx = rect.left - boardRect.left;
+    const dy = rect.top - boardRect.top;
+    const dw = rect.width;
+    const dh = rect.height;
+    if (!(dw > 0 && dh > 0)) continue;
+    try {
+      if (typeof createImageBitmap === 'function') {
+        const bitmap = await createImageBitmap(srcCanvas);
+        ctx.drawImage(bitmap, dx, dy, dw, dh);
+        bitmap.close?.();
+      } else {
+        ctx.drawImage(srcCanvas, dx, dy, dw, dh);
+      }
+    } catch (_) {
+      ctx.drawImage(srcCanvas, dx, dy, dw, dh);
+    }
+  }
+  return out;
+}
+
+async function _copyBoardImageToClipboard() {
+  _setBoardContextMenuOpen(false);
+  try {
+    if (!(navigator.clipboard?.write && window.ClipboardItem)) {
+      throw new Error('Clipboard image copy is unavailable.');
+    }
+    const canvas = await _snapshotBoardCanvas();
+    const blob = await _canvasToBlob(canvas, 'image/png');
+    await navigator.clipboard.write([new ClipboardItem({ 'image/png': blob })]);
+    _flashFrameLabel('Board image copied', 'live');
+  } catch (err) {
+    console.error('board image copy failed:', err);
+    _flashFrameLabel('Board image copy failed', 'error', 2200);
+  }
+}
+
+function _isBoardContextMenuTarget(target) {
+  return target instanceof Element
+    && !!target.closest('.map-cell, .mapboxgl-canvas, .mapboxgl-canvas-container');
+}
+
+mapGridEl?.addEventListener('contextmenu', event => {
+  if (!_isBoardContextMenuTarget(event.target)) return;
+  event.preventDefault();
+  event.stopPropagation();
+  const clickInfo = _boardContextLocationFromEvent(event);
+  _syncBoardContextRadars(
+    clickInfo?.lngLat ? _nearestRadarStationIds(clickInfo.lngLat.lng, clickInfo.lngLat.lat, 2) : [],
+    clickInfo?.lngLat || null,
+  );
+  _setBoardContextMenuOpen(true, event.clientX, event.clientY);
+});
+
+boardContextMenuEl?.addEventListener('contextmenu', event => {
+  event.preventDefault();
+  event.stopPropagation();
+});
+
+boardCopyImageBtnEl?.addEventListener('click', event => {
+  event.preventDefault();
+  event.stopPropagation();
+  void _copyBoardImageToClipboard();
+});
+
+boardNearestRadarBtnEls.forEach(btn => {
+  btn?.addEventListener('click', event => {
+    event.preventDefault();
+    event.stopPropagation();
+    const stationId = canonicalStationId(btn.dataset.stationId || '');
+    _setBoardContextMenuOpen(false);
+    if (stationId) selectStation(stationId);
+  });
+});
+
 let panePollTimer = null;
 let panePollRunning = false;
 let paneInteractionUntilMs = 0;
@@ -8591,6 +9169,7 @@ function _visibleProcessedWiseSelections(stationId = activeStation) {
   if (multiPaneCount > 1) {
     for (const pane of secondaryPaneMaps.values()) {
       if (!pane || pane.id > multiPaneCount) continue;
+      if (!pane.productSelected) continue;
       addSelection(pane.family, pane.tilt, { paneId: pane.id });
     }
   }
@@ -8616,6 +9195,7 @@ function _residentComboKeysForCurrentStation() {
   if (multiPaneCount > 1 && !levelII) {
     for (const pane of secondaryPaneMaps.values()) {
       if (!pane || pane.id > multiPaneCount) continue;
+      if (!pane.productSelected) continue;
       keep.add(_paneComboKey(pane));
     }
   }
@@ -8683,6 +9263,7 @@ async function _showSecondaryPaneHistoryFrame(pane, entries, index, { priority =
 
 async function _resolveSecondaryPaneHistoryFrame(pane, { priority = true } = {}) {
   if (!pane || !pane.ready || !activeStation || levelII) return null;
+  if (!pane.productSelected) return null;
   const comboKey = _paneComboKey(pane);
   const targetFrames = _secondaryPaneTargetHistoryCount();
   let entries = historyMap.get(comboKey) || [];
@@ -8742,6 +9323,207 @@ function _allPaneStates() {
   return [{ id: 1, map, family: activeFamily, tilt: activeTilt, isPrimary: true }, ...secondaryPaneMaps.values()];
 }
 
+function _overlayMaps() {
+  const maps = [map];
+  for (const pane of secondaryPaneMaps.values()) {
+    if (pane.ready && pane.map) maps.push(pane.map);
+  }
+  return maps;
+}
+
+function _bindCameraLayerEventsOnMap(layerId, m) {
+  if (!m) return;
+  if (!m.__cameraLayerBindingId) {
+    cameraLayerBindingSeq += 1;
+    m.__cameraLayerBindingId = cameraLayerBindingSeq;
+  }
+  const bindingKey = `${m.__cameraLayerBindingId}:${layerId}`;
+  if (cameraLayerEventsBound.has(bindingKey)) return;
+  cameraLayerEventsBound.add(bindingKey);
+  m.on('mouseenter', layerId, () => { m.getCanvas().style.cursor = 'pointer'; });
+  m.on('mouseleave', layerId, () => { m.getCanvas().style.cursor = ''; });
+  m.on('click', layerId, e => {
+    if (!Array.isArray(e?.features) || !e.features.length) return;
+    e.preventDefault();
+    openCamera(_cameraPayloadFromFeature(e.features[0]));
+  });
+}
+
+function _initOverlaysOnSecondaryMap(m) {
+  // Use stations-dot as beforeId only if it exists on this map (primary map has it, secondary may not yet)
+  const beforeId = m.getLayer('stations-dot') ? 'stations-dot' : undefined;
+
+  // SPC Outlooks
+  if (!m.getSource('spc-base-src')) {
+    [['spc-hatch-cig1', 1], ['spc-hatch-cig2', 2], ['spc-hatch-cig3', 3]].forEach(([id, lvl]) => {
+      if (!m.hasImage(id)) { const img = _createSpcHatchImage(lvl); if (img) m.addImage(id, img, { pixelRatio: 1 }); }
+    });
+    m.addSource('spc-base-src', { type: 'geojson', data: SPC_EMPTY_GEOJSON });
+    m.addSource('spc-cig-src', { type: 'geojson', data: SPC_EMPTY_GEOJSON });
+    const spcVis = spcVisible ? 'visible' : 'none';
+    m.addLayer({ id: 'spc-base-fill', type: 'fill', source: 'spc-base-src', layout: { visibility: spcVis }, paint: { 'fill-color': ['coalesce', ['get', '_fill'], '#000000'], 'fill-opacity': ['coalesce', ['get', '_fillOpacity'], 0.0] } }, beforeId);
+    m.addLayer({ id: 'spc-base-line', type: 'line', source: 'spc-base-src', layout: { visibility: spcVis }, paint: { 'line-color': ['coalesce', ['get', '_line'], '#FFFFFF'], 'line-width': ['coalesce', ['get', '_lineWidth'], 1.8], 'line-opacity': 0.95 } }, beforeId);
+    m.addLayer({ id: 'spc-cig-fill', type: 'fill', source: 'spc-cig-src', layout: { visibility: spcVis }, paint: { 'fill-pattern': ['coalesce', ['get', '_hatch'], 'spc-hatch-cig1'], 'fill-opacity': ['coalesce', ['get', '_fillOpacity'], 1.0], 'fill-antialias': false } }, beforeId);
+    m.addLayer({ id: 'spc-cig-line', type: 'line', source: 'spc-cig-src', layout: { visibility: spcVis }, paint: { 'line-color': '#000000', 'line-width': 1.8, 'line-opacity': 0.95 } }, beforeId);
+    m.on('click', 'spc-base-fill', e => { if (e.features?.length) openSpcViewer(spcDay, spcType); });
+    m.on('click', 'spc-cig-fill', e => { if (e.features?.length) openSpcViewer(spcDay, spcType); });
+    m.on('mouseenter', 'spc-base-fill', () => { m.getCanvas().style.cursor = 'pointer'; });
+    m.on('mouseleave', 'spc-base-fill', () => { m.getCanvas().style.cursor = ''; });
+    m.on('mouseenter', 'spc-cig-fill', () => { m.getCanvas().style.cursor = 'pointer'; });
+    m.on('mouseleave', 'spc-cig-fill', () => { m.getCanvas().style.cursor = ''; });
+  }
+
+  // Meso Discussions
+  if (!m.getSource('meso-discussions-src')) {
+    m.addSource('meso-discussions-src', { type: 'geojson', data: MESO_EMPTY_GEOJSON });
+    const mesoVis = mesoVisible ? 'visible' : 'none';
+    m.addLayer({ id: 'meso-discussions-line-under', type: 'line', source: 'meso-discussions-src', layout: { visibility: mesoVis }, paint: { 'line-color': '#000000', 'line-width': 6, 'line-opacity': 0.98 } }, beforeId);
+    m.addLayer({ id: 'meso-discussions-line', type: 'line', source: 'meso-discussions-src', layout: { visibility: mesoVis }, paint: { 'line-color': _mesoKindColorExpression(), 'line-width': 4, 'line-opacity': 0.96 } }, beforeId);
+    ['meso-discussions-line-under', 'meso-discussions-line'].forEach(lid => {
+      m.on('mouseenter', lid, () => { m.getCanvas().style.cursor = 'pointer'; });
+      m.on('mouseleave', lid, () => { m.getCanvas().style.cursor = ''; });
+    });
+    m.on('click', 'meso-discussions-line', e => { if (e.features?.length) openSpcMesoViewer(e.features[0]?.properties || {}); });
+  }
+
+  // Watches
+  if (!m.getSource('spc-watch-src')) {
+    m.addSource('spc-watch-src', { type: 'geojson', data: WATCHES_EMPTY_GEOJSON });
+    const watchVis = watchesVisible ? 'visible' : 'none';
+    m.addLayer({ id: 'spc-watch-line-under', type: 'line', source: 'spc-watch-src', layout: { visibility: watchVis, 'line-join': 'round', 'line-cap': 'round' }, paint: { 'line-color': '#000000', 'line-width': 4.0, 'line-opacity': 0.98 } }, beforeId);
+    m.addLayer({ id: 'spc-watch-line', type: 'line', source: 'spc-watch-src', layout: { visibility: watchVis, 'line-join': 'round', 'line-cap': 'round' }, paint: { 'line-color': _watchLineColorExpr(), 'line-color-transition': { duration: 260, delay: 0 }, 'line-width': 2.4, 'line-opacity': 0.98 } }, beforeId);
+    m.on('mouseenter', 'spc-watch-line', () => { m.getCanvas().style.cursor = 'pointer'; });
+    m.on('mouseleave', 'spc-watch-line', () => { m.getCanvas().style.cursor = ''; });
+    m.on('click', 'spc-watch-line', e => { if (e.features?.length) openSpcWatchViewer(e.features[0]?.properties || {}); });
+  }
+
+  // TVS Icons
+  if (!m.getSource('tvs-icons-src')) {
+    Object.keys(TVS_ICON_BY_BUCKET).forEach(bucket => {
+      const imageId = TVS_ICON_BY_BUCKET[bucket];
+      if (!m.hasImage(imageId)) { const icon = _createTvsTriangleIconImage(TVS_ICON_COLORS[bucket] || '#ffd400'); if (icon) m.addImage(imageId, icon, { pixelRatio: 2 }); }
+    });
+    m.addSource('tvs-icons-src', { type: 'geojson', data: TVS_EMPTY_GEOJSON });
+    m.addLayer({ id: 'tvs-icons-symbol', type: 'symbol', source: 'tvs-icons-src', layout: { visibility: tvsVisible ? 'visible' : 'none', 'icon-image': ['coalesce', ['get', '_tvsIcon'], TVS_ICON_BY_BUCKET.YELLOW], 'icon-size': 0.7, 'icon-allow-overlap': true, 'icon-ignore-placement': true } }, beforeId);
+    m.on('mouseenter', 'tvs-icons-symbol', () => { m.getCanvas().style.cursor = 'pointer'; });
+    m.on('mouseleave', 'tvs-icons-symbol', () => { m.getCanvas().style.cursor = ''; });
+    m.on('click', 'tvs-icons-symbol', e => {
+      if (!e.features?.length) return;
+      const p = e.features[0]?.properties || {};
+      const fmtNum = (val, dec = 0, suf = '') => { const n = Number(val); return Number.isFinite(n) ? `${n.toFixed(dec)}${suf}` : '--'; };
+      const bucket = String(p._tvsBucket || '').toUpperCase();
+      const accent = TVS_ICON_COLORS[bucket] || '#ffd400';
+      const title = `${_escapeHtml(p._nexrad || 'NEXRAD')} ${_escapeHtml(p._stormId || '')}`.trim();
+      const rows = [['TVS', _escapeHtml(p._tvs || '--')], ['Meso', _escapeHtml(String(p._meso ?? '--'))], ['Azimuth', fmtNum(p._azimuth, 0, '°')], ['Range', fmtNum(p._range, 0, ' nmi')], ['POSH', fmtNum(p._posh, 0, '%')], ['POH', fmtNum(p._poh, 0, '%')], ['Max Size', fmtNum(p._maxSize, 2, ' in')], ['VIL', fmtNum(p._vil, 0)], ['Max dBZ', fmtNum(p._maxDbz, 0, ' dBZ')], ['Max dBZ Hgt', fmtNum(p._maxDbzHeight, 1, ' kft')], ['Top', fmtNum(p._top, 1, ' kft')], ['Dir', fmtNum(p._drct, 0, '°')], ['Speed', fmtNum(p._sknt, 0, ' kt')], ['Motion', _escapeHtml(p._motion || '--')], ['Valid', _escapeHtml(p._valid || '--')]];
+      const rowsHtml = rows.map(([k, v]) => `<div class="storm-popup-k">${k}</div><div class="storm-popup-v">${v}</div>`).join('');
+      new mapboxgl.Popup({ closeButton: true, closeOnClick: true, className: 'storm-popup' }).setLngLat(e.lngLat).setHTML(`<div class="storm-popup-card" style="--storm-accent:${accent}"><div class="storm-popup-title">${title}</div><div class="storm-popup-grid">${rowsHtml}</div></div>`).addTo(m);
+    });
+  }
+
+  // Lightning
+  if (!m.getSource('lightning-src')) {
+    if (!m.hasImage(LIGHTNING_ICON_ID)) { const icon = _createLightningBoltIconImage(); if (icon) m.addImage(LIGHTNING_ICON_ID, icon, { pixelRatio: 2 }); }
+    m.addSource('lightning-src', { type: 'geojson', data: LIGHTNING_EMPTY_GEOJSON, generateId: true });
+    m.addLayer({ id: 'lightning-symbol', type: 'symbol', source: 'lightning-src', layout: { visibility: lightningVisible ? 'visible' : 'none', 'icon-image': LIGHTNING_ICON_ID, 'icon-size': ['interpolate', ['linear'], ['zoom'], 3, 0.30, 7, 0.38, 11, 0.46], 'icon-allow-overlap': true, 'icon-ignore-placement': true, 'icon-anchor': 'center' }, paint: { 'icon-opacity': 0.62 } }, beforeId);
+  }
+
+  // Storm Reports
+  if (!m.getSource('storm-reports-src')) {
+    m.addSource('storm-reports-src', { type: 'geojson', data: STORM_EMPTY_GEOJSON, generateId: true });
+    m.addLayer({ id: 'storm-reports-dot', type: 'circle', source: 'storm-reports-src', layout: { visibility: stormReportsVisible ? 'visible' : 'none' }, paint: { 'circle-color': ['coalesce', ['get', '_color'], '#E6E6E6'], 'circle-radius': ['interpolate', ['linear'], ['zoom'], 3, 2.5, 6, 3.6, 10, 5.2, 13, 7], 'circle-stroke-color': '#000000', 'circle-stroke-width': 1.15, 'circle-opacity': 0.95 } }, beforeId);
+    m.on('mouseenter', 'storm-reports-dot', () => { m.getCanvas().style.cursor = 'pointer'; });
+    m.on('mouseleave', 'storm-reports-dot', () => { m.getCanvas().style.cursor = ''; });
+    m.on('click', 'storm-reports-dot', e => {
+      if (!e.features?.length) return;
+      const f = e.features[0];
+      const coords = Array.isArray(f?.geometry?.coordinates) ? [...f.geometry.coordinates] : [e.lngLat.lng, e.lngLat.lat];
+      new mapboxgl.Popup({ closeButton: true, closeOnClick: true, className: 'storm-popup', maxWidth: '300px' }).setLngLat(coords).setHTML(_stormReportPopupHtml(f?.properties || {})).addTo(m);
+    });
+  }
+
+  // mPING
+  if (!m.getSource(MPING_SOURCE_ID)) {
+    m.addSource(MPING_SOURCE_ID, { type: 'geojson', data: mpingCachedData || MPING_EMPTY_GEOJSON, generateId: true });
+    m.addLayer({ id: MPING_LAYER_ID, type: 'circle', source: MPING_SOURCE_ID, layout: { visibility: mpingVisible ? 'visible' : 'none' }, paint: { 'circle-color': ['match', ['get', 'category'], 'Rain/Snow', '#4499ff', 'Hail', '#00e5ff', 'Flood', '#00cc44', 'Wind Damage', '#ffdd00', 'Storm Damage', '#ff8800', 'Fog/Mist/Dust', '#aabbcc', 'Blowing Snow / Reduced Visibility', '#ddddff', 'Freezing Rain/Drizzle', '#88aaff', 'Ice Pellets/Sleet', '#99ccff', 'Tornado', '#ff3333', 'None', '#555555', 'Test', '#333333', '#888888'], 'circle-radius': ['interpolate', ['linear'], ['zoom'], 3, 3, 6, 4.2, 10, 6, 13, 8], 'circle-stroke-color': 'rgba(0,0,0,0.55)', 'circle-stroke-width': 1, 'circle-opacity': 0.9 } }, beforeId);
+    m.on('mouseenter', MPING_LAYER_ID, () => { m.getCanvas().style.cursor = 'pointer'; });
+    m.on('mouseleave', MPING_LAYER_ID, () => { m.getCanvas().style.cursor = ''; });
+    m.on('click', MPING_LAYER_ID, e => {
+      if (!e.features?.length) return;
+      const f = e.features[0]; const p = f.properties || {};
+      const coords = f.geometry?.coordinates ? [...f.geometry.coordinates] : [e.lngLat.lng, e.lngLat.lat];
+      const time = p.obtime ? new Date(p.obtime).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }) : '—';
+      const accentMap = { 'Rain/Snow': '#4499ff', 'Hail': '#00e5ff', 'Flood': '#00cc44', 'Wind Damage': '#ffdd00', 'Storm Damage': '#ff8800', 'Tornado': '#ff3333' };
+      new mapboxgl.Popup({ closeButton: true, closeOnClick: true, className: 'storm-popup', maxWidth: '260px' }).setLngLat(coords).setHTML(`<div class="storm-popup-card" style="--storm-accent:${accentMap[p.category] || '#888888'}"><div class="storm-popup-title">${p.description || p.category || 'mPING Report'}</div><div class="storm-popup-meta">mPING · ${p.category || ''}</div><div class="storm-popup-grid"><span class="storm-popup-k">Time</span><span class="storm-popup-v">${time}</span></div></div>`).addTo(m);
+    });
+  }
+
+  // Spotter Locations
+  if (!m.getSource(SPOTTER_LOCATIONS_SOURCE_ID)) {
+    m.addSource(SPOTTER_LOCATIONS_SOURCE_ID, { type: 'geojson', data: spotterLocationsCachedData || SPOTTER_LOCATIONS_EMPTY_GEOJSON, generateId: true });
+    m.addLayer({ id: SPOTTER_LOCATIONS_LAYER_ID, type: 'circle', source: SPOTTER_LOCATIONS_SOURCE_ID, layout: { visibility: spotterLocationsVisible ? 'visible' : 'none' }, paint: { 'circle-color': '#ff2222', 'circle-radius': ['interpolate', ['linear'], ['zoom'], 3, 3, 6, 4, 10, 5.5, 13, 7], 'circle-stroke-color': 'rgba(0,0,0,0.6)', 'circle-stroke-width': 1, 'circle-opacity': 0.9 } }, beforeId);
+    m.on('mouseenter', SPOTTER_LOCATIONS_LAYER_ID, () => { m.getCanvas().style.cursor = 'pointer'; });
+    m.on('mouseleave', SPOTTER_LOCATIONS_LAYER_ID, () => { m.getCanvas().style.cursor = ''; });
+    m.on('click', SPOTTER_LOCATIONS_LAYER_ID, e => {
+      if (!e.features?.length) return;
+      const f = e.features[0]; const p = f.properties || {};
+      const coords = f.geometry?.coordinates ? [...f.geometry.coordinates] : [e.lngLat.lng, e.lngLat.lat];
+      new mapboxgl.Popup({ closeButton: true, closeOnClick: true, className: 'storm-popup', maxWidth: '260px' }).setLngLat(coords).setHTML(`<div class="storm-popup-card" style="--storm-accent:#ff2222"><div class="storm-popup-title">${p.label || p.name || 'Spotter'}</div><div class="storm-popup-meta">Spotter Network · ${p.status || ''}</div><div class="storm-popup-grid"><span class="storm-popup-k">Updated</span><span class="storm-popup-v">${p.obtime_utc || '—'}</span></div></div>`).addTo(m);
+    });
+  }
+
+  // Alerts
+  if (!m.getSource('alerts-src')) {
+    m.addSource('alerts-src', { type: 'geojson', data: ALERTS_EMPTY_GEOJSON });
+    m.addLayer({ id: 'alerts-line-under', type: 'line', source: 'alerts-src', filter: ['==', ['geometry-type'], 'Polygon'], layout: { 'line-join': 'round', 'line-cap': 'round' }, paint: { 'line-color': '#000000', 'line-width': _alertsLineWidthExpr(false), 'line-opacity': 0.98 } }, beforeId);
+    m.addLayer({ id: 'alerts-fill-hit', type: 'fill', source: 'alerts-src', filter: ['==', ['geometry-type'], 'Polygon'], paint: { 'fill-color': '#000000', 'fill-opacity': 0.001 } }, beforeId);
+    m.addLayer({ id: 'alerts-line', type: 'line', source: 'alerts-src', filter: ['==', ['geometry-type'], 'Polygon'], layout: { 'line-join': 'round', 'line-cap': 'round' }, paint: { 'line-color': _alertsColorExpr('#FFFFFF'), 'line-color-transition': { duration: 260, delay: 0 }, 'line-width': _alertsLineWidthExpr(true), 'line-opacity': 0.98 } }, beforeId);
+    m.addLayer({ id: 'alerts-point', type: 'circle', source: 'alerts-src', filter: ['==', ['geometry-type'], 'Point'], paint: { 'circle-color': _alertsColorExpr('#FFFFFF'), 'circle-color-transition': { duration: 260, delay: 0 }, 'circle-radius': ['interpolate', ['linear'], ['zoom'], 4, 3.5, 8, 5, 12, 7], 'circle-stroke-color': '#000000', 'circle-stroke-width': 1.2, 'circle-opacity': 0.95 } }, beforeId);
+    m.on('mouseenter', 'alerts-fill-hit', () => { m.getCanvas().style.cursor = 'pointer'; });
+    m.on('mouseleave', 'alerts-fill-hit', () => { m.getCanvas().style.cursor = ''; });
+    m.on('click', 'alerts-fill-hit', e => _openAlertPopupOnMap(m, e));
+    m.on('mouseenter', 'alerts-line', () => { m.getCanvas().style.cursor = 'pointer'; });
+    m.on('mouseleave', 'alerts-line', () => { m.getCanvas().style.cursor = ''; });
+    m.on('click', 'alerts-line', e => _openAlertPopupOnMap(m, e));
+    m.on('mouseenter', 'alerts-point', () => { m.getCanvas().style.cursor = 'pointer'; });
+    m.on('mouseleave', 'alerts-point', () => { m.getCanvas().style.cursor = ''; });
+    m.on('click', 'alerts-point', e => _openAlertPopupOnMap(m, e));
+    const alertVis = alertsVisible ? 'visible' : 'none';
+    ALERT_LAYER_IDS.forEach(id => { if (m.getLayer(id)) m.setLayoutProperty(id, 'visibility', alertVis); });
+    if (alertsMapReady) {
+      m.getSource('alerts-src')?.setData({ type: 'FeatureCollection', features: _alertsStyledFeatures() });
+    }
+  }
+
+  // Cameras — add any already-loaded camera layers
+  if (trafficCameraFeatures.length && !m.getSource(TRAFFIC_CAMERA_SOURCE_ID)) {
+    const trafficVis = camerasOverlayVisible && _cameraFilterEnabled('traffic');
+    m.addSource(TRAFFIC_CAMERA_SOURCE_ID, { type: 'geojson', data: { type: 'FeatureCollection', features: trafficCameraFeatures } });
+    m.addLayer({
+      id: TRAFFIC_CAMERA_LAYER_ID, type: 'circle', source: TRAFFIC_CAMERA_SOURCE_ID,
+      layout: { 'visibility': trafficVis ? 'visible' : 'none' },
+      paint: { 'circle-radius': ['interpolate', ['linear'], ['zoom'], 4, 3, 10, 5], 'circle-color': '#3b82f6', 'circle-stroke-color': '#fff', 'circle-stroke-width': 1.2, 'circle-opacity': 0.95 },
+    }, beforeId);
+    _bindCameraLayerEventsOnMap(TRAFFIC_CAMERA_LAYER_ID, m);
+  }
+  const _cameraLayerInits = [
+    [WEATHER_CAMERA_SOURCE_ID, WEATHER_CAMERA_LAYER_ID, weatherCameraFeatures, '#22c55e', camerasOverlayVisible && _cameraFilterEnabled('weather')],
+    [WXWISE_CHASER_SOURCE_ID, WXWISE_CHASER_LAYER_ID, wxwiseChaserFeatures, '#ef4444', camerasOverlayVisible && _cameraFilterEnabled('chasers')],
+    [RO_CHASER_SOURCE_ID, RO_CHASER_LAYER_ID, roChaserFeatures, '#ef4444', camerasOverlayVisible && _cameraFilterEnabled('chasers')],
+  ];
+  _cameraLayerInits.forEach(([srcId, layerId, features, color, visible]) => {
+    if (!features || !features.length) return;
+    if (!m.getSource(srcId)) {
+      m.addSource(srcId, { type: 'geojson', data: { type: 'FeatureCollection', features }, generateId: true });
+      m.addLayer({ id: layerId, type: 'circle', source: srcId, layout: { visibility: visible ? 'visible' : 'none' }, paint: { 'circle-radius': ['interpolate', ['linear'], ['zoom'], 4, 3, 10, 5], 'circle-color': color, 'circle-stroke-color': '#fff', 'circle-stroke-width': 1.2, 'circle-opacity': 0.95 } }, beforeId);
+      _bindCameraLayerEventsOnMap(layerId, m);
+    }
+  });
+  const _camExpr = _cameraStateFilterExpr();
+  [TRAFFIC_CAMERA_LAYER_ID, WEATHER_CAMERA_LAYER_ID, WXWISE_CHASER_LAYER_ID, RO_CHASER_LAYER_ID].forEach(layerId => {
+    if (m.getLayer(layerId)) { try { m.setFilter(layerId, _camExpr); } catch (_) {} }
+  });
+}
+
 function _paneSetActiveComboLayer(pane) {
   const ck = _paneComboKey(pane);
   const safeId = `pane-${pane.id}-radar-${ck.replace(/[:.]/g, '-')}`;
@@ -8755,7 +9537,7 @@ function _paneSetActiveComboLayer(pane) {
   let layer = pane.layerPool.get(safeId);
   if (!layer) {
     layer = new RadarGateLayer(safeId);
-    pane.map.addLayer(layer);
+    pane.map.addLayer(layer, pane.sweepLayer?.id || (pane.map.getLayer('stations-dot') ? 'stations-dot' : undefined));
     pane.layerPool.set(safeId, layer);
   }
   layer.setVisible(true);
@@ -8771,7 +9553,8 @@ function _paneEnsureSweepLayer(pane) {
   let layer = pane.layerPool.get(safeId);
   if (!layer) {
     layer = new RadarGateLayer(safeId);
-    pane.map.addLayer(layer);
+    layer._visible = true;
+    pane.map.addLayer(layer, pane.map.getLayer('stations-dot') ? 'stations-dot' : undefined);
     pane.layerPool.set(safeId, layer);
   }
   layer.setVisible(false);
@@ -8899,12 +9682,16 @@ function _paneRenderFrame(pane, frame, opts = {}) {
   });
   pane.lastFrameData = frame;
   _setPaneFrameTime(pane.id, pane.lastKey, frame);
+  const _noProductEl = document.getElementById(`pane-no-product-${pane.id}`);
+  if (_noProductEl) _noProductEl.style.display = 'none';
   if (inspectorEnabled && inspectorPaneId === pane.id) updateInspectorReadout();
 }
 
-async function _loadSecondaryPaneLatest(paneId, { force = false, syncToPrimaryHistory = true, priority = true, deferRender = false, animate = null } = {}) {
+async function _loadSecondaryPaneLatest(paneId, { force = false, syncToPrimaryHistory = true, priority = true, deferRender = false, animate = null, userSelected = false, knownMeta = null } = {}) {
   const pane = secondaryPaneMaps.get(paneId);
   if (!pane || !pane.ready || !activeStation) return;
+  if (!pane.productSelected && !userSelected) return;
+  if (userSelected) pane.productSelected = true;
   if (pane.inflight && !force) return;
 
   if (isLocalRadarMode()) {
@@ -9013,9 +9800,9 @@ async function _loadSecondaryPaneLatest(paneId, { force = false, syncToPrimaryHi
   try {
     const prevKey = pane.lastKey;
     let entries = historyMap.get(comboKey) || [];
-    const useLocalHistoryOnly = syncToPrimaryHistory && historyIdx !== -1 && entries.length >= targetFrames;
-    let meta = null;
-    if (!useLocalHistoryOnly) {
+    const useLocalHistoryOnly = syncToPrimaryHistory && _isManualHistoryActive() && entries.length >= targetFrames;
+    let meta = (knownMeta?.key && !useLocalHistoryOnly) ? knownMeta : null;
+    if (!useLocalHistoryOnly && !meta) {
       meta = await findLatestKeyCurrentOnly(activeStation, { family, tilt });
       if (!meta?.key && force) {
         meta = await findLatestKey(activeStation, { family, tilt });
@@ -9165,12 +9952,31 @@ function _tryRenderCachedSyncedMultiPaneHistoryFrame(idx, history, { immediateUp
 function _syncPaneControlsFromActive() {
   if (activePaneId === 1) {
     if (!levelII) activeTilt = restoreTiltSelectL3(activeStation, activeFamily, activeTilt);
+    if (familySelect) familySelect.disabled = false;
+    if (tiltSelect && levelII) tiltSelect.disabled = false;
     setActiveSelectionUi(activeFamily, activeTilt);
     return;
   }
   const pane = secondaryPaneMaps.get(activePaneId);
   if (!pane) return;
+  if (!pane.productSelected) {
+    if (familySelect) {
+      familySelect.disabled = false;
+      familySelect.value = '';
+    }
+    if (tiltSelect) {
+      tiltSelect.disabled = true;
+      tiltSelect.value = '';
+    }
+    _refreshL2AvailabilityUi();
+    _syncIslandDropdown(familyDropdownState);
+    _syncIslandDropdown(tiltDropdownState);
+    _queueProductColorBarUpdate('');
+    return;
+  }
   if (!levelII) pane.tilt = restoreTiltSelectL3(activeStation, pane.family, pane.tilt);
+  if (familySelect) familySelect.disabled = false;
+  if (tiltSelect && levelII) tiltSelect.disabled = false;
   setActiveSelectionUi(pane.family, pane.tilt);
 }
 
@@ -9240,14 +10046,35 @@ function _createSecondaryPane(id) {
     sweepState: null,
     lastFrameData: null,
     layerPool: new Map(),
+    productSelected: false,
   };
   secondaryPaneMaps.set(id, pane);
 
   paneMap.on('load', () => {
     pane.ready = true;
-    if (activeStation && (!levelII || isLocalRadarMode())) {
-      _loadSecondaryPaneLatest(id, { force: true });
-    }
+    _applyDarkStyleTextTweaks(paneMap, mapStyle);
+    _applySatelliteStyleTweaks(paneMap, mapStyle);
+    _initStationsOnMap(paneMap, id);
+    _paneEnsureSweepLayer(pane);
+    _initOverlaysOnSecondaryMap(paneMap);
+    _initDrawLayersOnMap(paneMap);
+    _bindDrawInteractionsOnMap(paneMap, id);
+    _applyDrawInteractionStateOnMap(paneMap);
+    updateDrawingsSource();
+    updateDrawPreview(null);
+    setDrawPreviewStyle();
+    bringCityLabelsAboveRadar(paneMap);
+    // Sync current overlay data to this new pane
+    if (spcMapReady && spcVisible) void refreshSpcOverlay(true);
+    else if (spcMapReady && spcRenderedKey) { /* data already empty, visibility already set */ }
+    if (mesoMapReady && mesoVisible) void refreshMesoOverlay(false);
+    if (watchesMapReady && watchesVisible) void refreshWatchesOverlay(false);
+    if (lightningMapReady && lightningVisible) void refreshLightningOverlay(false);
+    if (tvsMapReady && tvsVisible) void refreshTvsOverlay(false);
+    if (stormReportsMapReady && stormReportsVisible) void refreshStormReports(false);
+    if (mpingMapReady) void refreshMpingLayer(false);
+    if (spotterLocationsMapReady) void refreshSpotterLocationLayer(false);
+    if (alertsMapReady) _alertsRefreshPresentationNow();
   });
   paneMap.on('mousedown', () => _setActivePane(id));
   paneMap.on('move', () => _schedulePaneSyncFrom(id, paneMap));
@@ -9259,6 +10086,13 @@ function _createSecondaryPane(id) {
 function _destroySecondaryPane(id) {
   const pane = secondaryPaneMaps.get(id);
   if (pane) {
+    if (drawActiveMap === pane.map) {
+      drawActiveMap = null;
+      drawMouseDown = false;
+      drawLastPx = null;
+      drawPoints = [];
+      updateDrawPreview(null);
+    }
     _cancelPaneSweep(pane, false);
     _disposePaneLayerPool(pane);
     try { pane.map.remove(); } catch (_) {}
@@ -9374,12 +10208,12 @@ function _restartPanePolling() {
   panePollTimer = setInterval(() => {
     if (panePollRunning) return;
     if (Date.now() < paneInteractionUntilMs) return;
-    if (historyIdx !== -1 || isPlaying) return;
+    if (_isManualHistoryActive() || isPlaying) return;
     panePollRunning = true;
     _loadVisibleSecondaryPanes({ force: false }).finally(() => {
       panePollRunning = false;
     });
-  }, POLL_MS);
+  }, activeRadarPollMs());
 }
 
 function setMultiPaneCount(count) {
@@ -9412,9 +10246,6 @@ function setMultiPaneCount(count) {
     secondaryPaneMaps.forEach(p => p.map.resize());
   }, 0);
 
-  if (activeStation && (!levelII || isLocalRadarMode())) {
-    void _loadVisibleSecondaryPanes({ force: true });
-  }
   _scheduleCurrentStationResidencyTrim(0);
   _restartPanePolling();
 }
@@ -9678,6 +10509,7 @@ function _clearInspectorPointer(paneId) {
 }
 
 window.addEventListener('resize', () => {
+  _setBoardContextMenuOpen(false);
   if (inspectorEnabled) _positionInspectorPanel();
 });
 
@@ -9864,6 +10696,7 @@ function cancelSweep(promoteNewFrame = false) {
 window.addEventListener('mouseup', () => {
   if (!drawMode || !drawMouseDown) return;
   drawMouseDown = false;
+  drawActiveMap = null;
   drawLastPx = null;
   if (drawPoints.length >= 2) finishDrawLine();
   else { drawPoints = []; updateDrawPreview(null); }
@@ -9872,21 +10705,23 @@ window.addEventListener('mouseup', () => {
 
 // -- Drawing functions ---------------------------------------------------------
 function updateDrawingsSource() {
-  map.getSource('drawings')?.setData({ type: 'FeatureCollection', features: drawFeatures });
+  const data = { type: 'FeatureCollection', features: drawFeatures };
+  _overlayMaps().forEach(m => m.getSource('drawings')?.setData(data));
 }
 
 function updateDrawPreview(lngLat) {
-  const src = map.getSource('draw-preview');
-  if (!src) return;
   const coords = lngLat ? [...drawPoints, [lngLat.lng, lngLat.lat]] : [...drawPoints];
-  src.setData({ type: 'Feature', geometry: { type: 'LineString', coordinates: coords }, properties: {} });
+  const data = { type: 'Feature', geometry: { type: 'LineString', coordinates: coords }, properties: {} };
+  _overlayMaps().forEach(m => m.getSource('draw-preview')?.setData(data));
 }
 
 function setDrawPreviewStyle() {
-  if (!map.getLayer('draw-preview')) return;
-  map.setPaintProperty('draw-preview', 'line-color', drawColor);
-  map.setPaintProperty('draw-preview', 'line-width', drawThickness);
-  map.setPaintProperty('draw-preview', 'line-dasharray', drawStyle === 'dashed' ? [5, 3] : null);
+  _overlayMaps().forEach(m => {
+    if (!m.getLayer('draw-preview')) return;
+    m.setPaintProperty('draw-preview', 'line-color', drawColor);
+    m.setPaintProperty('draw-preview', 'line-width', drawThickness);
+    m.setPaintProperty('draw-preview', 'line-dasharray', drawStyle === 'dashed' ? [5, 3] : null);
+  });
 }
 
 function finishDrawLine() {
@@ -9903,6 +10738,7 @@ function finishDrawLine() {
 
 function clearAllDrawings() {
   drawMouseDown = false;
+  drawActiveMap = null;
   drawLastPx = null;
   drawPoints = [];
   drawFeatures = [];
@@ -9913,13 +10749,12 @@ function clearAllDrawings() {
 function startDrawMode() {
   drawMode = true;
   drawMouseDown = false;
+  drawActiveMap = null;
   drawLastPx = null;
   drawPoints = [];
   document.getElementById('draw-toolbar').style.display = 'flex';
   document.getElementById('tools-btn')?.classList.add('active');
-  map.getCanvas().style.cursor = 'crosshair';
-  map.dragPan.disable();
-  map.doubleClickZoom.disable();
+  _overlayMaps().forEach(_applyDrawInteractionStateOnMap);
   setDrawPreviewStyle();
   closeToolsMenu();
 }
@@ -9927,15 +10762,14 @@ function startDrawMode() {
 function exitDrawMode() {
   if (drawMouseDown && drawPoints.length >= 2) finishDrawLine();
   drawMouseDown = false;
+  drawActiveMap = null;
   drawLastPx = null;
   drawPoints = [];
   updateDrawPreview(null);
   drawMode = false;
   document.getElementById('draw-toolbar').style.display = 'none';
   document.getElementById('tools-btn')?.classList.remove('active');
-  map.getCanvas().style.cursor = '';
-  map.dragPan.enable();
-  map.doubleClickZoom.enable();
+  _overlayMaps().forEach(_applyDrawInteractionStateOnMap);
 }
 
 let radarLayer = null;      // always points to the currently-active pool layer
@@ -10024,8 +10858,8 @@ function _clearVisiblePrimaryForPendingCombo(reason = '') {
   displayedPrimaryFamily = activeFamily;
 }
 
-function bringCityLabelsAboveRadar() {
-  const layers = map.getStyle()?.layers;
+function bringCityLabelsAboveRadar(targetMap = map) {
+  const layers = targetMap.getStyle()?.layers;
   if (!Array.isArray(layers)) return;
   const cityLabelIds = layers
     .filter(l => {
@@ -10035,10 +10869,244 @@ function bringCityLabelsAboveRadar() {
     })
     .map(l => l.id);
   for (const id of cityLabelIds) {
-    try { map.moveLayer(id); } catch (_) {}
+    try { targetMap.moveLayer(id); } catch (_) {}
   }
   // Keep radar IDs above city labels so they stay readable.
-  try { map.moveLayer('stations-label'); } catch (_) {}
+  try { targetMap.moveLayer('stations-label'); } catch (_) {}
+}
+
+const _stationInteractionMaps = new WeakSet();
+const _drawInteractionMaps = new WeakSet();
+let drawActiveMap = null;
+
+function _stationFeatureCollection() {
+  return {
+    type: 'FeatureCollection',
+    features: Object.entries(VIEWABLE_STATIONS).map(([id, [lat, lon, name]]) => ({
+      type: 'Feature',
+      geometry: { type: 'Point', coordinates: [lon, lat] },
+      properties: {
+        id,
+        label: displayStationId(id),
+        name,
+        dotColor: stationDotColor(id),
+        stationKind: stationKind(id),
+        stationSource: stationSource(id),
+      },
+    })),
+  };
+}
+
+function _syncStationLayerVisibilityOnMap(targetMap, visible = radarSitesVisible) {
+  if (!targetMap) return;
+  const vis = visible ? 'visible' : 'none';
+  STATION_LAYER_IDS.forEach(id => {
+    if (targetMap.getLayer(id)) targetMap.setLayoutProperty(id, 'visibility', vis);
+  });
+  if (visible && targetMap.getLayer('stations-label')) {
+    targetMap.setFilter('stations-label', ['has', 'name']);
+  }
+  if (!visible) {
+    if (targetMap.getLayer('stations-hover')) targetMap.setFilter('stations-hover', ['==', 'id', '']);
+    if (targetMap.getLayer('stations-active')) targetMap.setFilter('stations-active', ['==', 'id', '']);
+  }
+}
+
+function _setStationsActiveFilter(stationId = '') {
+  const nextId = (stationId && VIEWABLE_STATIONS[stationId]) ? stationId : '';
+  _overlayMaps().forEach(m => {
+    if (m.getLayer('stations-active')) m.setFilter('stations-active', ['==', 'id', nextId]);
+  });
+}
+
+function _clearStationsHoverFilter() {
+  _overlayMaps().forEach(m => {
+    if (m.getLayer('stations-hover')) m.setFilter('stations-hover', ['==', 'id', '']);
+  });
+}
+
+function _initStationsOnMap(targetMap, paneId = 1) {
+  if (!targetMap.getSource('stations')) {
+    targetMap.addSource('stations', {
+      type: 'geojson',
+      data: _stationFeatureCollection(),
+    });
+  }
+  if (!targetMap.getLayer('stations-dot')) {
+    targetMap.addLayer({
+      id: 'stations-dot',
+      type: 'circle',
+      source: 'stations',
+      paint: {
+        'circle-radius': ['interpolate', ['linear'], ['zoom'], 3, 5.8, 8, 7.0, 12, 8.4],
+        'circle-color': ['coalesce', ['get', 'dotColor'], '#ffffff'],
+        'circle-opacity': 0.96,
+        'circle-stroke-color': '#000000',
+        'circle-stroke-width': 2.1,
+        'circle-stroke-opacity': 0.95,
+      },
+    });
+  }
+  if (!targetMap.getLayer('stations-hover')) {
+    targetMap.addLayer({
+      id: 'stations-hover',
+      type: 'circle',
+      source: 'stations',
+      filter: ['==', 'id', ''],
+      paint: {
+        'circle-radius': ['interpolate', ['linear'], ['zoom'], 3, 7.6, 8, 8.9, 12, 10.3],
+        'circle-color': ['coalesce', ['get', 'dotColor'], '#ffffff'],
+        'circle-opacity': 1,
+        'circle-stroke-color': '#000000',
+        'circle-stroke-width': 2.8,
+        'circle-stroke-opacity': 1,
+      },
+    });
+  }
+  if (!targetMap.getLayer('stations-active')) {
+    targetMap.addLayer({
+      id: 'stations-active',
+      type: 'circle',
+      source: 'stations',
+      filter: ['==', 'id', ''],
+      paint: {
+        'circle-radius': ['interpolate', ['linear'], ['zoom'], 3, 5.8, 8, 7.0, 12, 8.4],
+        'circle-color': ['coalesce', ['get', 'dotColor'], '#ffffff'],
+        'circle-stroke-color': '#000000',
+        'circle-stroke-width': 2.6,
+        'circle-stroke-opacity': 1,
+      },
+    });
+  }
+  if (!targetMap.getLayer('stations-label')) {
+    targetMap.addLayer({
+      id: 'stations-label',
+      type: 'symbol',
+      source: 'stations',
+      layout: {
+        'text-field': ['get', 'label'],
+        'text-size': 9,
+        'text-anchor': 'bottom',
+        'text-offset': [0, -0.9],
+        'text-allow-overlap': true,
+        'text-ignore-placement': true,
+      },
+      paint: { 'text-color': '#ffffff', 'text-halo-color': '#000000', 'text-halo-width': 1.35 },
+    });
+  }
+  _syncStationLayerVisibilityOnMap(targetMap, radarSitesVisible);
+  if (radarSitesVisible && targetMap.getLayer('stations-active')) {
+    const selectedStation = canonicalStationId(activeStation);
+    targetMap.setFilter('stations-active', ['==', 'id', (selectedStation && VIEWABLE_STATIONS[selectedStation]) ? selectedStation : '']);
+  }
+  if (_stationInteractionMaps.has(targetMap)) return;
+  _stationInteractionMaps.add(targetMap);
+  let hoverId = '';
+  targetMap.on('mousemove', 'stations-dot', e => {
+    if (drawMode) {
+      hoverId = '';
+      if (targetMap.getLayer('stations-hover')) targetMap.setFilter('stations-hover', ['==', 'id', '']);
+      targetMap.getCanvas().style.cursor = 'crosshair';
+      return;
+    }
+    const id = e.features?.[0]?.properties?.id || '';
+    if (!id || id === hoverId) return;
+    hoverId = id;
+    if (targetMap.getLayer('stations-hover')) targetMap.setFilter('stations-hover', ['==', 'id', id]);
+    targetMap.getCanvas().style.cursor = 'pointer';
+  });
+  targetMap.on('mouseleave', 'stations-dot', () => {
+    hoverId = '';
+    if (targetMap.getLayer('stations-hover')) targetMap.setFilter('stations-hover', ['==', 'id', '']);
+    targetMap.getCanvas().style.cursor = drawMode ? 'crosshair' : '';
+  });
+  targetMap.on('click', 'stations-dot', e => {
+    if (drawMode) return;
+    if (paneId > 1) _setActivePane(paneId);
+    const stationId = e.features?.[0]?.properties?.id;
+    if (stationId) selectStation(stationId);
+  });
+}
+
+function _initDrawLayersOnMap(targetMap) {
+  if (!targetMap.getSource('drawings')) {
+    targetMap.addSource('drawings', {
+      type: 'geojson',
+      data: { type: 'FeatureCollection', features: drawFeatures },
+    });
+  }
+  if (!targetMap.getLayer('drawings-solid')) {
+    targetMap.addLayer({
+      id: 'drawings-solid', type: 'line', source: 'drawings',
+      filter: ['!', ['get', 'dashed']],
+      layout: { 'line-cap': 'round', 'line-join': 'round' },
+      paint: { 'line-color': ['get', 'color'], 'line-width': ['get', 'width'] },
+    });
+  }
+  if (!targetMap.getLayer('drawings-dashed')) {
+    targetMap.addLayer({
+      id: 'drawings-dashed', type: 'line', source: 'drawings',
+      filter: ['get', 'dashed'],
+      layout: { 'line-cap': 'round', 'line-join': 'round' },
+      paint: { 'line-color': ['get', 'color'], 'line-width': ['get', 'width'], 'line-dasharray': [5, 3] },
+    });
+  }
+  if (!targetMap.getSource('draw-preview')) {
+    targetMap.addSource('draw-preview', {
+      type: 'geojson',
+      data: { type: 'Feature', geometry: { type: 'LineString', coordinates: [] }, properties: {} },
+    });
+  }
+  if (!targetMap.getLayer('draw-preview')) {
+    targetMap.addLayer({
+      id: 'draw-preview', type: 'line', source: 'draw-preview',
+      layout: { 'line-cap': 'round', 'line-join': 'round' },
+      paint: { 'line-color': '#ff3b3b', 'line-width': 2, 'line-opacity': 0.9 },
+    });
+  }
+}
+
+function _applyDrawInteractionStateOnMap(targetMap) {
+  if (!targetMap) return;
+  targetMap.getCanvas().style.cursor = drawMode ? 'crosshair' : '';
+  if (drawMode) {
+    targetMap.dragPan.disable();
+    targetMap.doubleClickZoom.disable();
+  } else {
+    targetMap.dragPan.enable();
+    targetMap.doubleClickZoom.enable();
+  }
+}
+
+function _bindDrawInteractionsOnMap(targetMap, paneId = 1) {
+  if (!targetMap || _drawInteractionMaps.has(targetMap)) return;
+  _drawInteractionMaps.add(targetMap);
+  targetMap.on('mousedown', e => {
+    if (!drawMode) return;
+    if (paneId > 1) _setActivePane(paneId);
+    drawMouseDown = true;
+    drawActiveMap = targetMap;
+    drawLastPx = [e.point.x, e.point.y];
+    drawPoints = [[e.lngLat.lng, e.lngLat.lat]];
+    updateDrawPreview(null);
+  });
+  targetMap.on('mousemove', e => {
+    if (!drawMode || !drawMouseDown || drawActiveMap !== targetMap || !drawLastPx) return;
+    const dx = e.point.x - drawLastPx[0];
+    const dy = e.point.y - drawLastPx[1];
+    if (dx * dx + dy * dy < 25) return;
+    drawLastPx = [e.point.x, e.point.y];
+    drawPoints.push([e.lngLat.lng, e.lngLat.lat]);
+    updateDrawPreview(null);
+  });
+  targetMap.on('mouseup', () => {
+    if (!drawMode || !drawMouseDown || drawActiveMap !== targetMap) return;
+    drawMouseDown = false;
+    drawActiveMap = null;
+    drawLastPx = null;
+    if (drawPoints.length >= 2) finishDrawLine();
+    else { drawPoints = []; updateDrawPreview(null); }
+  });
 }
 
 function _isDarkBaseStyle(styleId = mapStyle) {
@@ -10154,38 +11222,7 @@ map.on('load', () => {
   warmL3TransportOnce();
   _applyDarkStyleTextTweaks(map, mapStyle);
   _applySatelliteStyleTweaks(map, mapStyle);
-  map.addSource('stations', {
-    type: 'geojson',
-    data: {
-      type: 'FeatureCollection',
-      features: Object.entries(VIEWABLE_STATIONS).map(([id, [lat, lon, name]]) => ({
-        type: 'Feature',
-        geometry: { type: 'Point', coordinates: [lon, lat] },
-        properties: {
-          id,
-          label: displayStationId(id),
-          name,
-          dotColor: stationDotColor(id),
-          stationKind: stationKind(id),
-          stationSource: stationSource(id),
-        },
-      })),
-    },
-  });
-
-  map.addLayer({
-    id: 'stations-dot',
-    type: 'circle',
-    source: 'stations',
-    paint: {
-      'circle-radius': ['interpolate', ['linear'], ['zoom'], 3, 5.8, 8, 7.0, 12, 8.4],
-      'circle-color': ['coalesce', ['get', 'dotColor'], '#ffffff'],
-      'circle-opacity': 0.96,
-      'circle-stroke-color': '#000000',
-      'circle-stroke-width': 2.1,
-      'circle-stroke-opacity': 0.95,
-    },
-  });
+  _initStationsOnMap(map, 1);
 
   // Sweep mask layer — sits above all pool layers, below station dots.
   // Pool layers are inserted before this layer so they render underneath.
@@ -10196,102 +11233,13 @@ map.on('load', () => {
   sweepLayer = new SweepLayer('radar-sweep');
   map.addLayer(sweepLayer, 'stations-dot');
 
-  map.addLayer({
-    id: 'stations-hover',
-    type: 'circle',
-    source: 'stations',
-    filter: ['==', 'id', ''],
-    paint: {
-      'circle-radius': ['interpolate', ['linear'], ['zoom'], 3, 7.6, 8, 8.9, 12, 10.3],
-      'circle-color': ['coalesce', ['get', 'dotColor'], '#ffffff'],
-      'circle-opacity': 1,
-      'circle-stroke-color': '#000000',
-      'circle-stroke-width': 2.8,
-      'circle-stroke-opacity': 1,
-    },
-  });
-
-  map.addLayer({
-    id: 'stations-active',
-    type: 'circle',
-    source: 'stations',
-    filter: ['==', 'id', ''],
-    paint: {
-      'circle-radius': ['interpolate', ['linear'], ['zoom'], 3, 5.8, 8, 7.0, 12, 8.4],
-      'circle-color': ['coalesce', ['get', 'dotColor'], '#ffffff'],
-      'circle-stroke-color': '#000000',
-      'circle-stroke-width': 2.6,
-      'circle-stroke-opacity': 1,
-    },
-  });
-
-  map.addLayer({
-    id: 'stations-label',
-    type: 'symbol',
-    source: 'stations',
-    layout: {
-      'text-field': ['get', 'label'],
-      'text-size': 9,
-      'text-anchor': 'bottom',
-      'text-offset': [0, -0.9],
-      'text-allow-overlap': true,
-      'text-ignore-placement': true,
-    },
-    paint: { 'text-color': '#ffffff', 'text-halo-color': '#000000', 'text-halo-width': 1.35 },
-  });
-
-  let hoverId = '';
-  map.on('mousemove', 'stations-dot', e => {
-    const id = e.features[0].properties.id;
-    if (id === hoverId) return;
-    hoverId = id;
-    map.setFilter('stations-hover', ['==', 'id', id]);
-    map.getCanvas().style.cursor = 'pointer';
-  });
-
-  map.on('mouseleave', 'stations-dot', () => {
-    hoverId = '';
-    map.setFilter('stations-hover', ['==', 'id', '']);
-    map.getCanvas().style.cursor = '';
-  });
-
-  map.on('click', 'stations-dot', e => {
-    if (drawMode) return;
-    const stationId = e.features[0].properties.id;
-    selectStation(stationId);
-  });
-
   setStationLayersVisible(radarSitesVisible);
 
   map.on('mousemove', e => _updateInspectorPointer(map, e, 1));
   map.on('mouseout', () => _clearInspectorPointer(1));
 
   // -- Drawing sources / layers ----------------------------------------
-  map.addSource('drawings', {
-    type: 'geojson',
-    data: { type: 'FeatureCollection', features: [] },
-  });
-  map.addLayer({
-    id: 'drawings-solid', type: 'line', source: 'drawings',
-    filter: ['!', ['get', 'dashed']],
-    layout: { 'line-cap': 'round', 'line-join': 'round' },
-    paint: { 'line-color': ['get', 'color'], 'line-width': ['get', 'width'] },
-  });
-  map.addLayer({
-    id: 'drawings-dashed', type: 'line', source: 'drawings',
-    filter: ['get', 'dashed'],
-    layout: { 'line-cap': 'round', 'line-join': 'round' },
-    paint: { 'line-color': ['get', 'color'], 'line-width': ['get', 'width'], 'line-dasharray': [5, 3] },
-  });
-  map.addSource('draw-preview', {
-    type: 'geojson',
-    data: { type: 'Feature', geometry: { type: 'LineString', coordinates: [] }, properties: {} },
-  });
-  map.addLayer({
-    id: 'draw-preview', type: 'line', source: 'draw-preview',
-    layout: { 'line-cap': 'round', 'line-join': 'round' },
-    paint: { 'line-color': '#ff3b3b', 'line-width': 2, 'line-opacity': 0.9 },
-  });
+  _initDrawLayersOnMap(map);
 
   initSpcOverlayLayers();
   initMesoOverlayLayers();
@@ -10305,33 +11253,8 @@ map.on('load', () => {
   bringCityLabelsAboveRadar();
   syncCameraToggleUi();
   _scheduleDeferredStartupSync();
-
-  // Freehand hold-to-draw
-  map.on('mousedown', e => {
-    if (!drawMode) return;
-    drawMouseDown = true;
-    drawLastPx = [e.point.x, e.point.y];
-    drawPoints = [[e.lngLat.lng, e.lngLat.lat]];
-    updateDrawPreview(null);
-  });
-
-  map.on('mousemove', e => {
-    if (!drawMode || !drawMouseDown) return;
-    const dx = e.point.x - drawLastPx[0];
-    const dy = e.point.y - drawLastPx[1];
-    if (dx * dx + dy * dy < 25) return; // skip if < 5px moved
-    drawLastPx = [e.point.x, e.point.y];
-    drawPoints.push([e.lngLat.lng, e.lngLat.lat]);
-    updateDrawPreview(null);
-  });
-
-  map.on('mouseup', e => {
-    if (!drawMode || !drawMouseDown) return;
-    drawMouseDown = false;
-    drawLastPx = null;
-    if (drawPoints.length >= 2) finishDrawLine();
-    else { drawPoints = []; updateDrawPreview(null); }
-  });
+  _bindDrawInteractionsOnMap(map, 1);
+  _applyDrawInteractionStateOnMap(map);
 });
 
 // -- State ---------------------------------------------------------------------
@@ -10399,6 +11322,7 @@ let alertsMapReady = false;
 let alertsFlushPending = false;
 const alertsById = new Map();
 const alertsPendingTimingById = new Map();
+let alertsExpiryTimer = null;
 let alertsVisible = true;
 let alertsSeeded = false;
 let overlayFlashNowMs = Date.now();
@@ -11217,6 +12141,7 @@ function _collectVisiblePaneHistoryProtectionKeys() {
   if (!protectMultiPaneHistory || !activeStation) return protectedKeys;
   for (const pane of secondaryPaneMaps.values()) {
     if (!pane || pane.id > multiPaneCount) continue;
+    if (!pane.productSelected) continue;
     const comboKey = _paneComboKey(pane);
     const entries = historyMap.get(comboKey) || [];
     for (const entry of entries) {
@@ -11279,6 +12204,7 @@ function _prefetchVisiblePaneHistoryNeighborhood(centerIndex, direction = 0) {
   if (multiPaneCount <= 1) return;
   for (const pane of secondaryPaneMaps.values()) {
     if (!pane || pane.id > multiPaneCount) continue;
+    if (!pane.productSelected) continue;
     const comboKey = _paneComboKey(pane);
     const entries = historyMap.get(comboKey) || [];
     if (!entries.length) continue;
@@ -11904,6 +12830,21 @@ function setFrameLabel(text, cls) {
   if (el) { el.textContent = text; el.className = cls || ''; }
 }
 
+function _flashFrameLabel(text, cls = 'live', durationMs = 1600) {
+  const el = document.getElementById('frame-label');
+  if (!el) return;
+  clearTimeout(boardCopyLabelTimer);
+  const previousText = el.textContent;
+  const previousClass = el.className;
+  setFrameLabel(text, cls);
+  boardCopyLabelTimer = setTimeout(() => {
+    boardCopyLabelTimer = null;
+    if (el.textContent === text && el.className === (cls || '')) {
+      setFrameLabel(previousText, previousClass);
+    }
+  }, Math.max(250, Number(durationMs) || 1600));
+}
+
 function showCachedActiveCombo() {
   const ck = activeCacheKey();
   const pooledLayer = layerPool.get(ck);
@@ -12518,6 +13459,12 @@ function _setCitySearchOpen(open) {
     }
     return;
   }
+  if (citySearchTimer) {
+    clearTimeout(citySearchTimer);
+    citySearchTimer = null;
+  }
+  citySearchReqSeq += 1;
+  if (citySearchInput) citySearchInput.value = '';
   _clearCitySearchResults();
 }
 
@@ -12549,11 +13496,15 @@ function _renderCitySearchResults(features = []) {
     btn.addEventListener('click', () => {
       const center = Array.isArray(f.center) ? f.center : (Array.isArray(f.geometry?.coordinates) ? f.geometry.coordinates : null);
       if (!center || center.length < 2) return;
+      const lng = Number(center[0]);
+      const lat = Number(center[1]);
+      const nearestStation = _nearestRadarStationId(lng, lat);
+      if (nearestStation) selectStation(nearestStation, { recenter: false });
       const bbox = Array.isArray(f.bbox) && f.bbox.length === 4 ? f.bbox : null;
       if (bbox) {
         map.fitBounds([[bbox[0], bbox[1]], [bbox[2], bbox[3]]], { padding: 50, duration: 700, maxZoom: 10 });
       } else {
-        map.flyTo({ center: [Number(center[0]), Number(center[1])], zoom: Math.max(map.getZoom(), 9), duration: 700 });
+        map.flyTo({ center: [lng, lat], zoom: Math.max(map.getZoom(), 9), duration: 700 });
       }
       _setCitySearchOpen(false);
     });
@@ -12630,8 +13581,6 @@ function setSettingsOpen(open) {
     syncNwwsSettingsUi();
     syncYouTubeEmbedUi();
     syncWarningPrefsUi();
-  } else {
-    resetSettingsSidebarState();
   }
 }
 
@@ -12739,6 +13688,7 @@ if (toggleCameras) {
     else {
       _clearCameraStartupRetry();
       void syncCameraLayersFromState();
+      _clearLoadedCameraData();
     }
     saveSettings();
   });
@@ -12753,12 +13703,123 @@ function setCameraFilterOpen(open) {
   btn.setAttribute('aria-expanded', open ? 'true' : 'false');
 }
 
+const US_STATE_NAMES = {
+  AL: 'Alabama', AK: 'Alaska', AZ: 'Arizona', AR: 'Arkansas', CA: 'California',
+  CO: 'Colorado', CT: 'Connecticut', DE: 'Delaware', FL: 'Florida', GA: 'Georgia',
+  HI: 'Hawaii', ID: 'Idaho', IL: 'Illinois', IN: 'Indiana', IA: 'Iowa',
+  KS: 'Kansas', KY: 'Kentucky', LA: 'Louisiana', ME: 'Maine', MD: 'Maryland',
+  MA: 'Massachusetts', MI: 'Michigan', MN: 'Minnesota', MS: 'Mississippi', MO: 'Missouri',
+  MT: 'Montana', NE: 'Nebraska', NV: 'Nevada', NH: 'New Hampshire', NJ: 'New Jersey',
+  NM: 'New Mexico', NY: 'New York', NC: 'North Carolina', ND: 'North Dakota', OH: 'Ohio',
+  OK: 'Oklahoma', OR: 'Oregon', PA: 'Pennsylvania', RI: 'Rhode Island', SC: 'South Carolina',
+  SD: 'South Dakota', TN: 'Tennessee', TX: 'Texas', UT: 'Utah', VT: 'Vermont',
+  VA: 'Virginia', WA: 'Washington', WV: 'West Virginia', WI: 'Wisconsin', WY: 'Wyoming',
+  DC: 'District of Columbia', PR: 'Puerto Rico', GU: 'Guam', VI: 'U.S. Virgin Islands',
+};
+
+let _cameraStateDropdownBound = false;
+
+function _syncCameraStateDropdown() {
+  const btn = document.getElementById('camera-state-btn');
+  const btnLabel = document.getElementById('camera-state-btn-label');
+  const panel = document.getElementById('camera-state-panel');
+  const searchInput = document.getElementById('camera-state-search-input');
+  const listEl = document.getElementById('camera-state-list');
+  if (!btn || !panel || !listEl) return;
+
+  if (cameraStateFilter !== 'ALL' && !cameraKnownStates.includes(cameraStateFilter)) {
+    cameraStateFilter = 'ALL';
+  }
+
+  // Update button label
+  const labelText = cameraStateFilter === 'ALL'
+    ? 'All States'
+    : (US_STATE_NAMES[cameraStateFilter] || cameraStateFilter);
+  if (btnLabel) btnLabel.textContent = labelText;
+
+  // Rebuild list
+  listEl.innerHTML = '';
+  const allItem = document.createElement('div');
+  allItem.className = 'camera-state-item' + (cameraStateFilter === 'ALL' ? ' active' : '');
+  allItem.textContent = 'All States';
+  allItem.dataset.value = 'ALL';
+  listEl.appendChild(allItem);
+
+  cameraKnownStates.forEach(code => {
+    const item = document.createElement('div');
+    item.className = 'camera-state-item' + (cameraStateFilter === code ? ' active' : '');
+    item.textContent = US_STATE_NAMES[code] ? `${US_STATE_NAMES[code]} (${code})` : code;
+    item.dataset.value = code;
+    listEl.appendChild(item);
+  });
+
+  // Apply search filter if open
+  if (searchInput && searchInput.value.trim()) {
+    _filterCameraStateList(searchInput.value.trim());
+  }
+
+  // Bind events once
+  if (!_cameraStateDropdownBound) {
+    _cameraStateDropdownBound = true;
+
+    btn.addEventListener('click', e => {
+      e.stopPropagation();
+      const isOpen = panel.classList.contains('open');
+      if (isOpen) {
+        panel.classList.remove('open');
+        btn.setAttribute('aria-expanded', 'false');
+      } else {
+        panel.classList.add('open');
+        btn.setAttribute('aria-expanded', 'true');
+        if (searchInput) { searchInput.value = ''; _filterCameraStateList(''); searchInput.focus(); }
+      }
+    });
+
+    listEl.addEventListener('click', e => {
+      const item = e.target?.closest?.('.camera-state-item');
+      if (!item) return;
+      const next = String(item.dataset.value || 'ALL').toUpperCase();
+      cameraStateFilter = (next === 'ALL' || cameraKnownStates.includes(next)) ? next : 'ALL';
+      panel.classList.remove('open');
+      btn.setAttribute('aria-expanded', 'false');
+      _syncCameraStateDropdown();
+      _applyCameraStateFilter();
+      saveSettings();
+    });
+
+    if (searchInput) {
+      searchInput.addEventListener('input', () => _filterCameraStateList(searchInput.value.trim()));
+      searchInput.addEventListener('click', e => e.stopPropagation());
+      searchInput.addEventListener('keydown', e => {
+        if (e.key === 'Escape') { panel.classList.remove('open'); btn.setAttribute('aria-expanded', 'false'); }
+      });
+    }
+
+    document.addEventListener('click', e => {
+      const dropdown = document.getElementById('camera-state-dropdown');
+      if (dropdown && !dropdown.contains(e.target)) {
+        panel.classList.remove('open');
+        btn.setAttribute('aria-expanded', 'false');
+      }
+    }, true);
+  }
+}
+
+function _filterCameraStateList(query) {
+  const listEl = document.getElementById('camera-state-list');
+  if (!listEl) return;
+  const q = query.toLowerCase();
+  Array.from(listEl.children).forEach(item => {
+    const text = item.textContent.toLowerCase();
+    item.classList.toggle('hidden', !!q && !text.includes(q));
+  });
+}
+
 function syncCameraFilterUi() {
   const trafficToggle = document.getElementById('camera-filter-traffic');
   const weatherToggle = document.getElementById('camera-filter-weather');
   const chasersToggle = document.getElementById('camera-filter-chasers');
   const videoOnlyToggle = document.getElementById('camera-video-only-toggle');
-  const stateSelect = document.getElementById('camera-state-select');
   const bindFeedToggle = (el, key) => {
     if (!el) return;
     el.checked = cameraFilterSelection[key] !== false;
@@ -12780,31 +13841,7 @@ function syncCameraFilterUi() {
     };
   }
 
-  if (stateSelect) {
-    stateSelect.innerHTML = '';
-    const allOpt = document.createElement('option');
-    allOpt.value = 'ALL';
-    allOpt.textContent = 'All States';
-    stateSelect.appendChild(allOpt);
-
-    cameraKnownStates.forEach(state => {
-      const opt = document.createElement('option');
-      opt.value = state;
-      opt.textContent = state;
-      stateSelect.appendChild(opt);
-    });
-
-    if (cameraStateFilter !== 'ALL' && !cameraKnownStates.includes(cameraStateFilter)) {
-      cameraStateFilter = 'ALL';
-    }
-    stateSelect.value = cameraStateFilter;
-    stateSelect.onchange = () => {
-      const next = String(stateSelect.value || 'ALL').toUpperCase();
-      cameraStateFilter = (next === 'ALL' || cameraKnownStates.includes(next)) ? next : 'ALL';
-      _applyCameraStateFilter();
-      saveSettings();
-    };
-  }
+  _syncCameraStateDropdown();
 }
 
 function setWarningPrefsOpen(open) {
@@ -13032,6 +14069,7 @@ const toggleWatches = document.getElementById('toggle-watches');
 const toggleLightning = document.getElementById('toggle-lightning');
 const toggleTvs = document.getElementById('toggle-tvs');
 const toggleRadarSites = document.getElementById('toggle-radar-sites');
+const toggleStormReports = document.getElementById('toggle-storm-reports');
 const toggleStormReportsLsr = document.getElementById('toggle-storm-reports-lsr');
 const toggleStormReportsSpotter = document.getElementById('toggle-storm-reports-spotter');
 const toggleMping = document.getElementById('toggle-mping');
@@ -13638,7 +14676,7 @@ if (toggleSpc) {
   toggleSpc.addEventListener('change', async () => {
     spcVisible = Boolean(toggleSpc.checked);
     if (spcVisible) await refreshSpcOverlay(false);
-    else _setSpcLayersVisible(false);
+    else { ++spcLoadSeq; _setSpcLayersVisible(false); }
     saveSettings();
   });
 }
@@ -13647,7 +14685,7 @@ if (toggleMeso) {
   toggleMeso.addEventListener('change', async () => {
     mesoVisible = Boolean(toggleMeso.checked);
     if (mesoVisible) await refreshMesoOverlay(true, { forceNetwork: true });
-    else _setMesoLayersVisible(false);
+    else { ++mesoLoadSeq; _setMesoLayersVisible(false); }
     saveSettings();
   });
 }
@@ -13692,7 +14730,7 @@ if (toggleWatches) {
   toggleWatches.addEventListener('change', async () => {
     watchesVisible = Boolean(toggleWatches.checked);
     if (watchesVisible) await refreshWatchesOverlay(true, { forceNetwork: true });
-    else _setWatchLayersVisible(false);
+    else { ++watchesLoadSeq; _setWatchLayersVisible(false); }
     saveSettings();
   });
 }
@@ -13701,7 +14739,7 @@ if (toggleLightning) {
   toggleLightning.addEventListener('change', async () => {
     lightningVisible = Boolean(toggleLightning.checked);
     if (lightningVisible) await refreshLightningOverlay(true, { forceNetwork: true });
-    else _setLightningLayersVisible(false);
+    else { ++lightningLoadSeq; _setLightningLayersVisible(false); }
     saveSettings();
   });
 }
@@ -13710,7 +14748,7 @@ if (toggleTvs) {
   toggleTvs.addEventListener('change', async () => {
     tvsVisible = Boolean(toggleTvs.checked);
     if (tvsVisible) await refreshTvsOverlay(true, { forceNetwork: true });
-    else _setTvsLayersVisible(false);
+    else { ++tvsLoadSeq; _setTvsLayersVisible(false); }
     saveSettings();
   });
 }
@@ -13729,6 +14767,20 @@ if (stormFilterBtn) {
     const panel = document.getElementById('settings-section-storm');
     const open = !panel?.classList.contains('open');
     setStormFilterOpen(open);
+  });
+}
+
+if (toggleStormReports) {
+  toggleStormReports.addEventListener('change', async () => {
+    const on = toggleStormReports.checked;
+    stormReportsLsrVisible = on;
+    stormReportsSpotterVisible = on;
+    stormReportsVisible = on;
+    if (toggleStormReportsLsr) toggleStormReportsLsr.checked = on;
+    if (toggleStormReportsSpotter) toggleStormReportsSpotter.checked = on;
+    if (on) await refreshStormReports(true, { forceNetwork: true });
+    else { ++stormReportsLoadSeq; _setStormReportLayersVisible(false); }
+    saveSettings();
   });
 }
 
@@ -13757,8 +14809,9 @@ if (toggleStormReportsLsr) {
   toggleStormReportsLsr.addEventListener('change', async () => {
     stormReportsLsrVisible = Boolean(toggleStormReportsLsr.checked);
     stormReportsVisible = stormReportsLsrVisible || stormReportsSpotterVisible;
+    if (toggleStormReports) toggleStormReports.checked = stormReportsVisible;
     if (stormReportsVisible) await refreshStormReports(true, { forceNetwork: true });
-    else _setStormReportLayersVisible(false);
+    else { ++stormReportsLoadSeq; _setStormReportLayersVisible(false); }
     saveSettings();
   });
 }
@@ -13767,18 +14820,13 @@ if (toggleStormReportsSpotter) {
   toggleStormReportsSpotter.addEventListener('change', async () => {
     stormReportsSpotterVisible = Boolean(toggleStormReportsSpotter.checked);
     stormReportsVisible = stormReportsLsrVisible || stormReportsSpotterVisible;
+    if (toggleStormReports) toggleStormReports.checked = stormReportsVisible;
     if (stormReportsVisible) await refreshStormReports(true, { forceNetwork: true });
-    else _setStormReportLayersVisible(false);
+    else { ++stormReportsLoadSeq; _setStormReportLayersVisible(false); }
     saveSettings();
   });
 }
 
-document.getElementById('mping-api-token')?.addEventListener('change', e => {
-  mpingApiToken = e.target.value.trim();
-  saveSettings();
-  // Force a refresh if layer is visible so the new token takes effect
-  if (mpingVisible) { mpingLastFetch = 0; void refreshMpingLayer(true); }
-});
 
 if (toggleMping) {
   toggleMping.addEventListener('change', async () => {
@@ -14240,6 +15288,9 @@ const PRODUCT_DISPLAY_NAMES = {
   DTA: 'Storm Total Precip Accumulation',
   PTDS: 'Probability of Tornado Debris Signature',
   SRV: 'Storm Relative Velocity',
+  NROT: 'Normalized Rotation',
+  REFE: 'Enhanced Reflectivity',
+  SHR: 'Spectrum Width (Hi-Res)',
 };
 
 function _familyDisplayName(family) {
@@ -14393,6 +15444,10 @@ function _refreshL2AvailabilityUi() {
 
   if (familySelect) {
     Array.from(familySelect.options || []).forEach(opt => {
+      if (opt.dataset.placeholder === 'true') {
+        opt.disabled = true;
+        return;
+      }
       const code = String(opt.value || '').trim().toUpperCase();
       opt.disabled = !!available && !available.has(code);
     });
@@ -14449,17 +15504,8 @@ function quickSwitchFamily(preferred) {
 }
 
 function setStationLayersVisible(visible) {
-  const vis = visible ? 'visible' : 'none';
-  STATION_LAYER_IDS.forEach(id => {
-    if (map.getLayer(id)) map.setLayoutProperty(id, 'visibility', vis);
-  });
-  if (visible && map.getLayer('stations-label')) {
-    map.setFilter('stations-label', ['has', 'name']);
-  }
-  if (!visible) {
-    if (map.getLayer('stations-hover')) map.setFilter('stations-hover', ['==', 'id', '']);
-    if (map.getLayer('stations-active')) map.setFilter('stations-active', ['==', 'id', '']);
-  }
+  _overlayMaps().forEach(m => _syncStationLayerVisibilityOnMap(m, visible));
+  if (visible) _setStationsActiveFilter(canonicalStationId(activeStation));
 }
 
 function setStationInfoForRadar(id) {
@@ -14537,8 +15583,8 @@ function _applyLocalRadarDecoded(path, fileName, data, opts = {}) {
 
   setActiveSelectionUi(activeFamily, activeTilt);
   setStationLayersVisible(radarSitesVisible);
-  if (map.getLayer('stations-active')) map.setFilter('stations-active', ['==', 'id', '']);
-  if (map.getLayer('stations-hover')) map.setFilter('stations-hover', ['==', 'id', '']);
+  _setStationsActiveFilter('');
+  _clearStationsHoverFilter();
 
   const lat = Number(data?.station_lat);
   const lon = Number(data?.station_lon);
@@ -14659,7 +15705,7 @@ function restoreSavedRadarStation() {
   if (!restoreId || !VIEWABLE_STATIONS[restoreId]) return null;
   const [lat, lon] = VIEWABLE_STATIONS[restoreId];
   activeStation = restoreId;
-  if (map.getLayer('stations-active')) map.setFilter('stations-active', ['==', 'id', restoreId]);
+  _setStationsActiveFilter(restoreId);
   setStationInfoForRadar(restoreId);
   sweepLayer?.setStation(lat, lon);
   const merc = mapboxgl.MercatorCoordinate.fromLngLat([lon, lat]);
@@ -14672,6 +15718,7 @@ document.addEventListener('click', e => {
   if (!statusIsland?.contains(e.target)) setInfoPopupOpen(false);
   if (!document.getElementById('tools-menu')?.contains(e.target)) closeToolsMenu();
   if (!citySearchWrap?.contains(e.target)) _setCitySearchOpen(false);
+  if (boardContextMenuOpen && !boardContextMenuEl?.contains(e.target)) _setBoardContextMenuOpen(false);
 });
 
 document.addEventListener('keydown', e => {
@@ -14724,6 +15771,10 @@ document.addEventListener('keydown', e => {
     return;
   }
   if (e.key === 'Escape') {
+    if (boardContextMenuOpen) {
+      _setBoardContextMenuOpen(false);
+      return;
+    }
     if (document.getElementById('spc-viewer-overlay')?.classList.contains('open')) {
       closeSpcViewer();
       return;
@@ -14749,6 +15800,7 @@ document.addEventListener('keyup', e => {
 });
 
 window.addEventListener('blur', () => {
+  _setBoardContextMenuOpen(false);
   _clearHistoryHold();
 });
 
@@ -15083,7 +16135,7 @@ function selectStation(id, opts = {}) {
   const merc = mapboxgl.MercatorCoordinate.fromLngLat([lon, lat]);
   stationMercX = merc.x;
   stationMercY = merc.y;
-  if (map.getLayer('stations-active')) map.setFilter('stations-active', ['==', 'id', stationId]);
+  _setStationsActiveFilter(stationId);
   setStationInfoForRadar(stationId);
   if (shouldRecenter) map.flyTo({ center: [lon, lat], zoom: 7, duration: 800 });
   activateCurrentComboLayer();
@@ -15131,13 +16183,16 @@ if (familySelect) {
     if (isLocalRadarMode()) {
       if (activePaneId > 1 && secondaryPaneMaps.has(activePaneId)) {
         const pane = secondaryPaneMaps.get(activePaneId);
-        if (!pane || next === pane.family) return;
+        if (!pane) return;
+        const firstSelection = !pane.productSelected;
+        if (!firstSelection && next === pane.family) return;
         pane.family = next;
+        pane.productSelected = true;
         if (!localRadarSession?.isL2 && isSingleTiltL3Family(next)) {
           pane.tilt = '0.5';
         }
         _syncPaneControlsFromActive();
-        if (activeStation) void _loadSecondaryPaneLatest(activePaneId, { force: true });
+        if (activeStation) void _loadSecondaryPaneLatest(activePaneId, { force: true, userSelected: true });
         return;
       }
       if (next === activeFamily) return;
@@ -15154,12 +16209,16 @@ if (familySelect) {
         return;
       }
       const pane = secondaryPaneMaps.get(activePaneId);
-      if (!pane || next === pane.family) return;
+      if (!pane) return;
+      const firstSelection = !pane.productSelected;
+      if (!firstSelection && next === pane.family) return;
       pane.family = next;
+      pane.productSelected = true;
       pane.tilt = restoreTiltSelectL3(activeStation, pane.family, pane.tilt) || pane.tilt;
       _syncPaneControlsFromActive();
       _scheduleCurrentStationResidencyTrim();
-      if (activeStation) _loadSecondaryPaneLatest(activePaneId, { force: true });
+      _syncProcessedWiseRealtime();
+      if (activeStation) _loadSecondaryPaneLatest(activePaneId, { force: true, userSelected: true });
       return;
     }
     if (next === activeFamily) return;
@@ -15180,6 +16239,8 @@ if (familySelect) {
       if (!showCachedActiveCombo()) {
         setFrameLabel('Loading\u2026', 'loading');
         loadL2History(activeStation, activeFamily, parseInt(activeTilt) || 0, { preferCache: false });
+      } else {
+        void loadAll(activeStation, false);
       }
     } else {
       // Cancel any in-flight L3 loads and background decodes for the old product
@@ -15190,6 +16251,8 @@ if (familySelect) {
         _clearVisiblePrimaryForPendingCombo('family-change');
         setFrameLabel('Loading...', 'loading');
         loadHistory(activeStation, next, activeTilt, { preferCache: false, currentOnly: true });
+      } else {
+        void loadAll(activeStation, false);
       }
     }
     _scheduleCurrentStationResidencyTrim();
@@ -15202,13 +16265,14 @@ if (tiltSelect) {
       if (activePaneId > 1 && secondaryPaneMaps.has(activePaneId)) {
         const pane = secondaryPaneMaps.get(activePaneId);
         if (!pane) return;
+        if (!pane.productSelected) return;
         const nextTilt = levelII
           ? String(Math.max(0, parseInt(tiltSelect.value, 10) || 0))
           : normalizeTilt(tiltSelect.value);
         if (pane.tilt === nextTilt) return;
         pane.tilt = nextTilt;
         _syncPaneControlsFromActive();
-        if (activeStation) void _loadSecondaryPaneLatest(activePaneId, { force: true });
+        if (activeStation) void _loadSecondaryPaneLatest(activePaneId, { force: true, userSelected: true });
         return;
       }
       const nextTilt = levelII
@@ -15228,13 +16292,15 @@ if (tiltSelect) {
       }
       const pane = secondaryPaneMaps.get(activePaneId);
       if (!pane) return;
+      if (!pane.productSelected) return;
       let nextTilt = normalizeTilt(tiltSelect.value);
       if (isSingleTiltL3Family(pane.family)) nextTilt = '0.5';
       if (pane.tilt === nextTilt) return;
       pane.tilt = nextTilt;
       _syncPaneControlsFromActive();
       _scheduleCurrentStationResidencyTrim();
-      if (activeStation) _loadSecondaryPaneLatest(activePaneId, { force: true });
+      _syncProcessedWiseRealtime();
+      if (activeStation) _loadSecondaryPaneLatest(activePaneId, { force: true, userSelected: true });
       return;
     }
     stopPlay();
@@ -15254,6 +16320,8 @@ if (tiltSelect) {
       if (!showCachedActiveCombo()) {
         setFrameLabel('Loading\u2026', 'loading');
         loadL2History(activeStation, activeFamily, parseInt(activeTilt) || 0, { preferCache: false });
+      } else {
+        void loadAll(activeStation, false);
       }
     } else {
       activeTilt = normalizeTilt(tiltSelect.value);
@@ -15271,6 +16339,8 @@ if (tiltSelect) {
         _clearVisiblePrimaryForPendingCombo('tilt-change');
         setFrameLabel('Loading...', 'loading');
         loadHistory(activeStation, activeFamily, activeTilt, { preferCache: false, currentOnly: true });
+      } else {
+        void loadAll(activeStation, false);
       }
     }
     _scheduleCurrentStationResidencyTrim();
@@ -15278,14 +16348,9 @@ if (tiltSelect) {
 }
 
 // -- Camera / chaser overlays -------------------------------------------------
-const TRAFFIC_CAMERAS_URL = 'https://raw.githubusercontent.com/anony121221/maps-data/main/All%20Combined/all_dot_cameras_states_only.geojson';
-const TRAFFIC_OK_CAMERAS_URL = 'https://raspy-truth-6c47.colewx.workers.dev/';
-const TRAFFIC_KY_CAMERAS_URL = 'http://www.trimarc.org/dat/WebCameras.json';
-const TRAFFIC_AL_CAMERAS_URL = 'https://api.algotraffic.com/v4/Cameras';
-const TRAFFIC_GA_CAMERAS_URL = 'https://raw.githubusercontent.com/anony121221/maps-data/refs/heads/main/Georgia/cameras.geojson';
-const TRAFFIC_IN_CAMERAS_URL = 'https://intg.carsprogram.org/cameras_v1/api/cameras?state=IN&size=2000';
-const TRAFFIC_IA_CAMERAS_URL = 'https://raw.githubusercontent.com/anony121221/maps-data/refs/heads/main/Iowa/511ia_cameras.geojson';
-const TRAFFIC_CO_CAMERAS_URL = 'https://raw.githubusercontent.com/anony121221/maps-data/refs/heads/main/Colorado/cotrip_video_cameras.geojson';
+const TRAFFIC_CAMERAS_COMBINED_URL = 'https://raw.githubusercontent.com/anony121221/maps-data/main/All%20Combined/radar-app-cameras.geojson';
+const TRAFFIC_CAMERAS_MO_URL = 'https://raw.githubusercontent.com/anony121221/maps-data/main/Missouri/missouri.geojson';
+const TRAFFIC_CAMERAS_KS_URL = 'https://raw.githubusercontent.com/anony121221/maps-data/main/Kansas/kansas_cameras.geojson';
 const TRAFFIC_COMBINED_FETCH_TIMEOUT_MS = 150000;
 const WEATHER_CYCLONEPORT_URL = 'https://cycloneportfeed.colewx.workers.dev/';
 const WEATHER_HAZCAMS_URL = 'https://raw.githubusercontent.com/anony121221/maps-data/refs/heads/main/Hazcams/hazcams.geojson';
@@ -15300,6 +16365,104 @@ const WXWISE_CHASER_SOURCE_ID = 'chasers-wxwise';
 const WXWISE_CHASER_LAYER_ID = 'chasers-wxwise-dot';
 const RO_CHASER_SOURCE_ID = 'chasers-ro';
 const RO_CHASER_LAYER_ID = 'chasers-ro-dot';
+const CAMERA_EMPTY_GEOJSON = { type: 'FeatureCollection', features: [] };
+const TRAFFIC_CAMERA_ICON_NAME = 'traffic-camera-icon';
+const CAMERA_PAYLOAD_KEYS = new Set([
+  'DESCRIPTION',
+  'Direction',
+  'DIRECTION',
+  'SnapShot',
+  'State',
+  'URL2',
+  '_source_file',
+  '_source_url',
+  '_state',
+  'accessLevel',
+  'address',
+  'agency',
+  'cameraImageURL',
+  'cameraViews',
+  'camera_code',
+  'camera_page_url',
+  'camera_title',
+  'camera_uri',
+  'cameras',
+  'city',
+  'county',
+  'dash',
+  'dash_url',
+  'description',
+  'dir',
+  'direction',
+  'highway',
+  'hls_stream_protected',
+  'hls_url',
+  'html',
+  'httpVideoUrl',
+  'httpsVideoUrl',
+  'https_url',
+  'id',
+  'image',
+  'imageId',
+  'imagePath',
+  'imageUrl',
+  'image_id',
+  'image_url',
+  'ios_url',
+  'jpg_url',
+  'jpg_urls',
+  'last_event',
+  'last_location_text',
+  'livestreaming',
+  'location',
+  'm3u8',
+  'm3u8_url',
+  'm3u8_urls',
+  'map_image_url',
+  'milemarker',
+  'milepost',
+  'moved_at',
+  'mpd_url',
+  'name',
+  'permalink',
+  'road',
+  'roadway',
+  'route',
+  'siteId',
+  'site_id',
+  'site_title',
+  'snapshot',
+  'snapshotFile',
+  'snapshotUrl',
+  'snapshot_json_url',
+  'snapshot_jpeg_url',
+  'snapshot_name',
+  'snapshot_url',
+  'source',
+  'state',
+  'state_abbr',
+  'state_name',
+  'streamSrc',
+  'stream_url',
+  'streamname',
+  'streamingURL',
+  'streamingVideoURL',
+  'thumbnailUrl',
+  'thumbnail_source',
+  'thumbnail_url',
+  'title',
+  'updatedAt',
+  'updated_at',
+  'url',
+  'url2',
+  'uuid',
+  'videoUrl',
+  'video_url',
+  'videoauth',
+  'view_id',
+  'views',
+  'web_page_url',
+]);
 
 var trafficCamerasLoaded = false;
 var weatherCamerasLoaded = false;
@@ -15315,7 +16478,15 @@ var trafficCameraFeatures = [];
 var weatherCameraFeatures = [];
 var wxwiseChaserFeatures = [];
 var roChaserFeatures = [];
+const cameraPayloadById = new Map();
+const cameraPayloadIdsByKind = {
+  traffic: new Set(),
+  weather: new Set(),
+  wxwise: new Set(),
+  ro: new Set(),
+};
 const cameraLayerEventsBound = new Set();
+let cameraLayerBindingSeq = 0;
 var wxwiseChaserPollTimer = null;
 var roChaserPollTimer = null;
 var chaserPollSeq = 0;
@@ -15346,6 +16517,144 @@ let cameraActiveProps = null;
 let cameraSyncSeq = 0;
 let cameraStartupPrefetchStarted = false;
 const YOUTUBE_ALLOWED_HOSTS = new Set(['youtube.com', 'm.youtube.com', 'youtu.be', 'youtube-nocookie.com']);
+
+function _cameraTrimSerializableList(list) {
+  if (!Array.isArray(list) || !list.length) return '';
+  const trimmed = list
+    .map(item => {
+      if (item == null) return null;
+      if (typeof item === 'string' || typeof item === 'number' || typeof item === 'boolean') return item;
+      if (typeof item === 'object') {
+        const next = _cameraTrimPayload(item);
+        return Object.keys(next).length ? next : null;
+      }
+      return null;
+    })
+    .filter(Boolean);
+  if (!trimmed.length) return '';
+  try {
+    return JSON.stringify(trimmed);
+  } catch (_) {
+    return '';
+  }
+}
+
+function _cameraTrimPayload(props = {}) {
+  const payload = {};
+  CAMERA_PAYLOAD_KEYS.forEach(key => {
+    if (!Object.prototype.hasOwnProperty.call(props, key)) return;
+    const value = props[key];
+    if (value == null) return;
+    if (key === 'cameras' || key === 'views' || key === 'cameraViews') {
+      if (typeof value === 'string') {
+        const s = value.trim();
+        if (s) payload[key] = s;
+        return;
+      }
+      const serialized = _cameraTrimSerializableList(value);
+      if (serialized) payload[key] = serialized;
+      return;
+    }
+    if (key === 'm3u8_urls' || key === 'jpg_urls') {
+      if (typeof value === 'string') {
+        const s = value.trim();
+        if (s) payload[key] = s;
+        return;
+      }
+      if (Array.isArray(value)) {
+        const compact = value
+          .map(item => String(item || '').trim())
+          .filter(Boolean);
+        if (!compact.length) return;
+        try {
+          payload[key] = JSON.stringify(compact);
+        } catch (_) {}
+      }
+      return;
+    }
+    if (typeof value === 'string') {
+      if (value.trim()) payload[key] = value;
+      return;
+    }
+    if (typeof value === 'number' || typeof value === 'boolean') {
+      payload[key] = value;
+    }
+  });
+  if (Object.prototype.hasOwnProperty.call(props, '_has_video') || _cameraFeatureHasVideo(props)) {
+    payload._has_video = _cameraResolvedHasVideo(props);
+  }
+  return payload;
+}
+
+function _cameraPayloadKindSet(kind) {
+  return cameraPayloadIdsByKind[kind] || null;
+}
+
+function _cameraPayloadKey(kind, feature, index = 0) {
+  const props = feature?.properties || {};
+  const coords = feature?.geometry?.coordinates;
+  const coordKey = Array.isArray(coords) && coords.length >= 2
+    ? `${Number(coords[0]).toFixed(5)},${Number(coords[1]).toFixed(5)}`
+    : `idx-${index}`;
+  const rawId = feature?.id
+    ?? props.id
+    ?? props.uuid
+    ?? props.siteId
+    ?? props.site_id
+    ?? props.camera_uri
+    ?? props.imageId
+    ?? props.image_id
+    ?? props.view_id
+    ?? props.name
+    ?? coordKey;
+  return `${kind}:${String(rawId || coordKey)}`;
+}
+
+function _clearCameraPayloadKind(kind) {
+  const ids = _cameraPayloadKindSet(kind);
+  if (!ids) return;
+  ids.forEach(id => cameraPayloadById.delete(id));
+  ids.clear();
+}
+
+function _ingestCameraFeatureSet(kind, rawFeatures) {
+  _clearCameraPayloadKind(kind);
+  const ids = _cameraPayloadKindSet(kind);
+  const renderFeatures = [];
+  const src = Array.isArray(rawFeatures) ? rawFeatures : [];
+  src.forEach((feature, index) => {
+    const coords = feature?.geometry?.coordinates;
+    if (!Array.isArray(coords) || coords.length < 2) return;
+    const props = feature?.properties || {};
+    const payloadId = _cameraPayloadKey(kind, feature, index);
+    const payload = _cameraTrimPayload(props);
+    if (!payload.id && feature?.id != null) payload.id = feature.id;
+    payload._camera_id = payloadId;
+    cameraPayloadById.set(payloadId, payload);
+    ids?.add(payloadId);
+    renderFeatures.push({
+      type: 'Feature',
+      id: payloadId,
+      geometry: {
+        type: 'Point',
+        coordinates: [Number(coords[0]), Number(coords[1])],
+      },
+      properties: {
+        _camera_id: payloadId,
+        _state: String(props._state || '').trim().toUpperCase(),
+        _has_video: _cameraResolvedHasVideo(props),
+      },
+    });
+  });
+  return renderFeatures;
+}
+
+function _cameraPayloadFromFeature(featureOrProps) {
+  const props = featureOrProps?.properties || featureOrProps || {};
+  const payloadId = String(props?._camera_id || '').trim();
+  if (payloadId && cameraPayloadById.has(payloadId)) return cameraPayloadById.get(payloadId);
+  return props;
+}
 
 const US_STATE_NAME_TO_ABBR = {
   ALABAMA: 'AL', ALASKA: 'AK', ARIZONA: 'AZ', ARKANSAS: 'AR', CALIFORNIA: 'CA',
@@ -15419,10 +16728,61 @@ function _cameraStateFromSources(...sources) {
   return '';
 }
 
+function _cameraParseViews(rawViews) {
+  if (Array.isArray(rawViews)) return rawViews;
+  if (typeof rawViews !== 'string') return [];
+  try {
+    const parsed = JSON.parse(rawViews);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch (_) {
+    return [];
+  }
+}
+
+function _cameraViewHasVideo(view, props = {}) {
+  if (!view) return false;
+  if (typeof view === 'string') return _isLikelyVideoStreamUrl(view);
+  if (typeof view !== 'object') return false;
+
+  const state = String(props?._state || props?.state || '').trim().toUpperCase();
+  const directUrls = [
+    view.url,
+    view.video_url,
+    view.m3u8_url,
+    view.dash_url,
+    view.streamingURL,
+    view.streamingVideoURL,
+    view.html,
+  ];
+  if (directUrls.some(url => _isLikelyVideoStreamUrl(url))) return true;
+
+  const viewUrl = String(view.url || view.image_url || '').trim();
+  if (state === 'WI' && /511wi\.gov\/map\/Cctv\/\d+/i.test(viewUrl)) return true;
+
+  const preview = String(
+    view.videoPreviewUrl
+    || view.preview_url
+    || view.snapshot_url
+    || view.thumbnail
+    || view.jpg_url
+    || ''
+  ).trim();
+  const type = String(view.type || view.mediaType || '').trim().toUpperCase();
+  if (preview && (!type || !/(?:STILL|IMAGE|SNAPSHOT|JPEG|JPG|PNG)/.test(type))) return true;
+
+  return false;
+}
+
+function _cameraHasKnownBrokenStreamUrl(props = {}) {
+  return [props.url2, props.URL2, props.url, props.html].some(value =>
+    /traveler\.modot\.org\/tisvc\/api\/tms\/camerastream\/?$/i.test(String(value || '').trim())
+  );
+}
+
 function _cameraFeatureHasVideo(props = {}) {
   if (!props || typeof props !== 'object') return false;
 
-  const directStreamFields = [
+  const definiteStreamFields = [
     props.dash_url,
     props.mpd_url,
     props.dash,
@@ -15431,8 +16791,6 @@ function _cameraFeatureHasVideo(props = {}) {
     props.streamingVideoURL,
     props.m3u8_url,
     props.m3u8,
-    props.url2,
-    props.URL2,
     props.hls_stream_protected,
     props.streamSrc,
     props.httpsVideoUrl,
@@ -15443,7 +16801,8 @@ function _cameraFeatureHasVideo(props = {}) {
     props.video_url,
     props.videoUrl,
   ];
-  if (directStreamFields.some(v => String(v || '').trim())) return true;
+  if (definiteStreamFields.some(v => String(v || '').trim())) return true;
+  if ([props.url2, props.URL2, props.url, props.html].some(v => _isLikelyVideoStreamUrl(v))) return true;
 
   const { dashUrl, hlsUrl } = resolveUrls(props);
   if (_isLikelyVideoStreamUrl(dashUrl) || _isLikelyVideoStreamUrl(hlsUrl)) return true;
@@ -15455,6 +16814,9 @@ function _cameraFeatureHasVideo(props = {}) {
       if (Array.isArray(cams) && cams.some(cam => _cameraFeatureHasVideo(cam))) return true;
     } catch (_) {}
   }
+
+  const views = _cameraParseViews(props.views);
+  if (views.some(view => _cameraViewHasVideo(view, props))) return true;
 
   const videoAuth = props.videoauth;
   if (videoAuth === true || String(videoAuth || '').toLowerCase() === 'true') return true;
@@ -15470,6 +16832,14 @@ function _cameraFeatureHasVideo(props = {}) {
   if (/fl511\.com\/map\/Cctv\/\d+/i.test(imageUrl)) return true;
 
   return false;
+}
+
+function _cameraResolvedHasVideo(props = {}) {
+  const derived = _cameraFeatureHasVideo(props);
+  if (derived) return 1;
+  if (_cameraHasKnownBrokenStreamUrl(props)) return 0;
+  if (Number(props?._has_video)) return 1;
+  return 0;
 }
 
 function _ensureTrafficCameraWorker() {
@@ -15492,6 +16862,17 @@ function _ensureTrafficCameraWorker() {
     _trafficCameraWorker = null;
   };
   return _trafficCameraWorker;
+}
+
+function _disposeTrafficCameraWorker() {
+  for (const pending of _trafficCameraWorkerPending.values()) {
+    try { pending.reject(new Error('camera worker disposed')); } catch (_) {}
+  }
+  if (_trafficCameraWorker) {
+    try { _trafficCameraWorker.terminate(); } catch (_) {}
+    _trafficCameraWorker = null;
+  }
+  _trafficCameraWorkerPending.clear();
 }
 
 function _composeTrafficCameraFeaturesOffMain(datasets = {}) {
@@ -15533,9 +16914,9 @@ function _isMapReadyForCameraLayers() {
 }
 
 function _setCameraLayerVisible(layerId, visible) {
-  if (map.getLayer(layerId)) {
-    map.setLayoutProperty(layerId, 'visibility', visible ? 'visible' : 'none');
-  }
+  _overlayMaps().forEach(m => {
+    if (m.getLayer(layerId)) m.setLayoutProperty(layerId, 'visibility', visible ? 'visible' : 'none');
+  });
 }
 
 function _cameraStateFilterExpr() {
@@ -15553,25 +16934,18 @@ function _cameraStateFilterExpr() {
 
 function _applyCameraStateFilter() {
   const expr = _cameraStateFilterExpr();
-  [
-    TRAFFIC_CAMERA_LAYER_ID,
-    WEATHER_CAMERA_LAYER_ID,
-    WXWISE_CHASER_LAYER_ID,
-    RO_CHASER_LAYER_ID,
-  ].forEach(layerId => {
-    if (map.getLayer(layerId)) {
-      try {
-        map.setFilter(layerId, expr);
-      } catch (_) {}
-    }
+  _overlayMaps().forEach(m => {
+    [TRAFFIC_CAMERA_LAYER_ID, WEATHER_CAMERA_LAYER_ID, WXWISE_CHASER_LAYER_ID, RO_CHASER_LAYER_ID].forEach(layerId => {
+      if (m.getLayer(layerId)) {
+        try { m.setFilter(layerId, expr); } catch (_) {}
+      }
+    });
   });
 }
 
 function _cameraPointFeature(lon, lat, props = {}, id = '') {
   const featureProps = { ...(props || {}) };
-  if (featureProps._has_video == null) {
-    featureProps._has_video = _cameraFeatureHasVideo(featureProps) ? 1 : 0;
-  }
+  featureProps._has_video = _cameraResolvedHasVideo(featureProps);
   return {
     type: 'Feature',
     id: id || undefined,
@@ -15592,21 +16966,82 @@ function _cameraCoords(feature) {
 function _bindCameraLayerEvents(layerId) {
   if (cameraLayerEventsBound.has(layerId)) return;
   cameraLayerEventsBound.add(layerId);
-  map.on('mouseenter', layerId, () => { map.getCanvas().style.cursor = 'pointer'; });
-  map.on('mouseleave', layerId, () => { map.getCanvas().style.cursor = ''; });
-  map.on('click', layerId, e => {
-    if (!Array.isArray(e?.features) || !e.features.length) return;
-    e.preventDefault();
-    openCamera(e.features[0].properties || {});
+  _bindCameraLayerEventsOnMap(layerId, map);
+}
+
+function _ensureCameraIconOnMap(m) {
+  if (m.hasImage(TRAFFIC_CAMERA_ICON_NAME)) return;
+  const size = 30;
+  const canvas = document.createElement('canvas');
+  canvas.width = size;
+  canvas.height = size;
+  const ctx = canvas.getContext('2d');
+  // Blue filled circle with white stroke (WeatherWise camera marker style)
+  ctx.beginPath();
+  ctx.arc(size / 2, size / 2, size / 2 - 1, 0, Math.PI * 2);
+  ctx.fillStyle = '#3b82f6';
+  ctx.fill();
+  ctx.strokeStyle = 'white';
+  ctx.lineWidth = 1.5;
+  ctx.stroke();
+  // mdi:video path (video camera icon), scaled to fit inside circle
+  const camPath = new Path2D('M17,10.5V7A1,1 0 0,0 16,6H4A1,1 0 0,0 3,7V17A1,1 0 0,0 4,18H16A1,1 0 0,0 17,17V13.5L21,17.5V6.5L17,10.5Z');
+  const scale = (size - 10) / 21;
+  ctx.save();
+  ctx.translate((size - 21 * scale) / 2, (size - 18 * scale) / 2);
+  ctx.scale(scale, scale);
+  ctx.fillStyle = 'white';
+  ctx.fill(camPath);
+  ctx.restore();
+  try { m.addImage(TRAFFIC_CAMERA_ICON_NAME, ctx.getImageData(0, 0, size, size)); } catch (e) { console.warn('[Camera] addImage failed:', e); }
+}
+
+function _addTrafficCameraIconLayer(sourceId, layerId, data) {
+  _overlayMaps().forEach(m => {
+    if (m.getSource(sourceId)) {
+      m.getSource(sourceId)?.setData(data);
+    } else {
+      m.addSource(sourceId, { type: 'geojson', data });
+      m.addLayer({
+        id: layerId, type: 'circle', source: sourceId,
+        layout: { 'visibility': 'none' },
+        paint: { 'circle-radius': ['interpolate', ['linear'], ['zoom'], 4, 3, 10, 5], 'circle-color': '#3b82f6', 'circle-stroke-color': '#fff', 'circle-stroke-width': 1.2, 'circle-opacity': 0.95 },
+      }, m.getLayer('stations-dot') ? 'stations-dot' : undefined);
+      _bindCameraLayerEventsOnMap(layerId, m);
+    }
   });
 }
 
 function _addCameraPointLayer(sourceId, layerId, data, color) {
-  if (map.getSource(sourceId)) {
-    map.getSource(sourceId)?.setData(data);
-  } else {
-    map.addSource(sourceId, { type: 'geojson', data, generateId: true });
-    map.addLayer({
+  _overlayMaps().forEach(m => {
+    if (m.getSource(sourceId)) {
+      m.getSource(sourceId)?.setData(data);
+    } else {
+      m.addSource(sourceId, { type: 'geojson', data });
+      m.addLayer({
+        id: layerId,
+        type: 'circle',
+        source: sourceId,
+        layout: { visibility: 'none' },
+        paint: {
+          'circle-radius': ['interpolate', ['linear'], ['zoom'], 4, 3, 10, 5],
+          'circle-color': color,
+          'circle-stroke-color': '#fff',
+          'circle-stroke-width': 1.2,
+          'circle-opacity': 0.95,
+        },
+      }, m.getLayer('stations-dot') ? 'stations-dot' : undefined);
+      _bindCameraLayerEventsOnMap(layerId, m);
+    }
+  });
+}
+
+function _replaceCameraPointLayer(sourceId, layerId, data, color) {
+  _overlayMaps().forEach(m => {
+    if (m.getLayer(layerId)) { try { m.removeLayer(layerId); } catch (_) {} }
+    if (m.getSource(sourceId)) { try { m.removeSource(sourceId); } catch (_) {} }
+    m.addSource(sourceId, { type: 'geojson', data });
+    m.addLayer({
       id: layerId,
       type: 'circle',
       source: sourceId,
@@ -15618,33 +17053,9 @@ function _addCameraPointLayer(sourceId, layerId, data, color) {
         'circle-stroke-width': 1.2,
         'circle-opacity': 0.95,
       },
-    }, 'stations-dot');
-    _bindCameraLayerEvents(layerId);
-  }
-}
-
-function _replaceCameraPointLayer(sourceId, layerId, data, color) {
-  if (map.getLayer(layerId)) {
-    try { map.removeLayer(layerId); } catch (_) {}
-  }
-  if (map.getSource(sourceId)) {
-    try { map.removeSource(sourceId); } catch (_) {}
-  }
-  map.addSource(sourceId, { type: 'geojson', data, generateId: true });
-  map.addLayer({
-    id: layerId,
-    type: 'circle',
-    source: sourceId,
-    layout: { visibility: 'none' },
-    paint: {
-      'circle-radius': ['interpolate', ['linear'], ['zoom'], 4, 3, 10, 5],
-      'circle-color': color,
-      'circle-stroke-color': '#fff',
-      'circle-stroke-width': 1.2,
-      'circle-opacity': 0.95,
-    },
-  }, 'stations-dot');
-  _bindCameraLayerEvents(layerId);
+    }, m.getLayer('stations-dot') ? 'stations-dot' : undefined);
+    _bindCameraLayerEventsOnMap(layerId, m);
+  });
 }
 
 function _applyCameraSourcesBatch(kinds = null) {
@@ -15654,11 +17065,10 @@ function _applyCameraSourcesBatch(kinds = null) {
   const applyChasers = !kinds || kinds.chasers;
 
   if (applyTraffic && trafficCameraFeatures.length) {
-    _addCameraPointLayer(
+    _addTrafficCameraIconLayer(
       TRAFFIC_CAMERA_SOURCE_ID,
       TRAFFIC_CAMERA_LAYER_ID,
       { type: 'FeatureCollection', features: trafficCameraFeatures },
-      '#3b82f6',
     );
   }
   if (applyWeather && weatherCameraFeatures.length) {
@@ -15691,6 +17101,29 @@ function _applyCameraSourcesBatch(kinds = null) {
   setCamerasVisible(camerasOverlayVisible && _cameraFilterEnabled('traffic'));
   setWeatherCamerasVisible(camerasOverlayVisible && _cameraFilterEnabled('weather'));
   syncCameraFilterUi();
+}
+
+function _clearLoadedCameraData() {
+  trafficCameraFeatures = [];
+  weatherCameraFeatures = [];
+  wxwiseChaserFeatures = [];
+  roChaserFeatures = [];
+  trafficCamerasLoaded = false;
+  weatherCamerasLoaded = false;
+  wxwiseChasersLoaded = false;
+  roChasersLoaded = false;
+  cameraKnownStates = [];
+  _clearCameraPayloadKind('traffic');
+  _clearCameraPayloadKind('weather');
+  _clearCameraPayloadKind('wxwise');
+  _clearCameraPayloadKind('ro');
+  _disposeTrafficCameraWorker();
+  _overlayMaps().forEach(m => {
+    m.getSource(TRAFFIC_CAMERA_SOURCE_ID)?.setData(CAMERA_EMPTY_GEOJSON);
+    m.getSource(WEATHER_CAMERA_SOURCE_ID)?.setData(CAMERA_EMPTY_GEOJSON);
+    m.getSource(WXWISE_CHASER_SOURCE_ID)?.setData(CAMERA_EMPTY_GEOJSON);
+    m.getSource(RO_CHASER_SOURCE_ID)?.setData(CAMERA_EMPTY_GEOJSON);
+  });
 }
 
 function _scheduleCameraSourceApply(kinds = { traffic: true, weather: true, chasers: true }) {
@@ -16383,50 +17816,13 @@ async function loadCameras(opts = {}) {
   trafficLoadPromise = (async () => {
     try {
       const startMs = Date.now();
-      const [existingResult, okResult, kentuckyResult, alabamaResult, georgiaResult, indianaResult, iowaResult, coloradoResult] = await Promise.allSettled([
-        _fetchGeoJsonViaTauri(TRAFFIC_CAMERAS_URL, { timeoutMs: TRAFFIC_COMBINED_FETCH_TIMEOUT_MS }),
-        _fetchGeoJsonViaTauri(TRAFFIC_OK_CAMERAS_URL),
-        _fetchGeoJsonViaTauri(TRAFFIC_KY_CAMERAS_URL),
-        _fetchGeoJsonViaTauri(TRAFFIC_AL_CAMERAS_URL),
-        _fetchGeoJsonViaTauri(TRAFFIC_GA_CAMERAS_URL),
-        _fetchGeoJsonViaTauri(TRAFFIC_IN_CAMERAS_URL),
-        _fetchGeoJsonViaTauri(TRAFFIC_IA_CAMERAS_URL),
-        _fetchGeoJsonViaTauri(TRAFFIC_CO_CAMERAS_URL),
+      const fetchOpts = { timeoutMs: TRAFFIC_COMBINED_FETCH_TIMEOUT_MS, preferDirect: true, cacheMode: 'force-cache' };
+      const [combined, missouri, kansas] = await Promise.all([
+        _fetchGeoJsonViaTauri(TRAFFIC_CAMERAS_COMBINED_URL, fetchOpts),
+        _fetchGeoJsonViaTauri(TRAFFIC_CAMERAS_MO_URL, fetchOpts).catch(() => null),
+        _fetchGeoJsonViaTauri(TRAFFIC_CAMERAS_KS_URL, fetchOpts).catch(() => null),
       ]);
-
-      const datasets = {
-        existing: existingResult.status === 'fulfilled' ? existingResult.value : null,
-        ok: okResult.status === 'fulfilled' ? okResult.value : null,
-        kentucky: kentuckyResult.status === 'fulfilled' ? kentuckyResult.value : null,
-        alabama: alabamaResult.status === 'fulfilled' ? alabamaResult.value : null,
-        georgia: georgiaResult.status === 'fulfilled' ? georgiaResult.value : null,
-        indiana: indianaResult.status === 'fulfilled' ? indianaResult.value : null,
-        iowa: iowaResult.status === 'fulfilled' ? iowaResult.value : null,
-        colorado: coloradoResult.status === 'fulfilled' ? coloradoResult.value : null,
-      };
-
-      if (existingResult.status === 'rejected') {
-        console.warn('Combined traffic cameras failed to load:', existingResult.reason);
-      }
-      if (okResult.status === 'rejected') {
-        console.warn('Oklahoma cameras failed to load:', okResult.reason);
-      }
-      if (kentuckyResult.status === 'rejected') {
-        console.warn('Kentucky Trimarc cameras failed to load:', kentuckyResult.reason);
-      }
-      if (alabamaResult.status === 'rejected') {
-        console.warn('Alabama AlgoTraffic cameras failed to load:', alabamaResult.reason);
-      }
-      if (georgiaResult.status === 'rejected') {
-        console.warn('Georgia 511 cameras failed to load:', georgiaResult.reason);
-      }
-      if (indianaResult.status === 'rejected') {
-        console.warn('Indiana INDOT cameras failed to load:', indianaResult.reason);
-      }
-      if (coloradoResult.status === 'rejected') {
-        console.warn('Colorado COtrip cameras failed to load:', coloradoResult.reason);
-      }
-
+      const datasets = { combined, ...(missouri && { missouri }), ...(kansas && { kansas }) };
       let finalFeatures = [];
       try {
         finalFeatures = await _composeTrafficCameraFeaturesOffMain(datasets);
@@ -16435,12 +17831,8 @@ async function loadCameras(opts = {}) {
         finalFeatures = _composeTrafficCameraFeatures(datasets);
       }
       if (!finalFeatures.length) throw new Error('No camera features');
-      trafficCameraFeatures = finalFeatures;
-      console.info('[Camera][Traffic] load complete', {
-        count: finalFeatures.length,
-        ms: Date.now() - startMs,
-        combinedLoaded: existingResult.status === 'fulfilled',
-      });
+      trafficCameraFeatures = _ingestCameraFeatureSet('traffic', finalFeatures);
+      console.info('[Camera][Traffic] load complete', { count: finalFeatures.length, ms: Date.now() - startMs });
       trafficCamerasLoaded = true;
       if (!deferApply) _scheduleCameraSourceApply({ traffic: true });
     } catch (err) {
@@ -16450,6 +17842,7 @@ async function loadCameras(opts = {}) {
   try {
     await trafficLoadPromise;
   } finally {
+    _disposeTrafficCameraWorker();
     trafficLoadPromise = null;
   }
 }
@@ -16502,7 +17895,7 @@ async function loadWeatherCameras(opts = {}) {
       }
 
       if (!features.length) throw new Error('No weather camera features');
-      weatherCameraFeatures = features;
+      weatherCameraFeatures = _ingestCameraFeatureSet('weather', features);
       weatherCamerasLoaded = true;
       if (!deferApply) _scheduleCameraSourceApply({ weather: true });
     } catch (err) {
@@ -16564,7 +17957,7 @@ async function loadWxWiseChasers(forceRefresh = false, deferApply = false) {
           || `${p.name || 'wxwise'}:${movedAt || chaserPollSeq}`
         )));
       }
-      wxwiseChaserFeatures = features;
+      wxwiseChaserFeatures = _ingestCameraFeatureSet('wxwise', features);
       wxwiseChasersLoaded = true;
       if (!deferApply) _applyChaserSources('wxwise');
       if (wxwiseChaserPollTimer == null || roChaserPollTimer == null) _restartChaserPolling();
@@ -16618,7 +18011,7 @@ async function loadRadarOmegaChasers(forceRefresh = false, deferApply = false) {
           _state: state,
         }, String(d?.uuid || `${d?.name || 'ro'}:${movedAt || chaserPollSeq}`)));
       }
-      roChaserFeatures = features;
+      roChaserFeatures = _ingestCameraFeatureSet('ro', features);
       roChasersLoaded = true;
       if (!deferApply) _applyChaserSources('radaromega');
       if (wxwiseChaserPollTimer == null || roChaserPollTimer == null) _restartChaserPolling();
@@ -16655,21 +18048,7 @@ function _clearCameraStartupRetry() {
 }
 
 function _startCameraStartupPrefetch() {
-  if (cameraStartupPrefetchStarted || !_isMapReadyForCameraLayers()) return;
-  cameraStartupPrefetchStarted = true;
-  console.info('[Camera] startup prefetch begin');
-  Promise.allSettled([
-    loadCameras({ deferApply: true }),
-    loadWeatherCameras({ deferApply: true }),
-  ]).then(() => {
-    console.info('[Camera] startup prefetch complete', {
-      traffic: trafficCameraFeatures.length,
-      weather: weatherCameraFeatures.length,
-    });
-    if (camerasOverlayVisible) {
-      void syncCameraLayersFromState();
-    }
-  }).catch(() => {});
+  return;
 }
 
 function _cameraStartupNeedsSyncRetry() {
@@ -16938,9 +18317,42 @@ function _decodeUtf16Maybe(binary) {
 function _isLikelyVideoStreamUrl(value) {
   const u = String(value || '').trim().toLowerCase();
   if (!u) return false;
+  if (/traveler\.modot\.org\/tisvc\/api\/tms\/camerastream\/?$/i.test(u)) return false;
+  if (/traveler\.modot\.org\/tisvc\/api\/tms\/camerastream\/[^/?#]+/i.test(u)) return true;
   if (u.includes('.m3u8') || u.includes('.mpd')) return true;
   if (u.includes('/playlist') || u.includes('/manifest')) return true;
   return false;
+}
+
+function _cameraAbsoluteUrl(value, baseUrl = '') {
+  const raw = String(value || '').trim();
+  if (!raw) return '';
+  try {
+    return new URL(raw, baseUrl || window.location.href).toString();
+  } catch (_) {
+    return raw;
+  }
+}
+
+function _cameraWisconsinTooltipId(props = {}) {
+  const state = String(props?._state || props?.state || '').trim().toUpperCase();
+  if (state !== 'WI') return '';
+  const rawId = String(props?.id || props?.camera_id || '').trim();
+  return /^\d+$/.test(rawId) ? rawId : '';
+}
+
+function _cameraWisconsinSnapshotUrl(props = {}) {
+  const views = _cameraParseViews(props.views);
+  for (const view of views) {
+    const url = String(view?.url || view?.image_url || '').trim();
+    if (/511wi\.gov\/map\/Cctv\/\d+/i.test(url)) return url;
+  }
+  return '';
+}
+
+function _extractWisconsinTooltipVideoUrl(html, tooltipUrl) {
+  const match = String(html || '').match(/data-videourl=["']([^"']+)["']/i);
+  return match ? _cameraAbsoluteUrl(match[1], tooltipUrl) : '';
 }
 
 function _extractPlayReadyLicenseUrlFromMpd(mpdText) {
@@ -17003,6 +18415,10 @@ function resolveUrls(props) {
     || props.html                   // Mississippi / generic
     || props.videoUrl               // New York (skyvdn)
     || null;
+
+  if (/traveler\.modot\.org\/tisvc\/api\/Tms\/CameraStream\/?$/i.test(String(hlsUrl || '').trim())) {
+    hlsUrl = null;
+  }
 
   // Snapshot/image fields
   let snapshotUrl = props.snapshot_url
@@ -18061,6 +19477,26 @@ async function openCamera(props) {
     if (!snapshotUrl && imageUrl) snapshotUrl = imageUrl;
   }
 
+  const wisconsinTooltipId = _cameraWisconsinTooltipId(props);
+  if (wisconsinTooltipId) {
+    snapshotUrl = snapshotUrl || _cameraWisconsinSnapshotUrl(props);
+    if (!hlsUrl) {
+      try {
+        const tooltipUrl = `https://511wi.gov/tooltip/Cameras/${encodeURIComponent(wisconsinTooltipId)}?lang=en-US`;
+        const r = await invoke('fetch_url_base64', { url: tooltipUrl });
+        if (r?.status >= 200 && r?.status < 400 && r?.body_base64) {
+          const html = _decodeBase64Text(r.body_base64);
+          const tooltipVideoUrl = _extractWisconsinTooltipVideoUrl(html, tooltipUrl);
+          if (tooltipVideoUrl) hlsUrl = tooltipVideoUrl;
+          if (!snapshotUrl) {
+            const imgMatch = html.match(/<img[^>]+src=["']([^"']+)["']/i);
+            if (imgMatch) snapshotUrl = _cameraAbsoluteUrl(imgMatch[1], tooltipUrl);
+          }
+        }
+      } catch (_) {}
+    }
+  }
+
   // FL511 (Florida): imageUrl = https://www.fl511.com/map/Cctv/<imageId>
   // Use the two-step divas.cloud token flow to get a live HLS URL.
   if (props.imageUrl && props.imageUrl.includes('fl511.com/map/Cctv')) {
@@ -18237,7 +19673,26 @@ function _switchDir(idx) {
 }
 
 async function _playCameraEntry(cam, content) {
-  const { dashUrl, hlsUrl, snapshotUrl } = resolveUrls(cam || {});
+  let { dashUrl, hlsUrl, snapshotUrl } = resolveUrls(cam || {});
+  const wisconsinTooltipId = _cameraWisconsinTooltipId(cam || {});
+  if (wisconsinTooltipId) {
+    snapshotUrl = snapshotUrl || _cameraWisconsinSnapshotUrl(cam || {});
+    if (!hlsUrl) {
+      try {
+        const tooltipUrl = `https://511wi.gov/tooltip/Cameras/${encodeURIComponent(wisconsinTooltipId)}?lang=en-US`;
+        const r = await invoke('fetch_url_base64', { url: tooltipUrl });
+        if (r?.status >= 200 && r?.status < 400 && r?.body_base64) {
+          const html = _decodeBase64Text(r.body_base64);
+          const tooltipVideoUrl = _extractWisconsinTooltipVideoUrl(html, tooltipUrl);
+          if (tooltipVideoUrl) hlsUrl = tooltipVideoUrl;
+          if (!snapshotUrl) {
+            const imgMatch = html.match(/<img[^>]+src=["']([^"']+)["']/i);
+            if (imgMatch) snapshotUrl = _cameraAbsoluteUrl(imgMatch[1], tooltipUrl);
+          }
+        }
+      } catch (_) {}
+    }
+  }
   if (dashUrl) {
     await _startCameraDashPlayback(content, dashUrl, snapshotUrl, cam || {});
     return;
@@ -18434,11 +19889,6 @@ function loadSettings() {
     }
     stormReportsVisible = stormReportsLsrVisible || stormReportsSpotterVisible;
     if (s.mpingVisible != null) mpingVisible = Boolean(s.mpingVisible);
-    if (typeof s.mpingApiToken === 'string') {
-      mpingApiToken = s.mpingApiToken;
-      const tokenEl = document.getElementById('mping-api-token');
-      if (tokenEl) tokenEl.value = mpingApiToken;
-    }
     if (s.spotterLocationsVisible != null) spotterLocationsVisible = Boolean(s.spotterLocationsVisible);
     if (s.camerasOverlayVisible != null) camerasOverlayVisible = Boolean(s.camerasOverlayVisible);
     if (s.cameraFilterSelection && typeof s.cameraFilterSelection === 'object') {
@@ -18498,6 +19948,8 @@ function loadSettings() {
     if (alertTog) alertTog.checked = alertsVisible;
     const tvsTog = document.getElementById('toggle-tvs');
     if (tvsTog) tvsTog.checked = tvsVisible;
+    const stormMasterTog = document.getElementById('toggle-storm-reports');
+    if (stormMasterTog) stormMasterTog.checked = stormReportsVisible;
     const stormLsrTog = document.getElementById('toggle-storm-reports-lsr');
     if (stormLsrTog) stormLsrTog.checked = stormReportsLsrVisible;
     const stormSpotterTog = document.getElementById('toggle-storm-reports-spotter');
@@ -18699,6 +20151,88 @@ const CT_DEFAULT_PALETTES = {
     ],
   },
   EET: EET_DEFAULT_PALETTE,
+  KDP: {
+    product: 'KDP',
+    units: '°/km',
+    scale: 1,
+    step: 0.5,
+    stops: [
+      [-2.0, 142, 142, 142, 200],
+      [-1.0,  76,   0,   1, 220],
+      [-0.5, 163,   7,  48, 220],
+      [ 0.0, 234, 115, 180, 220],
+      [ 0.5, 153, 126, 185, 225],
+      [ 1.0, 104, 244, 244, 230],
+      [ 1.5,  26, 186,  52, 235],
+      [ 2.0,  17, 249,  16, 240],
+      [ 3.0, 247, 252,   0, 245],
+      [ 4.0, 255, 124,  16, 245],
+      [ 6.0, 255, 196, 124, 248],
+      [ 8.0, 121,   2, 125, 250],
+    ],
+  },
+  NROT: {
+    product: 'NROT',
+    units: '/ks',
+    scale: 1,
+    step: 0.005,
+    stops: [
+      [-0.05,   0,   0, 128, 220],
+      [-0.03,   0,   0, 255, 230],
+      [-0.02,   0, 128, 255, 235],
+      [-0.01,   0, 255, 255, 235],
+      [ 0.00, 128, 128, 128,  80],
+      [ 0.01, 255, 200,   0, 235],
+      [ 0.02, 255, 128,   0, 235],
+      [ 0.03, 255,   0,   0, 240],
+      [ 0.05, 128,   0,   0, 250],
+    ],
+  },
+  REFE: {
+    product: 'REFE',
+    units: 'dBZ',
+    scale: 1,
+    step: 5,
+    stops: [
+      [  0.0,   4, 233, 231,   0],
+      [  5.0,   4, 233, 231, 200],
+      [ 10.0,   1, 159, 244, 200],
+      [ 15.0,   3,   0, 244, 200],
+      [ 20.0,   2, 253,   2, 200],
+      [ 25.0,   1, 197,   1, 200],
+      [ 30.0,   0, 142,   0, 200],
+      [ 35.0, 253, 248,   2, 220],
+      [ 40.0, 229, 188,   0, 220],
+      [ 45.0, 253, 149,   0, 220],
+      [ 50.0, 253,   0,   0, 230],
+      [ 55.0, 212,   0,   0, 230],
+      [ 60.0, 188,   0,   0, 230],
+      [ 65.0, 248,   0, 253, 240],
+      [ 70.0, 152,  84, 198, 240],
+      [ 75.0, 255, 255, 255, 255],
+    ],
+  },
+  SHR: {
+    product: 'SHR',
+    units: 'KTS',
+    scale: 1.9426,
+    step: 2,
+    stops: [
+      [ 0.0,   5,   5,   6, 255],
+      [ 2.0,  42,  42,  49, 255],
+      [ 4.0,  78,  77,  91, 255],
+      [ 6.0, 115, 114, 133, 255],
+      [ 8.0, 152, 148, 173, 255],
+      [10.0, 200, 109, 105, 255],
+      [12.0, 246,  75,  42, 255],
+      [14.0, 248, 116,  52, 255],
+      [16.0, 250, 161,  63, 255],
+      [18.0, 252, 203,  73, 255],
+      [20.0, 255, 244,  83, 255],
+      [25.0, 255, 248, 111, 255],
+      [30.0, 246, 246, 246, 255],
+    ],
+  },
 };
 
 // Default gradient CSS for preview bars
@@ -18708,11 +20242,17 @@ const CT_DEFAULT_GRADIENTS = {
   CC:  'linear-gradient(to right, rgb(20,0,50) 0%, rgb(22,0,55) 5%, rgb(23,0,59) 10%, rgb(25,0,64) 15%, rgb(20,0,69) 20%, rgb(28,0,73) 25%, rgb(30,0,79) 30%, rgb(22,0,88) 35%, rgb(9,0,101) 40%, rgb(0,0,113) 45%, rgb(0,0,130) 50%, rgb(0,0,146) 55%, rgb(0,0,163) 60%, rgb(0,0,203) 65%, rgb(30,30,255) 70%, rgb(120,120,255) 75%, rgb(93,229,119) 80%, rgb(121,235,17) 85%, rgb(255,187,0) 90%, rgb(255,11,0) 95%, rgb(25,25,25) 100%)',
   ZDR: 'linear-gradient(to right, rgba(0,0,0,0.78) 0%, rgba(142,121,181,0.84) 33%, rgba(10,10,155,0.86) 38%, rgba(68,248,212,0.88) 47%, rgba(90,221,98,0.88) 53%, rgba(255,255,100,0.90) 60%, rgba(220,10,5,0.92) 73%, rgba(175,0,0,0.92) 80%, rgba(240,120,180,0.92) 87%, rgba(255,255,255,0.94) 93%, rgba(145,45,150,0.96) 100%)',
   KDP: 'linear-gradient(to right, rgb(142,142,142) 0%, rgb(76,0,1) 12.5%, rgb(163,7,48) 18.8%, rgb(234,115,180) 25%, rgb(153,126,185) 29.2%, rgb(104,244,244) 33.3%, rgb(26,186,52) 37.5%, rgb(17,249,16) 41.7%, rgb(247,252,0) 50%, rgb(255,124,16) 58.3%, rgb(255,196,124) 75%, rgb(121,2,125) 100%)',
+  NROT: 'linear-gradient(to right, rgb(0,0,128) 0%, rgb(0,0,255) 16%, rgb(0,128,255) 25%, rgb(0,255,255) 33%, rgb(128,128,128) 50%, rgb(255,200,0) 67%, rgb(255,128,0) 75%, rgb(255,0,0) 84%, rgb(128,0,0) 100%)',
+  REFE: 'linear-gradient(to right, #04E9E7 0%, #019CF4 12%, #0300F4 18%, #02FD02 24%, #01C501 30%, #008E00 37%, #FDF802 43%, #E7BC00 50%, #FD9500 57%, #FD0000 64%, #D40000 72%, #BC0000 79%, #F800FD 86%, #9854C6 93%, #ffffff 100%)',
+  SHR: 'linear-gradient(to right, rgb(5,5,6) 0%, rgb(42,42,49) 8%, rgb(78,77,91) 16%, rgb(115,114,133) 24%, rgb(152,148,173) 32%, rgb(200,109,105) 40%, rgb(246,75,42) 48%, rgb(248,116,52) 56%, rgb(250,161,63) 64%, rgb(252,203,73) 72%, rgb(255,244,83) 80%, rgb(255,248,111) 85%, rgb(255,250,140) 89%, rgb(255,251,170) 93%, rgb(255,254,226) 98%, rgb(246,246,246) 100%)',
   SRV: 'linear-gradient(to right, rgb(0,0,0) 0%, rgb(0,0,255) 12.5%, rgb(71,240,240) 31.9%, rgb(82,247,89) 34.4%, rgb(5,33,0) 46.9%, rgb(110,110,110) 50%, rgb(33,0,0) 53.1%, rgb(255,55,26) 65.6%, rgb(254,154,39) 68.1%, rgb(255,255,0) 71.9%, rgb(164,89,68) 87.5%, rgb(0,0,0) 100%)',
   SW:  'linear-gradient(to right, rgb(5,5,6) 0%, rgb(42,42,49) 8%, rgb(78,77,91) 16%, rgb(115,114,133) 24%, rgb(152,148,173) 32%, rgb(200,109,105) 40%, rgb(246,75,42) 48%, rgb(248,116,52) 56%, rgb(250,161,63) 64%, rgb(252,203,73) 72%, rgb(255,244,83) 80%, rgb(255,248,111) 85%, rgb(255,250,140) 89%, rgb(255,251,170) 93%, rgb(255,252,199) 96%, rgb(255,254,226) 98%, rgb(246,246,246) 100%)',
   DTA: 'linear-gradient(to right, rgba(0,0,0,0.0) 0%, rgba(24,26,38,0.43) 2%, rgba(36,78,124,0.65) 8%, rgba(43,127,184,0.84) 20%, rgba(42,179,120,0.90) 35%, rgba(116,214,74,0.92) 45%, rgba(232,233,63,0.94) 55%, rgba(250,180,52,0.96) 65%, rgba(240,110,44,0.96) 74%, rgba(214,44,52,0.96) 82%, rgba(178,38,118,0.96) 90%, rgba(143,70,195,0.97) 96%, rgba(236,241,247,0.98) 100%)',
-  ET:  'linear-gradient(to right, #00c8ff 0%, #00e100 20%, #ffff00 40%, #ff9600 60%, #ff0000 80%, #ff00ff 100%)',
-  VIL: 'linear-gradient(to right, #646464 0%, #00e6e6 20%, #00aa00 40%, #ffff00 60%, #ff6400 80%, #ff00ff 100%)',
+  ET:   'linear-gradient(to right, #00c8ff 0%, #00e100 20%, #ffff00 40%, #ff9600 60%, #ff0000 80%, #ff00ff 100%)',
+  VIL:  'linear-gradient(to right, #646464 0%, #00e6e6 20%, #00aa00 40%, #ffff00 60%, #ff6400 80%, #ff00ff 100%)',
+  NROT: 'linear-gradient(to right, rgb(0,0,128) 0%, rgb(0,0,255) 16%, rgb(0,128,255) 25%, rgb(0,255,255) 33%, rgb(128,128,128) 50%, rgb(255,200,0) 67%, rgb(255,128,0) 75%, rgb(255,0,0) 84%, rgb(128,0,0) 100%)',
+  REFE: 'linear-gradient(to right, #04E9E7 0%, #019CF4 12%, #0300F4 18%, #02FD02 24%, #01C501 30%, #008E00 37%, #FDF802 43%, #E7BC00 50%, #FD9500 57%, #FD0000 64%, #D40000 72%, #BC0000 79%, #F800FD 86%, #9854C6 93%, #ffffff 100%)',
+  SHR:  'linear-gradient(to right, rgb(5,5,6) 0%, rgb(78,77,91) 16%, rgb(152,148,173) 32%, rgb(200,109,105) 40%, rgb(246,75,42) 48%, rgb(250,161,63) 64%, rgb(255,244,83) 80%, rgb(255,254,226) 98%, rgb(246,246,246) 100%)',
 };
 
 function ctStore(family) {
@@ -18741,17 +20281,20 @@ function ctGetEffectivePalette(family) {
 
 function getActivePalettes() {
   return {
-    REF: ctGetEffectivePalette('REF'),
-    VEL: ctGetEffectivePalette('VEL'),
-    CC:  ctGetEffectivePalette('CC'),
-    ZDR: ctGetEffectivePalette('ZDR'),
-    SW:  ctGetEffectivePalette('SW'),
-    KDP: ctGetEffectivePalette('KDP'),
-    SRV: ctGetEffectivePalette('SRV'),
-    ET:  ctGetEffectivePalette('ET') || ctGetEffectivePalette('EET'),
-    VIL: ctGetEffectivePalette('VIL') || ctGetEffectivePalette('NVL'),
-    EET: ctGetEffectivePalette('ET') || ctGetEffectivePalette('EET'),
-    NVL: ctGetEffectivePalette('VIL') || ctGetEffectivePalette('NVL'),
+    REF:  ctGetEffectivePalette('REF'),
+    VEL:  ctGetEffectivePalette('VEL'),
+    CC:   ctGetEffectivePalette('CC'),
+    ZDR:  ctGetEffectivePalette('ZDR'),
+    SW:   ctGetEffectivePalette('SW'),
+    KDP:  ctGetEffectivePalette('KDP'),
+    SRV:  ctGetEffectivePalette('SRV'),
+    NROT: ctGetEffectivePalette('NROT'),
+    REFE: ctGetEffectivePalette('REFE'),
+    SHR:  ctGetEffectivePalette('SHR'),
+    ET:   ctGetEffectivePalette('ET') || ctGetEffectivePalette('EET'),
+    VIL:  ctGetEffectivePalette('VIL') || ctGetEffectivePalette('NVL'),
+    EET:  ctGetEffectivePalette('ET') || ctGetEffectivePalette('EET'),
+    NVL:  ctGetEffectivePalette('VIL') || ctGetEffectivePalette('NVL'),
   };
 }
 
@@ -19496,7 +21039,7 @@ function updateL2TiltSelect(tilts) {
   if (!tiltSelect || !levelII) return;
   const curIdx = parseInt(activeTilt) || 0;
   // Only rebuild if the count differs (avoids resetting selection mid-session)
-  if (tiltSelect.options.length === tilts.length) return;
+  if (tiltSelect.options.length === tilts.length + 1) return;
   const fmtTilt = (v) => {
     const n = Number(v);
     if (!Number.isFinite(n)) return String(v);
@@ -19504,6 +21047,14 @@ function updateL2TiltSelect(tilts) {
     return s.endsWith('.0') ? s.slice(0, -2) : s;
   };
   tiltSelect.innerHTML = '';
+  {
+    const placeholder = document.createElement('option');
+    placeholder.value = '';
+    placeholder.textContent = 'Select tilt';
+    placeholder.disabled = true;
+    placeholder.dataset.placeholder = 'true';
+    tiltSelect.appendChild(placeholder);
+  }
   tilts.forEach((elev, i) => {
     const opt = document.createElement('option');
     opt.value = String(i);
@@ -19518,6 +21069,14 @@ function populateFamilySelectL2() {
   const products = _selectableL2Products();
   const fallbackFamily = products.includes('REF') ? 'REF' : products[0];
   familySelect.innerHTML = '';
+  {
+    const placeholder = document.createElement('option');
+    placeholder.value = '';
+    placeholder.textContent = 'Select a product';
+    placeholder.disabled = true;
+    placeholder.dataset.placeholder = 'true';
+    familySelect.appendChild(placeholder);
+  }
   products.forEach(f => {
     const opt = document.createElement('option');
     opt.value = f;
@@ -19535,6 +21094,14 @@ function populateFamilySelectL3(stationId = activeStation) {
   const families = supportedL3FamiliesForStation(stationId);
   const keepFamily = families.includes(activeFamily) ? activeFamily : (families[0] || 'REF');
   familySelect.innerHTML = '';
+  {
+    const placeholder = document.createElement('option');
+    placeholder.value = '';
+    placeholder.textContent = 'Select a product';
+    placeholder.disabled = true;
+    placeholder.dataset.placeholder = 'true';
+    familySelect.appendChild(placeholder);
+  }
   families.forEach(f => {
     const opt = document.createElement('option');
     opt.value = f;
@@ -19552,6 +21119,14 @@ function restoreTiltSelectL3(stationId = activeStation, family = activeFamily, t
   const nextTilt = normalizeTiltForStationFamily(stationId, family, tilt);
   tiltSelect.disabled = tilts.length <= 1;
   tiltSelect.innerHTML = '';
+  {
+    const placeholder = document.createElement('option');
+    placeholder.value = '';
+    placeholder.textContent = 'Select tilt';
+    placeholder.disabled = true;
+    placeholder.dataset.placeholder = 'true';
+    tiltSelect.appendChild(placeholder);
+  }
   tilts.forEach(v => {
     const opt = document.createElement('option');
     opt.value = v;
@@ -19630,7 +21205,7 @@ function enableLevelII() {
   // Switch tilt select to index-based (populated after first decode)
   if (!levelII) return; // guard
   tiltSelect.disabled = false;
-  tiltSelect.innerHTML = '<option value="0">0\u00b0</option>';
+  tiltSelect.innerHTML = '<option value="" disabled data-placeholder="true">Select tilt</option><option value="0">0\u00b0</option>';
   activeTilt = '0';
   // Reload data
   if (activeStation) {
