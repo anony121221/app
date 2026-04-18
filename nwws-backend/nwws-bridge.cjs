@@ -354,7 +354,10 @@ function isSuppressedFloodFeature(feature) {
 function vtecSignatureFromFeature(feature) {
   const vtec = normalizeValueArray(feature?.properties?.parameters?.VTEC ?? feature?.properties?.parameters?.vtec)[0] || '';
   if (!vtec) return '';
-  return vtec.replace(/^\//, '').split('.').slice(0, 5).join('.');
+  const parts = vtec.replace(/^\//, '').split('.');
+  // VTEC: O.NEW.KTLX.TO.W.0001.dates — stable key ignores action (index 1) and time range (index 6+)
+  if (parts.length < 6) return parts.slice(0, 5).join('.');
+  return [parts[0], parts[2], parts[3], parts[4], parts[5]].join('.');
 }
 
 function replaceBootstrapDuplicates(feature, liveKey) {
@@ -370,6 +373,26 @@ function replaceBootstrapDuplicates(feature, liveKey) {
       activeAlerts.delete(entryKey);
       removed += 1;
       emitLog('info', `[NWWS] Replaced NWS API bootstrap entry ${entryKey} with live NWWS alert ${liveKey}`);
+    }
+  }
+  return removed;
+}
+
+// Remove stale NWWS entries for the same warning when an upgraded version arrives.
+// Upgrades (e.g. TOR→TORE) share the same VTEC stable key but get a new tracking hash.
+function replaceNwwsDuplicates(feature, liveKey) {
+  const liveSig = vtecSignatureFromFeature(feature);
+  if (!liveSig) return 0;
+  let removed = 0;
+  for (const [entryKey, entry] of activeAlerts.entries()) {
+    if (entryKey === liveKey || entry?._source === 'nws-api') continue;
+    const entryFeature = getFeatureForEntry(entry);
+    const entrySig = vtecSignatureFromFeature(entryFeature);
+    if (!entrySig) continue;
+    if (entrySig === liveSig) {
+      activeAlerts.delete(entryKey);
+      removed += 1;
+      emitLog('info', `[NWWS] Replaced stale NWWS entry ${entryKey} with upgraded entry ${liveKey}`);
     }
   }
   return removed;
@@ -427,11 +450,13 @@ function pruneExpiredAlerts() {
 
 function publishAlerts() {
   pruneExpiredAlerts();
+
   const features = [];
   for (const entry of activeAlerts.values()) {
     const feature = getFeatureForEntry(entry);
     if (feature) features.push(feature);
   }
+
   features.sort((a, b) => {
     const aTime = Date.parse(a.properties.issued || '') || 0;
     const bTime = Date.parse(b.properties.issued || '') || 0;
@@ -664,6 +689,7 @@ function attachParserHandlers(instance) {
       if (wasPresent) summary.updated += 1;
       else summary.added += 1;
       summary.removedBootstrap += replaceBootstrapDuplicates(feature, feature.id);
+      summary.removedBootstrap += replaceNwwsDuplicates(feature, feature.id);
     }
     const counts = sourceCounts();
     if (summary.added > 0 || summary.updated > 0 || summary.removedBootstrap > 0 || summary.skippedFlood > 0) {
