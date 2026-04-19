@@ -24,6 +24,7 @@ const BACKEND_EXE_NAME: &str = if cfg!(target_os = "windows") {
 };
 const S3_LEVEL3_LIST_URL: &str = "https://unidata-nexrad-level3.s3.amazonaws.com/";
 const TGFTP_LEVEL3_BASE_URL: &str = "https://tgftp.nws.noaa.gov/SL.us008001/DF.of/DC.radar";
+const KANDRIVE_GRAPHQL_URL: &str = "https://www.kandrive.gov/api/graphql";
 const APP_UPDATE_GITHUB_OWNER: &str = "anony121221";
 const APP_UPDATE_GITHUB_REPO: &str = "app";
 const APP_UPDATE_GITHUB_TOKEN: &str = "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";
@@ -2436,12 +2437,14 @@ fn do_fetch_inner(url: String, depth: u8, timeout_ms: Option<u64>) -> Result<Fet
     }
 
     // State-specific headers — specific subdomains MUST come before generic domain matches.
-    if url.contains("idrivearkansas.com") || url.contains("worldssl.net") || url.contains("skyvdn.com") {
+    if url.contains("kdot-sfs") && url.contains("skyvdn.com") {
+        req = req.header("Origin", "https://www.kandrive.gov").header("Referer", "https://www.kandrive.gov/");
+    } else if url.contains("idrivearkansas.com") || url.contains("worldssl.net") || url.contains("skyvdn.com") {
         let origin = if url.contains("worldssl.net") || url.contains("skyvdn.com") { "null" } else { "https://www.idrivearkansas.com" };
         req = req.header("Origin", origin).header("Referer", "https://www.idrivearkansas.com/");
     } else if url.contains("kscam.carsprogram.org") {
         // Kansas
-        req = req.header("Origin", "https://www.kandrive.org").header("Referer", "https://www.kandrive.org/");
+        req = req.header("Origin", "https://www.kandrive.gov").header("Referer", "https://www.kandrive.gov/");
     } else if url.contains("cocam.carsprogram.org") {
         // Colorado
         req = req.header("Origin", "https://cotrip.org").header("Referer", "https://cotrip.org/");
@@ -3019,6 +3022,237 @@ fn fetch_pendot_stream(image_id: String, channel_url: String) -> Result<String, 
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
+
+#[derive(serde::Serialize)]
+struct KanDriveStreamInfo {
+    stream_url: String,
+    snapshot_url: String,
+    title: String,
+}
+
+fn kandrive_graphql(
+    client: &reqwest::blocking::Client,
+    query: &str,
+    variables: serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    let body = serde_json::json!({
+        "query": query,
+        "variables": variables,
+    })
+    .to_string();
+
+    let resp = client
+        .post(KANDRIVE_GRAPHQL_URL)
+        .header("Content-Type", "application/json")
+        .header("Accept", "application/json, text/plain, */*")
+        .header("Origin", "https://www.kandrive.gov")
+        .header("Referer", "https://www.kandrive.gov/")
+        .body(body)
+        .send()
+        .map_err(|e| format!("KanDrive GraphQL request failed: {e}"))?;
+    let status = resp.status().as_u16();
+    let body_bytes = resp
+        .bytes()
+        .map_err(|e| format!("KanDrive GraphQL body failed: {e}"))?;
+    if status < 200 || status >= 400 {
+        return Err(format!(
+            "KanDrive GraphQL HTTP {status} body={}",
+            String::from_utf8_lossy(&body_bytes)
+                .chars()
+                .take(200)
+                .collect::<String>()
+        ));
+    }
+    let payload: serde_json::Value = serde_json::from_slice(&body_bytes).map_err(|e| {
+        format!(
+            "KanDrive GraphQL parse failed: {e} body={}",
+            String::from_utf8_lossy(&body_bytes)
+                .chars()
+                .take(200)
+                .collect::<String>()
+        )
+    })?;
+    if let Some(errors) = payload.get("errors").and_then(|v| v.as_array()) {
+        if !errors.is_empty() {
+            return Err(format!("KanDrive GraphQL returned {} error(s)", errors.len()));
+        }
+    }
+    Ok(payload)
+}
+
+fn kandrive_lookup_camera_view(
+    client: &reqwest::blocking::Client,
+    camera_id: &str,
+) -> Result<(String, String, String), String> {
+    const KANDRIVE_MAP_FEATURES_QUERY: &str = r#"query MapFeatures($input: MapFeaturesArgs!, $plowType: String) { mapFeaturesQuery(input: $input) { mapFeatures { bbox title tooltip uri features { id geometry properties type } __typename ... on Camera { active views(limit: 5) { uri ... on CameraView { url } category } } ... on Plow { views(limit: 5, plowType: $plowType) { uri ... on PlowCameraView { url } category } } } error { message type } } }"#;
+
+    let payload = kandrive_graphql(
+        client,
+        KANDRIVE_MAP_FEATURES_QUERY,
+        serde_json::json!({
+            "input": {
+                "north": 41.99452,
+                "south": 35.07757,
+                "east": -93.42456,
+                "west": -100.7854,
+                "zoom": 9,
+                "layerSlugs": ["normalCameras"],
+                "nonClusterableUris": ["dashboard"],
+            },
+            "plowType": "plowCameras",
+        }),
+    )?;
+
+    if let Some(msg) = payload
+        .pointer("/data/mapFeaturesQuery/error/message")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.trim().is_empty())
+    {
+        return Err(format!("KanDrive mapFeaturesQuery error: {msg}"));
+    }
+
+    let target_uri = format!("camera/{camera_id}");
+    let features = payload
+        .pointer("/data/mapFeaturesQuery/mapFeatures")
+        .and_then(|v| v.as_array())
+        .ok_or_else(|| "KanDrive mapFeaturesQuery missing mapFeatures".to_string())?;
+    let camera = features
+        .iter()
+        .find(|item| item.get("uri").and_then(|v| v.as_str()) == Some(target_uri.as_str()))
+        .ok_or_else(|| format!("Kansas camera {camera_id} not found in KanDrive mapFeaturesQuery"))?;
+
+    let title = camera
+        .get("title")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    let view = camera
+        .get("views")
+        .and_then(|v| v.as_array())
+        .and_then(|views| {
+            views
+                .iter()
+                .find(|entry| {
+                    entry
+                        .get("category")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.eq_ignore_ascii_case("VIDEO"))
+                        .unwrap_or(false)
+                })
+                .or_else(|| views.first())
+        })
+        .ok_or_else(|| format!("Kansas camera {camera_id} missing view metadata"))?;
+
+    let view_uri = view
+        .get("uri")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    let view_id = view_uri
+        .rsplit('/')
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    if view_id.is_empty() {
+        return Err(format!("Kansas camera {camera_id} missing KanDrive view id"));
+    }
+
+    let snapshot_url = view
+        .get("url")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .trim()
+        .to_string();
+
+    Ok((view_id, snapshot_url, title))
+}
+
+#[tauri::command]
+fn fetch_kandrive_stream(camera_id: String) -> Result<KanDriveStreamInfo, String> {
+    const KANDRIVE_MODAL_QUERY: &str = r#"query Modal( $entitySlug: String! $entityId: ID! $viewId: ID! $showCameraLastUpdated: Boolean! ) { modalQuery(entitySlug: $entitySlug, entityId: $entityId, viewId: $viewId) { current { uri category title ... on CameraView { url sources { type src original } } parentCollection { __typename uri bbox icon location { routeDesignator } lastUpdated @include(if: $showCameraLastUpdated) { timestamp timezone } views { uri } ... on Camera { agencyAttribution { agencyName } } } } error { type } } }"#;
+
+    let camera_id = camera_id.trim();
+    if camera_id.is_empty() {
+        return Err("Kansas camera id missing".to_string());
+    }
+
+    let client = get_http_client();
+    let (view_id, fallback_snapshot_url, fallback_title) =
+        kandrive_lookup_camera_view(client, camera_id)?;
+    let payload = kandrive_graphql(
+        client,
+        KANDRIVE_MODAL_QUERY,
+        serde_json::json!({
+            "entitySlug": "camera",
+            "entityId": camera_id,
+            "viewId": view_id,
+            "showCameraLastUpdated": false,
+        }),
+    )?;
+
+    if let Some(err_type) = payload
+        .pointer("/data/modalQuery/error/type")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.trim().is_empty())
+    {
+        return Err(format!("KanDrive modalQuery error: {err_type}"));
+    }
+
+    let current = payload
+        .pointer("/data/modalQuery/current")
+        .ok_or_else(|| "KanDrive modalQuery missing current view".to_string())?;
+    let title = current
+        .get("title")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    let snapshot_url = current
+        .get("url")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    let stream_url = current
+        .get("sources")
+        .and_then(|v| v.as_array())
+        .and_then(|sources| {
+            sources.iter().find_map(|source| {
+                let src = source
+                    .get("src")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .trim();
+                if src.is_empty() {
+                    return None;
+                }
+                let source_type = source
+                    .get("type")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .trim();
+                if source_type.eq_ignore_ascii_case("application/x-mpegURL") || src.contains(".m3u8") {
+                    Some(src.to_string())
+                } else {
+                    None
+                }
+            })
+        })
+        .unwrap_or_default();
+
+    Ok(KanDriveStreamInfo {
+        stream_url,
+        snapshot_url: if snapshot_url.is_empty() {
+            fallback_snapshot_url
+        } else {
+            snapshot_url
+        },
+        title: if title.is_empty() { fallback_title } else { title },
+    })
+}
 
 #[tauri::command]
 async fn decode_l2(
@@ -3687,6 +3921,7 @@ pub fn run() {
             fetch_url_base64,
             fetch_fl511_stream,
             fetch_pendot_stream,
+            fetch_kandrive_stream,
             start_nwws_bridge,
             stop_nwws_bridge,
             decode_wise_key,

@@ -11,7 +11,7 @@ const L3_TILTS     = ['0.5', '1.5', '2.4', '3.1'];
 const REMOTE_HYBRID_L2_PRODUCTS = ['CC', 'ZDR'];
 const HYBRID_L2_FAMILIES = new Set(REMOTE_HYBRID_L2_PRODUCTS);
 const PROCESSED_WISE_BASE_URL = 'https://data2.weatherwise.app/radar/processed';
-const PROCESSED_WISE_FAMILIES = Object.freeze(['REF', 'VEL', 'SRV', 'CC', 'ZDR', 'SW', 'EET', 'PRT', 'DTA', 'KDP', 'NROT', 'REFE', 'SHR']);
+const PROCESSED_WISE_FAMILIES = Object.freeze(['REF', 'VEL', 'SRV', 'CC', 'ZDR', 'SW', 'EET', 'PRT', 'DTA', 'KDP']);
 const PROCESSED_WISE_FAMILY_SET = new Set(PROCESSED_WISE_FAMILIES);
 // Products that only use a single tilt (tilt index always 0 in folder name)
 const PROCESSED_WISE_SINGLE_TILT_FAMILIES = new Set(['EET', 'PRT', 'DTA']);
@@ -36,9 +36,6 @@ const PROCESSED_WISE_FAMILY_TILTS = Object.freeze({
   PRT: PROCESSED_WISE_SINGLE_TILT,
   DTA: PROCESSED_WISE_SINGLE_TILT,
   KDP: PROCESSED_WISE_TILTS,
-  NROT: PROCESSED_WISE_TILTS,
-  REFE: PROCESSED_WISE_TILTS,
-  SHR: PROCESSED_WISE_TILTS,
 });
 
 // TDWR (Terminal Doppler Weather Radar) uses different folder names
@@ -92,6 +89,7 @@ const WEATHERWISE_RELAY_CONNECT_TIMEOUT_MS = 10000;
 const WEATHERWISE_RELAY_ENABLED = true;
 const EARTH_RADIUS_M = 6_371_000.0;
 const MAX_MERCATOR_LAT = 85.05112878;
+const MAP_AMERICAS_MAX_BOUNDS = [[-172, -60], [-18, 84]];
 const MAP_STYLE_BLACK = 'custom://black';
 const MAP_STYLE_DARK = 'mapbox://styles/mapbox/dark-v11';
 const MAP_STYLE_GREY = 'mapbox://styles/tuftsweather/cmnr19sq6003k01qt8u28bt6g';
@@ -1775,13 +1773,12 @@ function initSpcOverlayLayers() {
 
   map.on('click', 'spc-base-fill', e => {
     if (!e.features?.length) return;
-    // Don't open the SPC viewer when the click also landed on a radar station dot.
-    if (map.queryRenderedFeatures(e.point, { layers: ['stations-dot'] }).length > 0) return;
+    if (_spcViewerShouldYieldClick(map, e.point)) return;
     openSpcViewer(spcDay, spcType);
   });
   map.on('click', 'spc-cig-fill', e => {
     if (!e.features?.length) return;
-    if (map.queryRenderedFeatures(e.point, { layers: ['stations-dot'] }).length > 0) return;
+    if (_spcViewerShouldYieldClick(map, e.point)) return;
     openSpcViewer(spcDay, spcType);
   });
   map.on('mouseenter', 'spc-base-fill', () => { map.getCanvas().style.cursor = 'pointer'; });
@@ -1805,6 +1802,11 @@ let _spcViewerMode = 'outlook';
 let _spcViewerFacts = [];
 let _spcViewerDocKey = '';
 
+function _spcDayNumber(day) {
+  const value = Number.parseInt(String(day || '').replace(/[^0-9]/g, ''), 10);
+  return Number.isFinite(value) ? value : 0;
+}
+
 function _spcImageMimeType(imageUrl) {
   const url = String(imageUrl || '').toLowerCase();
   if (url.includes('.gif')) return 'image/gif';
@@ -1813,21 +1815,73 @@ function _spcImageMimeType(imageUrl) {
   return 'image/png';
 }
 
+function _spcDay4To8GifFallbackUrl(imageUrl) {
+  const raw = String(imageUrl || '').trim();
+  if (!/https:\/\/www\.spc\.noaa\.gov\/products\/exper\/day4-8\//i.test(raw)) return '';
+  if (!/\.png(?:$|[?#])/i.test(raw)) return '';
+  return raw.replace(/\.png(?=($|[?#]))/i, '.gif');
+}
+
+function _spcShouldConvertToPng(imageUrl, fetchedUrl = '') {
+  const joined = `${String(imageUrl || '')} ${String(fetchedUrl || '')}`.toLowerCase();
+  return /spc\.noaa\.gov\/products\/exper\/day4-8\/day(?:48|[4-8])prob\.(?:gif|png)/.test(joined);
+}
+
+async function _spcBlobToPngDataUrl(blob) {
+  if (!(blob instanceof Blob) || !blob.size) {
+    throw new Error('Image unavailable');
+  }
+  const objectUrl = URL.createObjectURL(blob);
+  try {
+    const img = await new Promise((resolve, reject) => {
+      const el = new Image();
+      el.onload = () => resolve(el);
+      el.onerror = () => reject(new Error('Image decode failed'));
+      el.src = objectUrl;
+    });
+    const width = Math.max(1, Number(img.naturalWidth || img.width || 0));
+    const height = Math.max(1, Number(img.naturalHeight || img.height || 0));
+    const canvas = document.createElement('canvas');
+    canvas.width = width;
+    canvas.height = height;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) throw new Error('Canvas unavailable');
+    ctx.clearRect(0, 0, width, height);
+    ctx.drawImage(img, 0, 0, width, height);
+    return canvas.toDataURL('image/png');
+  } finally {
+    URL.revokeObjectURL(objectUrl);
+  }
+}
+
 async function _fetchSpcImageDataUrl(imageUrl) {
   if (_spcImageCache.has(imageUrl)) return _spcImageCache.get(imageUrl);
-  const res = await invoke('fetch_url_base64', { url: imageUrl });
+  let fetchUrl = String(imageUrl || '').trim();
+  let res = await invoke('fetch_url_base64', { url: fetchUrl });
+  if ((!res || res.status < 200 || res.status >= 400 || !res.body_base64) && _spcDay4To8GifFallbackUrl(fetchUrl)) {
+    const fallbackUrl = _spcDay4To8GifFallbackUrl(fetchUrl);
+    const fallbackRes = await invoke('fetch_url_base64', { url: fallbackUrl });
+    if (fallbackRes && fallbackRes.status >= 200 && fallbackRes.status < 400 && fallbackRes.body_base64) {
+      fetchUrl = fallbackUrl;
+      res = fallbackRes;
+    }
+  }
   if (!res || res.status < 200 || res.status >= 400 || !res.body_base64) {
     throw Object.assign(new Error(`HTTP ${res?.status ?? '?'}`), { status: res?.status ?? 0 });
   }
-  const dataUrl = `data:${_spcImageMimeType(imageUrl)};base64,${res.body_base64}`;
+  let dataUrl = `data:${_spcImageMimeType(fetchUrl)};base64,${res.body_base64}`;
+  if (_spcShouldConvertToPng(imageUrl, fetchUrl)) {
+    const bytes = _decodeBase64Bytes(res.body_base64);
+    dataUrl = await _spcBlobToPngDataUrl(new Blob([bytes], { type: _spcImageMimeType(fetchUrl) }));
+  }
   _spcImageCache.set(imageUrl, dataUrl);
   return dataUrl;
 }
 
 function _spcImageUrl(day, type) {
-  const d = day.replace('DAY', '');
-  if (+d >= 4) return `https://www.spc.noaa.gov/products/exper/day4-8/media/day${d}prob.png`;
-  if (+d === 3) {
+  const d = _spcDayNumber(day);
+  if (d >= 4) return `https://www.spc.noaa.gov/products/exper/day4-8/day${d}prob.png`;
+  if (d === 3) {
     return type === 'PROB'
       ? `https://www.spc.noaa.gov/products/outlook/day3prob.png`
       : `https://www.spc.noaa.gov/products/outlook/day3otlk.png`;
@@ -1837,8 +1891,8 @@ function _spcImageUrl(day, type) {
 }
 
 function _spcDiscussionUrl(day) {
-  const d = day.replace('DAY', '');
-  if (+d >= 4) return `https://www.spc.noaa.gov/products/exper/day4-8/day${d}prob.html`;
+  const d = _spcDayNumber(day);
+  if (d >= 4) return 'https://www.spc.noaa.gov/products/exper/day4-8/';
   return `https://www.spc.noaa.gov/products/outlook/day${d}otlk.html`;
 }
 
@@ -6378,20 +6432,7 @@ function _nearestRadarStationId(lng, lat) {
 }
 
 function _nearestWsrRadarStationId(lng, lat) {
-  if (!Number.isFinite(lng) || !Number.isFinite(lat)) return null;
-  let bestId = null;
-  let bestDist = Infinity;
-  for (const [stationId, station] of Object.entries(VIEWABLE_STATIONS)) {
-    const sLat = Number(station?.[0]);
-    const sLng = Number(station?.[1]);
-    if (!Number.isFinite(sLat) || !Number.isFinite(sLng)) continue;
-    const distKm = _geoDistanceKm(lng, lat, sLng, sLat);
-    if (distKm < bestDist) {
-      bestDist = distKm;
-      bestId = stationId;
-    }
-  }
-  return bestId;
+  return _nearestRadarStationIds(lng, lat, 1, { includeTerminal: false })[0] || null;
 }
 
 function _alertPopupYieldLayerIds(targetMap) {
@@ -6404,6 +6445,24 @@ function _alertPopupYieldLayerIds(targetMap) {
     RO_CHASER_LAYER_ID,
   ];
   return ids.filter(id => targetMap.getLayer(id));
+}
+
+function _spcViewerYieldLayerIds(targetMap) {
+  if (!targetMap) return [];
+  const ids = [...STATION_LAYER_IDS, ..._alertPopupYieldLayerIds(targetMap)];
+  return [...new Set(ids)].filter(id => targetMap.getLayer(id));
+}
+
+function _spcViewerShouldYieldClick(targetMap, point) {
+  if (!targetMap || point == null) return false;
+  const layers = _spcViewerYieldLayerIds(targetMap);
+  if (!layers.length) return false;
+  try {
+    const features = targetMap.queryRenderedFeatures(point, { layers });
+    return Array.isArray(features) && features.length > 0;
+  } catch (_) {
+    return false;
+  }
 }
 
 function _alertPopupLayerIds(targetMap) {
@@ -9661,6 +9720,8 @@ const map = new mapboxgl.Map({
   center: [-98, 39],
   zoom: 4,
   projection: 'mercator',
+  maxBounds: MAP_AMERICAS_MAX_BOUNDS,
+  renderWorldCopies: false,
 });
 // Disable Mapbox's built-in keyboard handler so arrow keys are used
 // exclusively for frame navigation (stepHistory) without panning the map.
@@ -9713,10 +9774,12 @@ function _paneMapForId(id) {
   return secondaryPaneMaps.get(Number(id))?.map || null;
 }
 
-function _nearestRadarStationIds(lng, lat, count = 2) {
+function _nearestRadarStationIds(lng, lat, count = 2, opts = {}) {
   if (!Number.isFinite(lng) || !Number.isFinite(lat)) return [];
+  const includeTerminal = opts?.includeTerminal !== false;
   return Object.entries(VIEWABLE_STATIONS)
     .map(([stationId, station]) => {
+      if (!includeTerminal && isTerminalStation(stationId)) return null;
       const sLat = Number(station?.[0]);
       const sLng = Number(station?.[1]);
       if (!Number.isFinite(sLat) || !Number.isFinite(sLng)) return null;
@@ -9729,6 +9792,10 @@ function _nearestRadarStationIds(lng, lat, count = 2) {
     })
     .slice(0, Math.max(1, Number(count) || 2))
     .map(item => item.stationId);
+}
+
+function _nearestWsrRadarStationIds(lng, lat, count = 2) {
+  return _nearestRadarStationIds(lng, lat, count, { includeTerminal: false });
 }
 
 function _boardContextLocationFromEvent(event) {
@@ -9877,7 +9944,7 @@ mapGridEl?.addEventListener('contextmenu', event => {
   event.stopPropagation();
   const clickInfo = _boardContextLocationFromEvent(event);
   _syncBoardContextRadars(
-    clickInfo?.lngLat ? _nearestRadarStationIds(clickInfo.lngLat.lng, clickInfo.lngLat.lat, 2) : [],
+    clickInfo?.lngLat ? _nearestWsrRadarStationIds(clickInfo.lngLat.lng, clickInfo.lngLat.lat, 2) : [],
     clickInfo?.lngLat || null,
   );
   _setBoardContextMenuOpen(true, event.clientX, event.clientY);
@@ -10200,8 +10267,16 @@ function _initOverlaysOnSecondaryMap(m) {
     m.addLayer({ id: 'spc-base-line', type: 'line', source: 'spc-base-src', layout: { visibility: spcVis }, paint: { 'line-color': ['coalesce', ['get', '_line'], '#FFFFFF'], 'line-width': ['coalesce', ['get', '_lineWidth'], 1.8], 'line-opacity': 0.95 } }, beforeId);
     m.addLayer({ id: 'spc-cig-fill', type: 'fill', source: 'spc-cig-src', layout: { visibility: spcVis }, paint: { 'fill-pattern': ['coalesce', ['get', '_hatch'], 'spc-hatch-cig1'], 'fill-opacity': ['coalesce', ['get', '_fillOpacity'], 1.0], 'fill-antialias': false } }, beforeId);
     m.addLayer({ id: 'spc-cig-line', type: 'line', source: 'spc-cig-src', layout: { visibility: spcVis }, paint: { 'line-color': '#000000', 'line-width': 1.8, 'line-opacity': 0.95 } }, beforeId);
-    m.on('click', 'spc-base-fill', e => { if (e.features?.length) openSpcViewer(spcDay, spcType); });
-    m.on('click', 'spc-cig-fill', e => { if (e.features?.length) openSpcViewer(spcDay, spcType); });
+    m.on('click', 'spc-base-fill', e => {
+      if (!e.features?.length) return;
+      if (_spcViewerShouldYieldClick(m, e.point)) return;
+      openSpcViewer(spcDay, spcType);
+    });
+    m.on('click', 'spc-cig-fill', e => {
+      if (!e.features?.length) return;
+      if (_spcViewerShouldYieldClick(m, e.point)) return;
+      openSpcViewer(spcDay, spcType);
+    });
     m.on('mouseenter', 'spc-base-fill', () => { m.getCanvas().style.cursor = 'pointer'; });
     m.on('mouseleave', 'spc-base-fill', () => { m.getCanvas().style.cursor = ''; });
     m.on('mouseenter', 'spc-cig-fill', () => { m.getCanvas().style.cursor = 'pointer'; });
@@ -10925,6 +11000,8 @@ function _createSecondaryPane(id) {
     bearing: map.getBearing(),
     pitch: map.getPitch(),
     projection: 'mercator',
+    maxBounds: MAP_AMERICAS_MAX_BOUNDS,
+    renderWorldCopies: false,
   });
   paneMap.keyboard.disable();
 
@@ -16191,9 +16268,6 @@ const PRODUCT_DISPLAY_NAMES = {
   DTA: 'Storm Total Precip Accumulation',
   PTDS: 'Probability of Tornado Debris Signature',
   SRV: 'Storm Relative Velocity',
-  NROT: 'Normalized Rotation',
-  REFE: 'Enhanced Reflectivity',
-  SHR: 'Spectrum Width (Hi-Res)',
 };
 
 function _familyDisplayName(family) {
@@ -17284,6 +17358,8 @@ const CAMERA_PAYLOAD_KEYS = new Set([
   'address',
   'agency',
   'cameraImageURL',
+  'cameraId',
+  'cameraName',
   'cameraViews',
   'camera_code',
   'camera_page_url',
@@ -17297,6 +17373,7 @@ const CAMERA_PAYLOAD_KEYS = new Set([
   'description',
   'dir',
   'direction',
+  'directionLabel',
   'highway',
   'hls_stream_protected',
   'hls_url',
@@ -17319,6 +17396,7 @@ const CAMERA_PAYLOAD_KEYS = new Set([
   'livestreaming',
   'location',
   'm3u8',
+  'm3u8Url',
   'm3u8_url',
   'm3u8_urls',
   'map_image_url',
@@ -17410,11 +17488,13 @@ const WXWISE_CHASER_POLL_MS = 1000;
 const RO_CHASER_POLL_MS = 3000;
 const CAMERA_STARTUP_RETRY_MS = 1500;
 const CAMERA_STARTUP_RETRY_MAX = 6;
+const CAMERA_PLAYBACK_START_TIMEOUT_MS = 12000;
 let cameraStartupRetryToken = 0;
 var cameraStartupRetryTimer = null;
 let cameraHls = null;
 let cameraShaka = null;
 let snapshotTimer = null;
+let cameraPlaybackStartupTimer = null;
 let cameraShareUrl = '';
 let cameraActiveProps = null;
 let cameraSyncSeq = 0;
@@ -17501,6 +17581,7 @@ function _cameraPayloadKey(kind, feature, index = 0) {
     : `idx-${index}`;
   const rawId = feature?.id
     ?? props.id
+    ?? props.cameraId
     ?? props.uuid
     ?? props.siteId
     ?? props.site_id
@@ -17651,6 +17732,7 @@ function _cameraViewHasVideo(view, props = {}) {
   const directUrls = [
     view.url,
     view.video_url,
+    view.m3u8Url,
     view.m3u8_url,
     view.dash_url,
     view.streamingURL,
@@ -17692,6 +17774,7 @@ function _cameraFeatureHasVideo(props = {}) {
     props.hls_url,
     props.streamingURL,
     props.streamingVideoURL,
+    props.m3u8Url,
     props.m3u8_url,
     props.m3u8,
     props.hls_stream_protected,
@@ -19258,6 +19341,39 @@ function _extractWisconsinTooltipVideoUrl(html, tooltipUrl) {
   return match ? _cameraAbsoluteUrl(match[1], tooltipUrl) : '';
 }
 
+function _isKansasTrafficCamera(props = {}) {
+  return String(props?._state || props?.state || '').trim().toUpperCase() === 'KS';
+}
+
+async function _resolveKansasSignedCameraUrls(props = {}, current = {}) {
+  const next = {
+    dashUrl: String(current?.dashUrl || '').trim(),
+    hlsUrl: String(current?.hlsUrl || '').trim(),
+    snapshotUrl: String(current?.snapshotUrl || '').trim(),
+    title: '',
+  };
+  if (!_isKansasTrafficCamera(props) || !_cameraResolvedHasVideo(props)) return next;
+  const cameraId = String(props?.cameraId ?? props?.camera_id ?? props?.id ?? '').trim();
+  if (!cameraId) {
+    next.hlsUrl = '';
+    return next;
+  }
+  next.hlsUrl = '';
+  try {
+    const resolved = await invoke('fetch_kandrive_stream', { cameraId });
+    next.hlsUrl = String(resolved?.stream_url || '').trim();
+    const resolvedSnapshot = String(resolved?.snapshot_url || '').trim();
+    if (resolvedSnapshot) next.snapshotUrl = resolvedSnapshot;
+    next.title = String(resolved?.title || '').trim();
+  } catch (err) {
+    console.warn('[Camera][KS] signed stream resolve failed', {
+      cameraId,
+      error: String(err || ''),
+    });
+  }
+  return next;
+}
+
 function _extractPlayReadyLicenseUrlFromMpd(mpdText) {
   const xml = String(mpdText || '');
   const clearMatch = xml.match(/<LA_URL>(https?:\/\/[^<]+)<\/LA_URL>/i);
@@ -19302,6 +19418,7 @@ function resolveUrls(props) {
     || props.hls_url
     || props.streamingURL          // Hawaii GoAkamai
     || props.streamingVideoURL     // California QuickMap
+    || props.m3u8Url               // Kansas worker feed
     || props.m3u8_url
     || props.m3u8                   // Oklahoma (colewx worker)
     || props.url2                   // Missouri (ArcGIS)
@@ -19440,6 +19557,7 @@ function _cameraIsGenericTitle(value) {
 function _cameraDisplayTitle(props) {
   const candidates = [
     props?.camera_title,
+    props?.cameraName,
     props?.name,
     props?.title,
     props?.description,
@@ -19500,6 +19618,7 @@ function _cameraDirectionLabel(props) {
     || props?.Direction
     || props?.DIRECTION
     || props?.dir
+    || props?.directionLabel
     || ''
   );
   if (explicit) return explicit;
@@ -19522,6 +19641,44 @@ function _isAlabamaAlgoCamera(props) {
 
 function _showSingleCameraDirection(props) {
   _hideDirBar();
+}
+
+function _clearCameraPlaybackStartupTimer() {
+  if (cameraPlaybackStartupTimer) {
+    clearTimeout(cameraPlaybackStartupTimer);
+    cameraPlaybackStartupTimer = null;
+  }
+}
+
+function _destroyActiveCameraPlayback() {
+  _clearCameraPlaybackStartupTimer();
+  if (cameraHls) {
+    try { cameraHls.destroy(); } catch (_) {}
+    cameraHls = null;
+  }
+  if (cameraShaka) {
+    try { cameraShaka.destroy().catch(() => {}); } catch (_) {}
+    cameraShaka = null;
+  }
+  if (snapshotTimer) {
+    clearInterval(snapshotTimer);
+    snapshotTimer = null;
+  }
+}
+
+function _showCameraUnavailable(content) {
+  _destroyActiveCameraPlayback();
+  if (!content) return;
+  content.innerHTML = noFeedEl();
+}
+
+function _armCameraPlaybackStartupTimer(content) {
+  _clearCameraPlaybackStartupTimer();
+  cameraPlaybackStartupTimer = setTimeout(() => {
+    const modal = document.getElementById('camera-modal');
+    if (modal?.style.display === 'none') return;
+    _showCameraUnavailable(content);
+  }, CAMERA_PLAYBACK_START_TIMEOUT_MS);
 }
 
 async function _probeCameraHls(hlsUrl, props = {}) {
@@ -19647,6 +19804,17 @@ async function _startCameraHlsPlayback(content, hlsUrl, snapshotUrl, props = {})
   video.playsInline = true;
   video.style.cssText = 'width:100%;height:100%;object-fit:contain;background:#000;display:block;';
   content.appendChild(video);
+  _armCameraPlaybackStartupTimer(content);
+  let playbackReady = false;
+  const markPlaybackReady = () => {
+    playbackReady = true;
+    _clearCameraPlaybackStartupTimer();
+  };
+  const failPlayback = () => _showCameraUnavailable(content);
+  video.addEventListener('loadeddata', markPlaybackReady, { once: true });
+  video.addEventListener('canplay', markPlaybackReady, { once: true });
+  video.addEventListener('playing', markPlaybackReady, { once: true });
+  video.addEventListener('error', failPlayback, { once: true });
 
   cameraHls = new Hls({
     loader: makeTauriHlsLoader(),
@@ -19701,6 +19869,26 @@ async function _startCameraHlsPlayback(content, hlsUrl, snapshotUrl, props = {})
         fatal: Boolean(data?.fatal),
       });
     }
+    const startupStatus = Number(data?.response?.code || data?.networkDetails?.status || 0);
+    const startupDetails = String(data?.details || '').toLowerCase();
+    // Only fail fast on definitive HTTP auth/missing errors — not on timeouts or
+    // transient CDN issues (levelloadtimeout, fragloadtimeout) which HLS.js retries.
+    const shouldFailFast = !playbackReady && (
+      startupStatus === 401
+      || startupStatus === 403
+      || startupStatus === 404
+      || startupStatus === 410
+      || (startupStatus >= 400 && (
+           startupDetails.includes('manifestload')
+        || startupDetails.includes('levelload')
+        || startupDetails.includes('fragload')
+        || startupDetails.includes('keyload')
+      ))
+    );
+    if (shouldFailFast) {
+      _showCameraUnavailable(content);
+      return;
+    }
     if (data?.fatal) {
       const errType = data?.type;
       if (errType === Hls.ErrorTypes.NETWORK_ERROR && networkRecoveries < 3) {
@@ -19744,13 +19932,7 @@ async function _startCameraHlsPlayback(content, hlsUrl, snapshotUrl, props = {})
           hasSnapshot: Boolean(snapshotUrl),
         });
       }
-      cameraHls.destroy();
-      cameraHls = null;
-      if (snapshotUrl) {
-        content.innerHTML = '';
-        showSnapshot(content, snapshotUrl);
-      }
-      else content.innerHTML = noFeedEl();
+      _showCameraUnavailable(content);
     }
   });
 }
@@ -19828,6 +20010,13 @@ async function _startCameraDashPlayback(content, dashUrl, snapshotUrl, props = {
   video.playsInline = true;
   video.style.cssText = 'width:100%;height:100%;object-fit:contain;background:#000;display:block;';
   content.appendChild(video);
+  _armCameraPlaybackStartupTimer(content);
+  const markPlaybackReady = () => _clearCameraPlaybackStartupTimer();
+  const failPlayback = () => _showCameraUnavailable(content);
+  video.addEventListener('loadeddata', markPlaybackReady, { once: true });
+  video.addEventListener('canplay', markPlaybackReady, { once: true });
+  video.addEventListener('playing', markPlaybackReady, { once: true });
+  video.addEventListener('error', failPlayback, { once: true });
 
   cameraShaka = new window.shaka.Player(video);
   cameraShaka.addEventListener('error', ev => {
@@ -19839,14 +20028,7 @@ async function _startCameraDashPlayback(content, dashUrl, snapshotUrl, props = {
       category: detail?.category || 0,
       data: detail?.data || [],
     });
-    if (snapshotUrl) {
-      cameraShaka?.destroy().catch(() => {});
-      cameraShaka = null;
-      content.innerHTML = '';
-      showSnapshot(content, snapshotUrl);
-    } else {
-      content.innerHTML = noFeedEl();
-    }
+    _showCameraUnavailable(content);
   });
 
   if (licenseUrl) {
@@ -19872,16 +20054,7 @@ async function _startCameraDashPlayback(content, dashUrl, snapshotUrl, props = {
       url: manifestUrl,
       error: String(err || ''),
     });
-    try {
-      await cameraShaka.destroy();
-    } catch (_) {}
-    cameraShaka = null;
-    if (snapshotUrl) {
-      content.innerHTML = '';
-      showSnapshot(content, snapshotUrl);
-    } else {
-      content.innerHTML = noFeedEl();
-    }
+    _showCameraUnavailable(content);
   }
 }
 
@@ -20352,6 +20525,18 @@ async function openCamera(props) {
     });
   }
 
+  if (_isKansasTrafficCamera(props || {})) {
+    const resolved = await _resolveKansasSignedCameraUrls(props || {}, {
+      dashUrl,
+      hlsUrl,
+      snapshotUrl,
+    });
+    dashUrl = resolved.dashUrl || dashUrl;
+    hlsUrl = resolved.hlsUrl;
+    snapshotUrl = resolved.snapshotUrl || snapshotUrl;
+    if (resolved.title) titleEl.textContent = resolved.title;
+  }
+
   // Georgia 511: bare navigator.dot.ga.gov URLs are unsigned and often 401/403/503.
   // Always fetch a fresh signed playlist URL using imageId at click time.
   const isGeorgia = isGeorgiaCameraFeature({ properties: props || {} });
@@ -20491,10 +20676,23 @@ async function openCamera(props) {
 }
 
 function noFeedEl() {
-  return '<div style="color:#666;display:flex;align-items:center;justify-content:center;height:100%;font-size:12px;">No feed available</div>';
+  return `
+    <div class="camera-unavailable-state" role="status" aria-live="polite">
+      <div class="camera-unavailable-icon" aria-hidden="true">
+        <svg viewBox="0 0 24 24" fill="none">
+          <circle cx="12" cy="12" r="8.5"></circle>
+          <path d="M12 7.7v5.6"></path>
+          <circle cx="12" cy="16.6" r="0.6" fill="currentColor" stroke="none"></circle>
+        </svg>
+      </div>
+      <div class="camera-unavailable-title">Unable to load video stream</div>
+      <div class="camera-unavailable-subtitle">No camera available</div>
+    </div>
+  `;
 }
 
 function showSnapshot(container, url) {
+  _clearCameraPlaybackStartupTimer();
   if (!url) { container.innerHTML = noFeedEl(); return; }
   const img = document.createElement('img');
   img.style.cssText = 'width:100%;height:100%;object-fit:contain;background:#000;display:block;';
@@ -20568,15 +20766,23 @@ function _switchDir(idx) {
   if (titleEl) titleEl.textContent = _cameraDisplayTitle(cam);
   const camUrls = resolveUrls(cam);
   _setCameraShareUrl(camUrls.dashUrl || camUrls.hlsUrl || camUrls.snapshotUrl || '');
-  if (cameraHls) { cameraHls.destroy(); cameraHls = null; }
-  if (cameraShaka) { cameraShaka.destroy().catch(() => {}); cameraShaka = null; }
-  if (snapshotTimer) { clearInterval(snapshotTimer); snapshotTimer = null; }
+  _destroyActiveCameraPlayback();
   const content = document.getElementById('camera-content');
   if (content) { content.innerHTML = ''; void _playCameraEntry(cam, content); }
 }
 
 async function _playCameraEntry(cam, content) {
   let { dashUrl, hlsUrl, snapshotUrl } = resolveUrls(cam || {});
+  if (_isKansasTrafficCamera(cam || {})) {
+    const resolved = await _resolveKansasSignedCameraUrls(cam || {}, {
+      dashUrl,
+      hlsUrl,
+      snapshotUrl,
+    });
+    dashUrl = resolved.dashUrl || dashUrl;
+    hlsUrl = resolved.hlsUrl;
+    snapshotUrl = resolved.snapshotUrl || snapshotUrl;
+  }
   const wisconsinTooltipId = _cameraWisconsinTooltipId(cam || {});
   if (wisconsinTooltipId) {
     snapshotUrl = snapshotUrl || _cameraWisconsinSnapshotUrl(cam || {});
@@ -20612,6 +20818,7 @@ async function _playCameraEntry(cam, content) {
 }
 
 function closeCamera() {
+  _clearCameraPlaybackStartupTimer();
   if (cameraHls)     { cameraHls.destroy(); cameraHls = null; }
   if (cameraShaka)   { cameraShaka.destroy().catch(() => {}); cameraShaka = null; }
   if (snapshotTimer) { clearInterval(snapshotTimer); snapshotTimer = null; }
