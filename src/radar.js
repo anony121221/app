@@ -1,6 +1,7 @@
 ﻿// NEXRAD Level III Radar Viewer
 
 const MAPBOX_TOKEN = 'pk.eyJ1IjoiY29sZTExMTEyMzUyMzQ1IiwiYSI6ImNta2RkODJrcTBiMXQzZnE3bWF4ajNpZmkifQ.Wb-slyKwASl8PIkLUz_Nhw';
+const MAPBOX_TOKEN_MAX_VELOCITY = 'pk.eyJ1IjoibWF4dmVsb2NpdHkiLCJhIjoiY204bjdmMXV3MG9wbDJtcHczd3NrdWYweSJ9.BoHcO6T-ujYk3euVv00Xlg';
 const S3           = 'https://unidata-nexrad-level3.s3.amazonaws.com';
 const POLL_MS      = 5000;
 const L2_POLL_MS   = 10000;
@@ -94,14 +95,16 @@ const MAX_MERCATOR_LAT = 85.05112878;
 const MAP_STYLE_BLACK = 'custom://black';
 const MAP_STYLE_DARK = 'mapbox://styles/mapbox/dark-v11';
 const MAP_STYLE_GREY = 'mapbox://styles/tuftsweather/cmnr19sq6003k01qt8u28bt6g';
-const MAP_STYLE_LIGHT_GRAY = 'mapbox://styles/mapbox/light-v11';
+const LEGACY_MAP_STYLE_LIGHT_GRAY = 'mapbox://styles/mapbox/light-v11';
+const MAP_STYLE_LIGHT_GRAY = 'mapbox://styles/jamespettus1/cm95unnm000b801qu4ocaho1g';
+const MAP_STYLE_MAX_VELOCITY = 'mapbox://styles/maxvelocity/cmlr940qf004c01qk3t62gir4';
 const MAP_STYLE_SATELLITE = 'mapbox://styles/mapbox/satellite-streets-v12';
 const DEFAULT_MAP_STYLE = MAP_STYLE_DARK;
 const MAP_STYLE_OPTIONS = [
-  { id: MAP_STYLE_BLACK, label: 'Black' },
   { id: MAP_STYLE_DARK, label: 'Dark' },
   { id: MAP_STYLE_GREY, label: 'Grey' },
   { id: MAP_STYLE_LIGHT_GRAY, label: 'Light Gray' },
+  { id: MAP_STYLE_MAX_VELOCITY, label: 'Max Velocity' },
   { id: MAP_STYLE_SATELLITE, label: 'Satellite' },
 ];
 const MAP_STYLE_IDS = new Set(MAP_STYLE_OPTIONS.map(opt => opt.id));
@@ -9525,9 +9528,18 @@ function loadInitialMapStyle() {
   try {
     const raw = localStorage.getItem('radar_settings');
     const settings = raw ? JSON.parse(raw) : {};
-    if (MAP_STYLE_IDS.has(settings?.mapStyle)) return settings.mapStyle;
+    const normalized = _normalizeMapStyleId(settings?.mapStyle);
+    if (MAP_STYLE_IDS.has(normalized)) return normalized;
   } catch (_) {}
   return DEFAULT_MAP_STYLE;
+}
+
+function _normalizeMapStyleId(styleId) {
+  const raw = String(styleId || '').trim();
+  if (!raw) return DEFAULT_MAP_STYLE;
+  if (raw === MAP_STYLE_BLACK) return DEFAULT_MAP_STYLE;
+  if (raw === LEGACY_MAP_STYLE_LIGHT_GRAY) return MAP_STYLE_LIGHT_GRAY;
+  return raw;
 }
 
 function _buildBlackMapStyle() {
@@ -9634,9 +9646,15 @@ function resolveMapStyle(styleId) {
   return styleId;
 }
 
+function _mapboxAccessTokenForStyle(styleId = mapStyle) {
+  const normalized = String(styleId || '').trim();
+  if (normalized === MAP_STYLE_MAX_VELOCITY) return MAPBOX_TOKEN_MAX_VELOCITY;
+  return MAPBOX_TOKEN;
+}
+
 let mapStyle = loadInitialMapStyle();
 
-mapboxgl.accessToken = MAPBOX_TOKEN;
+mapboxgl.accessToken = _mapboxAccessTokenForStyle(mapStyle);
 const map = new mapboxgl.Map({
   container: 'map',
   style: resolveMapStyle(mapStyle),
@@ -15114,6 +15132,7 @@ function syncMapStyleUi() {
       mapStyleSelect.appendChild(el);
     });
   }
+  mapStyle = _normalizeMapStyleId(mapStyle);
   if (!MAP_STYLE_IDS.has(mapStyle)) mapStyle = DEFAULT_MAP_STYLE;
   mapStyleSelect.value = mapStyle;
 }
@@ -20721,8 +20740,11 @@ function loadSettings() {
     _setActiveL2AvailableProducts(null);
     // L2 manual mode is retired; app defaults to L3 with hybrid L2 CC/ZDR.
     levelII = false;
-    if (typeof s.mapStyle === 'string' && MAP_STYLE_IDS.has(s.mapStyle)) {
-      mapStyle = s.mapStyle;
+    if (typeof s.mapStyle === 'string') {
+      const normalizedMapStyle = _normalizeMapStyleId(s.mapStyle);
+      if (MAP_STYLE_IDS.has(normalizedMapStyle)) {
+        mapStyle = normalizedMapStyle;
+      }
     }
     if (s.dbzFilter != null) {
       _setDbzFilter(s.dbzFilter, { apply: false, persist: false });
