@@ -4593,6 +4593,7 @@
                       <span class="spc-filter-label">Local Report Window</span>
                       <div class="spc-chip-row" id="storm-window-buttons"></div>
                     </div>
+
                   </div>
                 </div>
               </div>
@@ -5357,6 +5358,15 @@
 
       loadNext(0);
     })();
+  </script>
+  <script>
+    window.addEventListener('keydown', function(e) {
+      if (e.key === '`') {
+        if (window.__TAURI__ && window.__TAURI__.core) {
+          window.__TAURI__.core.invoke('open_devtools');
+        }
+      }
+    });
   </script>
 </body>
 </html>

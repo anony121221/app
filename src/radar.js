@@ -818,53 +818,79 @@ const STORM_REPORT_SOURCE_OPTIONS = [
 
 const STORM_REPORT_LSR_WINDOWS = [
   {
+    id: '30m',
+    label: '30m',
+    minutes: 30,
+  },
+  {
+    id: '1',
+    label: '1h',
+    minutes: 60,
+  },
+  {
+    id: '2',
+    label: '2h',
+    minutes: 120,
+  },
+  {
+    id: '4',
+    label: '4h',
+    minutes: 240,
+  },
+  {
     id: '24',
-    label: 'Last 24h',
-    url: 'https://mapservices.weather.noaa.gov/vector/rest/services/obs/nws_local_storm_reports/MapServer/0/query?where=1%3D1&outFields=*&returnGeometry=true&f=geojson',
+    label: '24h',
+    minutes: 1440,
   },
   {
     id: '48',
-    label: 'Last 48h',
-    url: 'https://mapservices.weather.noaa.gov/vector/rest/services/obs/nws_local_storm_reports/MapServer/1/query?where=1%3D1&outFields=*&returnGeometry=true&f=geojson',
+    label: '48h',
+    minutes: 2880,
   },
   {
     id: '72',
-    label: 'Last 72h',
-    url: 'https://mapservices.weather.noaa.gov/vector/rest/services/obs/nws_local_storm_reports/MapServer/2/query?where=1%3D1&outFields=*&returnGeometry=true&f=geojson',
+    label: '72h',
+    minutes: 4320,
   },
 ];
 
-const SPOTTER_REPORTS_URL = 'https://www.spotternetwork.org/feeds/reports.txt';
+const STORM_REPORT_LSR_URL = 'https://data2.weatherwise.app/weather-reports/NWS-LSR/reports-259200.geojson';
+const SPOTTER_REPORTS_URL = 'https://data2.weatherwise.app/weather-reports/SPOTTER-NETWORK/reports-259200.geojson';
+const STORM_REPORT_POLL_MS = 60_000;
 
 const STORM_REPORT_CATEGORY_OPTIONS = [
-  { id: 'TORNADO', label: 'Tornado' },
+  { id: 'FLOOD', label: 'Rain/Flood' },
+  { id: 'WINTER', label: 'Snow' },
+  { id: 'ICE', label: 'Ice' },
   { id: 'HAIL', label: 'Hail' },
   { id: 'WIND', label: 'Wind' },
-  { id: 'WINTER', label: 'Winter' },
-  { id: 'FLOOD', label: 'Flood/Rain' },
+  { id: 'TSTM', label: 'T-Storm' },
   { id: 'MARINE', label: 'Marine' },
+  { id: 'TORNADO', label: 'Tornado' },
   { id: 'FIRE', label: 'Fire' },
   { id: 'FOG', label: 'Fog' },
   { id: 'OTHER', label: 'Other' },
 ];
 
 const STORM_REPORT_CATEGORY_COLORS = {
-  TORNADO: '#FF3B30',
-  HAIL: '#FFE45C',
-  WIND: '#4EA5FF',
-  WINTER: '#6CE9FF',
-  FLOOD: '#52D273',
-  MARINE: '#3ED2C8',
+  FLOOD: '#72D62B',
+  WINTER: '#7FB0EB',
+  ICE: '#DDA0DD',
+  HAIL: '#EA60C6',
+  WIND: '#F7B51A',
+  TSTM: '#E3A727',
+  MARINE: '#E4B6CB',
+  TORNADO: '#FF3030',
   FIRE: '#FF9F43',
-  FOG: '#C8C8C8',
-  OTHER: '#E6E6E6',
+  FOG: '#A9ADB7',
+  OTHER: '#8F949E',
 };
 
 const STORM_REPORT_CATEGORY_IDS = STORM_REPORT_CATEGORY_OPTIONS.map(opt => opt.id);
 const STORM_REPORT_CATEGORY_ID_SET = new Set(STORM_REPORT_CATEGORY_IDS);
 const STORM_REPORT_LAYER_IDS = ['storm-reports-dot'];
 const STORM_EMPTY_GEOJSON = { type: 'FeatureCollection', features: [] };
-const STORM_REPORT_CACHE_MS = 90_000;
+const STORM_REPORT_CACHE_MS = 55_000;
 
 const MPING_URL = 'https://mping.ou.edu/mping/api/v2/reports.geojson';
 const MPING_SOURCE_ID = 'mping-reports-src';
@@ -3712,6 +3738,334 @@ function _buildTvsGeoJson(raw) {
   return { type: 'FeatureCollection', features: out };
 }
 
+// ── Report / mPING custom icon images ─────────────────────────────────────────
+
+function _mkIconCtx(size) {
+  const canvas = document.createElement('canvas');
+  canvas.width = size; canvas.height = size;
+  const ctx = canvas.getContext('2d');
+  if (!ctx) return null;
+  return { canvas, ctx, s: size, c: size / 2, R: size * 0.37 };
+}
+
+// Draw background circle + border, then set up a scaled/centered transform so
+// the caller's shape code fills roughly the inner 58% of the canvas.
+function _iconBeginCircleBg(ctx, s, c, bgColor, borderColor = 'rgba(0,0,0,0.72)', borderWidth = 2.5) {
+  const bgR = s * 0.44;
+  ctx.beginPath(); ctx.arc(c, c, bgR, 0, Math.PI * 2);
+  ctx.fillStyle = bgColor; ctx.fill();
+  ctx.strokeStyle = borderColor; ctx.lineWidth = borderWidth; ctx.stroke();
+  // Scale inner drawing to 58% so shapes don't touch the edge
+  ctx.save();
+  ctx.translate(c, c);
+  ctx.scale(0.58, 0.58);
+  ctx.translate(-c, -c);
+}
+
+function _lsrIconPaintSetup(ctx, fill, stroke = 'rgba(0,0,0,0.82)', lineWidth = 2.4) {
+  ctx.fillStyle = fill;
+  ctx.strokeStyle = stroke;
+  ctx.lineWidth = lineWidth;
+  ctx.lineJoin = 'round';
+  ctx.lineCap = 'round';
+}
+
+function _lsrIconCirclePath(ctx, c, r) {
+  ctx.beginPath();
+  ctx.arc(c, c, r, 0, Math.PI * 2);
+}
+
+function _lsrIconDiamondPath(ctx, c, r) {
+  ctx.beginPath();
+  ctx.moveTo(c, c - r);
+  ctx.lineTo(c + r, c);
+  ctx.lineTo(c, c + r);
+  ctx.lineTo(c - r, c);
+  ctx.closePath();
+}
+
+function _lsrIconSquarePath(ctx, c, r) {
+  ctx.beginPath();
+  ctx.rect(c - r, c - r, r * 2, r * 2);
+}
+
+function _lsrIconTrianglePath(ctx, c, r, inverted = false) {
+  const topY = inverted ? c + r : c - r;
+  const bottomY = inverted ? c - r : c + r;
+  ctx.beginPath();
+  ctx.moveTo(c, topY);
+  ctx.lineTo(c + r * 0.92, bottomY);
+  ctx.lineTo(c - r * 0.92, bottomY);
+  ctx.closePath();
+}
+
+function _lsrIconPinPath(ctx, c, r) {
+  ctx.beginPath();
+  ctx.moveTo(c, c - r);
+  ctx.bezierCurveTo(c + r * 0.92, c - r, c + r * 0.98, c + r * 0.04, c, c + r * 1.24);
+  ctx.bezierCurveTo(c - r * 0.98, c + r * 0.04, c - r * 0.92, c - r, c, c - r);
+  ctx.closePath();
+}
+
+function _createLsrIconImage(category) {
+  const ic = _mkIconCtx(40);
+  if (!ic) return null;
+  const { ctx, s, c, R } = ic;
+  ctx.clearRect(0, 0, s, s);
+  ctx.fillStyle = '#ffffff';
+  ctx.strokeStyle = '#ffffff';
+  ctx.lineWidth = 2.2;
+  ctx.lineJoin = 'round';
+  ctx.lineCap = 'round';
+
+  switch (category) {
+    case 'TORNADO': {
+      _lsrIconTrianglePath(ctx, c, R * 1.06, true);
+      ctx.fill();
+      break;
+    }
+    case 'HAIL': {
+      _lsrIconDiamondPath(ctx, c, R * 1.00);
+      ctx.fill();
+      break;
+    }
+    case 'WIND': {
+      _lsrIconTrianglePath(ctx, c, R * 1.04, false);
+      ctx.fill();
+      break;
+    }
+    case 'WINTER': {
+      _lsrIconDiamondPath(ctx, c, R * 1.00);
+      ctx.fill();
+      break;
+    }
+    case 'ICE': {
+      _lsrIconSquarePath(ctx, c, R * 0.86);
+      ctx.fill();
+      break;
+    }
+    case 'FLOOD': {
+      _lsrIconCirclePath(ctx, c, R * 0.92);
+      ctx.fill();
+      break;
+    }
+    case 'MARINE': {
+      _lsrIconDiamondPath(ctx, c, R * 1.00);
+      ctx.fill();
+      break;
+    }
+    case 'TSTM': {
+      _lsrIconSquarePath(ctx, c, R * 0.86);
+      ctx.fill();
+      break;
+    }
+    case 'FIRE': {
+      _lsrIconSquarePath(ctx, c, R * 0.86);
+      ctx.fill();
+      break;
+    }
+    case 'FOG': {
+      _lsrIconSquarePath(ctx, c, R * 0.86);
+      ctx.fill();
+      break;
+    }
+    default: {
+      _lsrIconPinPath(ctx, c, R * 0.96);
+      ctx.fill();
+      break;
+    }
+  }
+  return ic.ctx.getImageData(0, 0, s, s);
+}
+
+function _createMpingIconImage(category) {
+  const colorMap = {
+    'Rain/Snow': '#4499ff', 'Hail': '#00e5ff', 'Flood': '#00cc44',
+    'Wind Damage': '#ffdd00', 'Storm Damage': '#ff8800',
+    'Fog/Mist/Dust': '#aabbcc', 'Blowing Snow / Reduced Visibility': '#ddddff',
+    'Freezing Rain/Drizzle': '#88aaff', 'Ice Pellets/Sleet': '#99ccff',
+    'Tornado': '#ff3333', 'None': '#555555', 'Test': '#333333',
+  };
+  const color = colorMap[category] || '#888888';
+  const ic = _mkIconCtx(40);
+  if (!ic) return null;
+  const { ctx, s, c, R } = ic;
+  ctx.clearRect(0, 0, s, s);
+  _iconBeginCircleBg(ctx, s, c, 'rgba(20,20,20,0.78)');
+
+  switch (category) {
+    case 'Tornado': {
+      ctx.fillStyle = color; ctx.strokeStyle = 'rgba(0,0,0,0.72)'; ctx.lineWidth = 2.8; ctx.lineJoin = 'round';
+      ctx.beginPath(); ctx.ellipse(c, c * 0.54, R * 0.82, R * 0.3, 0, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+      ctx.beginPath();
+      ctx.moveTo(c - R * 0.82, c * 0.54); ctx.lineTo(c - R * 0.16, s * 0.87);
+      ctx.lineTo(c, s * 0.93); ctx.lineTo(c + R * 0.16, s * 0.87); ctx.lineTo(c + R * 0.82, c * 0.54);
+      ctx.closePath(); ctx.fill(); ctx.stroke();
+      break;
+    }
+    case 'Rain/Snow': {
+      ctx.fillStyle = color; ctx.strokeStyle = 'rgba(0,0,0,0.62)'; ctx.lineWidth = 2.5;
+      ctx.beginPath();
+      ctx.moveTo(c, s * 0.1);
+      ctx.bezierCurveTo(c + R * 0.92, c * 0.8, c + R * 0.92, s * 0.74, c, s * 0.9);
+      ctx.bezierCurveTo(c - R * 0.92, s * 0.74, c - R * 0.92, c * 0.8, c, s * 0.1);
+      ctx.fill(); ctx.stroke();
+      ctx.fillStyle = 'rgba(255,255,255,0.45)';
+      ctx.beginPath(); ctx.ellipse(c - R * 0.2, c * 0.58, R * 0.18, R * 0.12, -0.5, 0, Math.PI * 2); ctx.fill();
+      break;
+    }
+    case 'Hail': {
+      ctx.fillStyle = color; ctx.strokeStyle = 'rgba(0,0,0,0.65)'; ctx.lineWidth = 2.8;
+      ctx.beginPath(); ctx.arc(c, c, R, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+      ctx.fillStyle = 'rgba(255,255,255,0.5)';
+      ctx.beginPath(); ctx.ellipse(c - R * 0.25, c - R * 0.25, R * 0.28, R * 0.18, -0.6, 0, Math.PI * 2); ctx.fill();
+      ctx.strokeStyle = 'rgba(0,0,0,0.3)'; ctx.lineWidth = 1.5;
+      ctx.beginPath(); ctx.arc(c, c, R * 0.55, 0, Math.PI * 2); ctx.stroke();
+      break;
+    }
+    case 'Flood': {
+      ctx.fillStyle = color; ctx.strokeStyle = 'rgba(0,0,0,0.65)'; ctx.lineWidth = 2.4;
+      ctx.beginPath();
+      ctx.moveTo(0, c);
+      ctx.quadraticCurveTo(s * 0.25, c - R * 0.66, c, c);
+      ctx.quadraticCurveTo(s * 0.75, c + R * 0.66, s, c);
+      ctx.lineTo(s, s); ctx.lineTo(0, s); ctx.closePath();
+      ctx.fill(); ctx.stroke();
+      break;
+    }
+    case 'Wind Damage': {
+      ctx.fillStyle = color; ctx.strokeStyle = 'rgba(0,0,0,0.65)'; ctx.lineWidth = 2.2; ctx.lineJoin = 'round';
+      ctx.beginPath();
+      ctx.moveTo(s * 0.88, c);
+      ctx.lineTo(s * 0.56, c - R * 0.52);
+      ctx.lineTo(s * 0.56, c - R * 0.2);
+      ctx.lineTo(s * 0.10, c - R * 0.2);
+      ctx.lineTo(s * 0.10, c + R * 0.2);
+      ctx.lineTo(s * 0.56, c + R * 0.2);
+      ctx.lineTo(s * 0.56, c + R * 0.52);
+      ctx.closePath(); ctx.fill(); ctx.stroke();
+      break;
+    }
+    case 'Storm Damage': {
+      ctx.fillStyle = color; ctx.strokeStyle = 'rgba(0,0,0,0.65)'; ctx.lineWidth = 2.5; ctx.lineJoin = 'round';
+      ctx.beginPath();
+      ctx.moveTo(s * 0.60, s * 0.08); ctx.lineTo(s * 0.34, s * 0.48);
+      ctx.lineTo(s * 0.52, s * 0.48); ctx.lineTo(s * 0.38, s * 0.92);
+      ctx.lineTo(s * 0.70, s * 0.40); ctx.lineTo(s * 0.52, s * 0.40);
+      ctx.closePath(); ctx.fill(); ctx.stroke();
+      break;
+    }
+    case 'Fog/Mist/Dust': {
+      ctx.lineCap = 'round'; ctx.lineWidth = 4.2;
+      [-R * 0.47, 0, R * 0.47].forEach((dy, i) => {
+        const xs = i === 1 ? R * 0.2 : 0;
+        ctx.strokeStyle = color;
+        ctx.beginPath(); ctx.moveTo(s * 0.1 + xs, c + dy); ctx.lineTo(s * 0.9 - xs, c + dy); ctx.stroke();
+      });
+      break;
+    }
+    case 'Blowing Snow / Reduced Visibility': {
+      ctx.lineCap = 'round';
+      for (let i = 0; i < 4; i++) {
+        const a = (i / 4) * Math.PI * 2;
+        ctx.strokeStyle = color; ctx.lineWidth = 3;
+        ctx.beginPath();
+        ctx.moveTo(c - R * 0.88 * Math.cos(a), c - R * 0.88 * Math.sin(a));
+        ctx.lineTo(c + R * 0.88 * Math.cos(a), c + R * 0.88 * Math.sin(a));
+        ctx.stroke();
+        const bx = c + R * 0.55 * Math.cos(a), by = c + R * 0.55 * Math.sin(a), ba = a + Math.PI / 2, bl = R * 0.22;
+        ctx.lineWidth = 1.8;
+        ctx.beginPath();
+        ctx.moveTo(bx + bl * Math.cos(ba), by + bl * Math.sin(ba));
+        ctx.lineTo(bx - bl * Math.cos(ba), by - bl * Math.sin(ba));
+        ctx.stroke();
+      }
+      ctx.fillStyle = color; ctx.beginPath(); ctx.arc(c, c, R * 0.17, 0, Math.PI * 2); ctx.fill();
+      break;
+    }
+    case 'Freezing Rain/Drizzle': {
+      ctx.fillStyle = color; ctx.strokeStyle = 'rgba(0,0,0,0.62)'; ctx.lineWidth = 2.2;
+      ctx.beginPath();
+      ctx.moveTo(c, s * 0.1);
+      ctx.bezierCurveTo(c + R * 0.88, c * 0.8, c + R * 0.88, s * 0.74, c, s * 0.9);
+      ctx.bezierCurveTo(c - R * 0.88, s * 0.74, c - R * 0.88, c * 0.8, c, s * 0.1);
+      ctx.fill(); ctx.stroke();
+      ctx.strokeStyle = 'rgba(255,255,255,0.75)'; ctx.lineWidth = 1.5; ctx.lineCap = 'round';
+      ctx.beginPath(); ctx.moveTo(c - R * 0.2, s * 0.24); ctx.lineTo(c + R * 0.2, s * 0.34); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(c, s * 0.19); ctx.lineTo(c, s * 0.39); ctx.stroke();
+      break;
+    }
+    case 'Ice Pellets/Sleet': {
+      ctx.fillStyle = color; ctx.strokeStyle = 'rgba(0,0,0,0.6)'; ctx.lineWidth = 2.2;
+      [[c - R * 0.46, c - R * 0.36], [c + R * 0.46, c - R * 0.36], [c, c + R * 0.46]].forEach(([x, y]) => {
+        ctx.beginPath(); ctx.arc(x, y, R * 0.38, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+      });
+      break;
+    }
+    case 'None': {
+      ctx.fillStyle = color; ctx.strokeStyle = 'rgba(0,0,0,0.5)'; ctx.lineWidth = 2.5;
+      ctx.beginPath(); ctx.arc(c, c, R, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+      ctx.strokeStyle = 'rgba(255,255,255,0.55)'; ctx.lineWidth = 3; ctx.lineCap = 'round';
+      ctx.beginPath(); ctx.moveTo(c - R * 0.54, c); ctx.lineTo(c + R * 0.54, c); ctx.stroke();
+      break;
+    }
+    case 'Test': {
+      ctx.fillStyle = color; ctx.strokeStyle = 'rgba(0,0,0,0.5)'; ctx.lineWidth = 2.5; ctx.lineJoin = 'round';
+      const sq = R * 0.84;
+      ctx.beginPath(); ctx.rect(c - sq, c - sq, sq * 2, sq * 2); ctx.fill(); ctx.stroke();
+      break;
+    }
+    default: {
+      ctx.fillStyle = color; ctx.strokeStyle = 'rgba(0,0,0,0.55)'; ctx.lineWidth = 2.8;
+      ctx.beginPath(); ctx.arc(c, c, R, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+      break;
+    }
+  }
+  ctx.restore();
+  return ic.ctx.getImageData(0, 0, s, s);
+}
+
+const LSR_ICON_IMAGE_IDS = {
+  TORNADO: 'rdr-lsr-tornado', HAIL: 'rdr-lsr-hail', WIND: 'rdr-lsr-wind',
+  WINTER: 'rdr-lsr-winter', ICE: 'rdr-lsr-ice', FLOOD: 'rdr-lsr-flood',
+  TSTM: 'rdr-lsr-tstorm', MARINE: 'rdr-lsr-marine', FIRE: 'rdr-lsr-fire',
+  FOG: 'rdr-lsr-fog', OTHER: 'rdr-lsr-other',
+};
+const LSR_ICON_IMAGE_EXPR = ['match', ['get', '_category'],
+  ...Object.entries(LSR_ICON_IMAGE_IDS).flatMap(([k, v]) => [k, v]),
+  LSR_ICON_IMAGE_IDS.OTHER,
+];
+const MPING_STORM_ICON_EXPR = ['match', ['get', '_markerCategory'],
+  ...Object.entries(LSR_ICON_IMAGE_IDS).flatMap(([k, v]) => [k, v]),
+  LSR_ICON_IMAGE_IDS.OTHER,
+];
+const STORM_REPORT_ICON_SIZE_EXPR = ['interpolate', ['linear'], ['zoom'], 3, 0.78, 6, 0.90, 10, 1.06, 13, 1.18];
+const STORM_REPORT_TEXT_SIZE_EXPR = ['interpolate', ['linear'], ['zoom'], 3, 0, 4, 0, 5, 8, 8, 9, 11, 10.5, 13, 11.5];
+
+const MPING_ICON_IMAGE_IDS = {
+  'Rain/Snow': 'rdr-mping-rain', 'Hail': 'rdr-mping-hail', 'Flood': 'rdr-mping-flood',
+  'Wind Damage': 'rdr-mping-wind', 'Storm Damage': 'rdr-mping-storm',
+  'Fog/Mist/Dust': 'rdr-mping-fog', 'Blowing Snow / Reduced Visibility': 'rdr-mping-snow',
+  'Freezing Rain/Drizzle': 'rdr-mping-fzra', 'Ice Pellets/Sleet': 'rdr-mping-sleet',
+  'Tornado': 'rdr-mping-tornado', 'None': 'rdr-mping-none', 'Test': 'rdr-mping-test',
+};
+const MPING_ICON_IMAGE_EXPR = ['match', ['get', 'category'],
+  ...Object.entries(MPING_ICON_IMAGE_IDS).flatMap(([k, v]) => [k, v]),
+  'rdr-mping-none',
+];
+
+function _ensureLsrIconImages(m) {
+  for (const [cat, id] of Object.entries(LSR_ICON_IMAGE_IDS)) {
+    if (!m.hasImage(id)) { const img = _createLsrIconImage(cat); if (img) m.addImage(id, img, { pixelRatio: 2, sdf: true }); }
+  }
+}
+
+function _ensureMpingIconImages(m) {
+  for (const [cat, id] of Object.entries(MPING_ICON_IMAGE_IDS)) {
+    if (!m.hasImage(id)) { const img = _createMpingIconImage(cat); if (img) m.addImage(id, img, { pixelRatio: 2 }); }
+  }
+}
+
 function _createTvsTriangleIconImage(strokeColor) {
   const size = 40;
   const canvas = document.createElement('canvas');
@@ -3895,42 +4249,334 @@ function initTvsOverlayLayers() {
   if (tvsVisible) refreshTvsOverlay(true, { forceNetwork: true });
 }
 
-function _stormCategoryFromText(text) {
-  const s = String(text || '').toUpperCase();
-  if (!s.trim()) return 'OTHER';
-  if (s.includes('TORNADO') || s.includes('FUNNEL')) return 'TORNADO';
-  if (s.includes('HAIL')) return 'HAIL';
-  if (s.includes('WATERSPOUT') || s.includes('MARINE')) return 'MARINE';
-  if (s.includes('WND') || s.includes('WIND') || s.includes('DOWNBURST')) return 'WIND';
-  if (s.includes('SNOW') || s.includes('SLEET') || s.includes('FREEZ') || s.includes('ICE') || s.includes('BLIZZ')) return 'WINTER';
-  if (s.includes('FLOOD') || s.includes('RAIN')) return 'FLOOD';
-  if (s.includes('FIRE') || s.includes('SMOKE')) return 'FIRE';
-  if (s.includes('FOG')) return 'FOG';
-  return 'OTHER';
+function _stormWindowConfig(windowId = stormReportsWindow) {
+  return STORM_REPORT_LSR_WINDOWS.find(opt => opt.id === windowId)
+    || STORM_REPORT_LSR_WINDOWS.find(opt => opt.id === '24')
+    || STORM_REPORT_LSR_WINDOWS[0];
+}
+
+function _stormWindowAgeMs(windowId = stormReportsWindow) {
+  const minutes = Number(_stormWindowConfig(windowId)?.minutes);
+  return Number.isFinite(minutes) && minutes > 0 ? minutes * 60_000 : 24 * 60 * 60_000;
+}
+
+function _stormWindowLabel(windowId = stormReportsWindow) {
+  return _stormWindowConfig(windowId)?.label || '24h';
+}
+
+function _stormEventId(props) {
+  return String(props?.event_id || props?.EVENT_ID || '').trim().toUpperCase();
+}
+
+function _stormEventText(props) {
+  return String(
+    props?.event
+    || props?.descript
+    || props?.DESCRIPT
+    || props?.report_type
+    || props?.TYPE
+    || props?.title
+    || 'Storm Report',
+  ).trim();
+}
+
+function _stormMagnitudeValue(props) {
+  const direct = Number(props?.magnitude_value ?? props?.MAGNITUDE_VALUE);
+  if (Number.isFinite(direct)) return direct;
+  const raw = String(props?.magnitude || props?.MAGNITUDE || '').trim();
+  if (!raw) return NaN;
+  const match = raw.match(/-?\d+(?:\.\d+)?/);
+  return match ? Number(match[0]) : NaN;
+}
+
+function _stormStateText(props) {
+  const state = props?.state;
+  if (state && typeof state === 'object') {
+    return String(state.code || state.name || '').trim();
+  }
+  return String(props?.STATE || props?.state || '').trim();
+}
+
+function _stormCountyText(props) {
+  return String(props?.county || props?.COUNTY || '').trim();
 }
 
 function _stormDisplayTime(props) {
-  const validTime = props.valid_time || props.VALID_TIME || '';
-  if (validTime) return String(validTime).replace('T', ' ');
-  const ms = Number(props.lsr_validtime ?? props.LSR_VALIDTIME);
-  if (Number.isFinite(ms) && ms > 0) {
-    return new Date(ms).toISOString().replace('T', ' ').replace('Z', ' UTC');
+  const candidates = [
+    Number(props?.event_at_ms),
+    Number(props?.issued_at_ms),
+    Number(props?.generated_at_ms),
+    Number(props?.lsr_validtime ?? props?.LSR_VALIDTIME),
+  ];
+  const bestMs = candidates.find(value => Number.isFinite(value) && value > 0);
+  if (Number.isFinite(bestMs)) {
+    return new Date(bestMs).toLocaleString(undefined, {
+      month: 'short',
+      day: 'numeric',
+      hour: 'numeric',
+      minute: '2-digit',
+    });
   }
-  return '';
+  const iso = String(props?.event_at || props?.issued_at || props?.generated_at || props?.valid_time || props?.VALID_TIME || '').trim();
+  if (!iso) return '';
+  const parsed = Date.parse(iso);
+  if (Number.isFinite(parsed)) {
+    return new Date(parsed).toLocaleString(undefined, {
+      month: 'short',
+      day: 'numeric',
+      hour: 'numeric',
+      minute: '2-digit',
+    });
+  }
+  return iso.replace('T', ' ');
+}
+
+function _stormEventTimeMs(props) {
+  const candidates = [
+    Number(props?.event_at_ms),
+    Number(props?.issued_at_ms),
+    Number(props?.generated_at_ms),
+    Number(props?.lsr_validtime ?? props?.LSR_VALIDTIME),
+  ];
+  for (const value of candidates) {
+    if (Number.isFinite(value) && value > 0) return value;
+  }
+  const text = String(props?.event_at || props?.issued_at || props?.generated_at || props?.valid_time || props?.VALID_TIME || '').trim();
+  if (!text) return NaN;
+  const parsed = Date.parse(text);
+  return Number.isFinite(parsed) ? parsed : NaN;
+}
+
+function _stormFormatFixed(value, digits = 2) {
+  if (!Number.isFinite(value)) return '';
+  return value.toFixed(digits).replace(/\.?0+$/, '');
+}
+
+function _stormNormalizeMagnitudeLabel(rawText, value, unit) {
+  if (Number.isFinite(value)) {
+    if (unit === 'in') return `${_stormFormatFixed(value, 2)}"`;
+    if (unit === 'mph') return `${Math.round(value)} MPH`;
+  }
+  const raw = String(rawText || '').trim();
+  if (!raw) return '';
+  const upper = raw.toUpperCase();
+  if (/INCH| IN\b/.test(upper)) {
+    const match = upper.match(/-?\d+(?:\.\d+)?/);
+    return match ? `${_stormFormatFixed(Number(match[0]), 2)}"` : upper;
+  }
+  if (/MPH/.test(upper)) {
+    const match = upper.match(/-?\d+(?:\.\d+)?/);
+    return match ? `${Math.round(Number(match[0]))} MPH` : upper;
+  }
+  return upper;
+}
+
+function _stormBucketColor(value, thresholds, fallback) {
+  if (!Number.isFinite(value)) return fallback;
+  for (const [threshold, color] of thresholds) {
+    if (value >= threshold) return color;
+  }
+  return fallback;
+}
+
+function _stormRainColor(value, eventId) {
+  if (String(eventId || '').includes('FLOOD')) return '#72D62B';
+  return _stormBucketColor(value, [
+    [8, '#A91CE0'],
+    [6, '#8A73D8'],
+    [5, '#2536FF'],
+    [4, '#2B9DF7'],
+    [3, '#24D0F4'],
+    [2, '#0FBE30'],
+    [1, '#20D42B'],
+    [0.01, '#49E72E'],
+  ], '#72D62B');
+}
+
+function _stormSnowColor(value, eventId) {
+  if (/BLIZZ/.test(String(eventId || ''))) return '#FF2A1C';
+  return _stormBucketColor(value, [
+    [60, '#04070D'],
+    [48, '#FF2218'],
+    [36, '#FF67CE'],
+    [30, '#FF36EF'],
+    [24, '#C01EFF'],
+    [18, '#7A17D4'],
+    [12, '#232EFF'],
+    [8, '#466FD7'],
+    [6, '#5D90DD'],
+    [4, '#7EB2E8'],
+    [2, '#A6CCE8'],
+    [0.01, '#B9B9B9'],
+  ], '#7FB0EB');
+}
+
+function _stormIceColor(value) {
+  return _stormBucketColor(value, [
+    [0.5, '#B317B1'],
+    [0.25, '#EC74D0'],
+    [0.1, '#E8A5D9'],
+    [0.01, '#BDBDBD'],
+  ], '#DDA0DD');
+}
+
+function _stormHailColor(value) {
+  return _stormBucketColor(value, [
+    [2, '#B317B1'],
+    [1, '#E85CC6'],
+    [0.01, '#E7B1E6'],
+  ], '#EA60C6');
+}
+
+function _stormWindColor(value) {
+  return _stormBucketColor(value, [
+    [75, '#A07A22'],
+    [57, '#C6942F'],
+    [35, '#F7B51A'],
+    [0.01, '#FFF01C'],
+  ], '#C7962A');
+}
+
+function _stormTstmColor(value) {
+  return _stormBucketColor(value, [
+    [75, '#FF2020'],
+    [50, '#F7B51A'],
+    [0.01, '#FFF01C'],
+  ], '#E3A727');
+}
+
+function _stormColorForFeature(category, props) {
+  const value = _stormMagnitudeValue(props);
+  const eventId = _stormEventId(props);
+  switch (category) {
+    case 'FLOOD': return _stormRainColor(value, eventId);
+    case 'WINTER': return _stormSnowColor(value, eventId);
+    case 'ICE': return _stormIceColor(value);
+    case 'HAIL': return _stormHailColor(value);
+    case 'WIND': return _stormWindColor(value);
+    case 'TSTM': return _stormTstmColor(value);
+    case 'MARINE': return Number.isFinite(value) ? _stormWindColor(value) : '#E4B6CB';
+    case 'TORNADO': return '#FF3030';
+    case 'FIRE': return '#FF9F43';
+    case 'FOG': return '#A9ADB7';
+    default: return STORM_REPORT_CATEGORY_COLORS[category] || '#8F949E';
+  }
+}
+
+function _stormShortEventLabel(props, category) {
+  const eventId = _stormEventId(props);
+  const event = _stormEventText(props);
+  const eventMap = {
+    TORNADO: 'Tornado',
+    FUNNEL_CLOUD: 'Funnel',
+    WALL_CLOUD: 'Wall',
+    FLASH_FLOOD: 'Flood',
+    FLOOD: 'Flood',
+    RAIN: 'Rain',
+    HAIL: 'Hail',
+    SNOW: 'Snow',
+    TSTM_WND_GST: 'Wind',
+    TSTM_WND_DMG: 'Damage',
+    NONTSTM_WND_GST: 'Wind',
+    NONTSTM_WND_DMG: 'Damage',
+    MARINE_TSTM_WIND: 'Marine',
+    SEVERE_WEATHER: 'Severe',
+    DAMAGE: 'Damage',
+  };
+  if (eventMap[eventId]) return eventMap[eventId];
+  if (event && event.length <= 12) return event;
+  return STORM_REPORT_CATEGORY_OPTIONS.find(opt => opt.id === category)?.label || 'Report';
+}
+
+function _stormCategoryFromText(text) {
+  const s = String(text || '').toUpperCase();
+  if (!s.trim()) return 'OTHER';
+  if (s.includes('WATERSPOUT') || s.includes('MARINE')) return 'MARINE';
+  if (s.includes('TORNADO') || s.includes('FUNNEL') || s.includes('WALL CLOUD')) return 'TORNADO';
+  if (s.includes('HAIL')) return 'HAIL';
+  if (s.includes('TSTM') || s.includes('THUNDER') || s.includes('LIGHTNING')) return 'TSTM';
+  if (s.includes('NONTSTM') || s.includes('WND') || s.includes('WIND') || s.includes('DOWNBURST') || s.includes('MICROBURST')) return 'WIND';
+  if (s.includes('FREEZ') || s.includes('SLEET') || s.includes('ICE')) return 'ICE';
+  if (s.includes('SNOW') || s.includes('BLIZZ')) return 'WINTER';
+  if (s.includes('FLOOD') || s.includes('RAIN')) return 'FLOOD';
+  if (s.includes('FIRE') || s.includes('SMOKE')) return 'FIRE';
+  if (s.includes('FOG') || s.includes('MIST')) return 'FOG';
+  return 'OTHER';
+}
+
+function _stormCategoryFromProps(props) {
+  const eventId = _stormEventId(props);
+  const combined = [
+    eventId,
+    _stormEventText(props),
+    props?.remarks,
+    props?.REMARKS,
+    props?.narrative,
+    props?.report_text,
+    props?.TEXT,
+  ].filter(Boolean).join(' ');
+
+  if (/MARINE_HAIL/.test(eventId)) return 'HAIL';
+  if (/MARINE_TSTM_WIND|WATERSPOUT/.test(eventId)) return 'MARINE';
+  if (/TORNADO|FUNNEL_CLOUD|WALL_CLOUD/.test(eventId)) return 'TORNADO';
+  if (/HAIL/.test(eventId)) return 'HAIL';
+  if (/TSTM_WND_GST|TSTM_WND_DMG|SEVERE_WEATHER|LIGHTNING/.test(eventId)) return 'TSTM';
+  if (/NONTSTM_WND_GST|NONTSTM_WND_DMG|WIND|DAMAGE|BLOWING_DUST/.test(eventId)) return 'WIND';
+  if (/FREEZ|SLEET|ICE/.test(eventId)) return 'ICE';
+  if (/SNOW|BLIZZ/.test(eventId)) return 'WINTER';
+  if (/FLOOD|RAIN|COASTAL_FLOOD|LANDSLIDE/.test(eventId)) return 'FLOOD';
+  if (/WILDFIRE|FIRE|SMOKE/.test(eventId)) return 'FIRE';
+  if (/FOG/.test(eventId)) return 'FOG';
+  return _stormCategoryFromText(combined);
+}
+
+function _stormMagnitudeLabel(props, category, compact = false) {
+  const raw = String(props?.magnitude || props?.MAGNITUDE || '').trim();
+  const value = _stormMagnitudeValue(props);
+  switch (category) {
+    case 'FLOOD':
+    case 'WINTER':
+    case 'ICE':
+    case 'HAIL':
+      return _stormNormalizeMagnitudeLabel(raw, value, 'in');
+    case 'WIND':
+    case 'TSTM':
+    case 'MARINE':
+      return _stormNormalizeMagnitudeLabel(raw, value, 'mph');
+    default:
+      return compact ? '' : _stormNormalizeMagnitudeLabel(raw, value, '');
+  }
+}
+
+function _stormLocationText(props) {
+  const city = String(props?.city || props?.loc_desc || props?.LOC_DESC || props?.location || props?.LOCATION || '').trim();
+  const state = _stormStateText(props);
+  const county = _stormCountyText(props);
+  if (city && state && !city.toUpperCase().endsWith(`, ${state.toUpperCase()}`)) return `${city}, ${state}`;
+  if (city) return city;
+  if (county && state) return `${county} County, ${state}`;
+  return county || state;
+}
+
+function _stormFeatureInWindow(props, windowId = stormReportsWindow) {
+  const eventMs = _stormEventTimeMs(props);
+  if (!Number.isFinite(eventMs)) return true;
+  return eventMs >= (Date.now() - _stormWindowAgeMs(windowId));
 }
 
 function _buildStormFeature(geom, props, sourceTag) {
   if (!geom || geom.type !== 'Point' || !Array.isArray(geom.coordinates) || geom.coordinates.length < 2) return null;
-  const desc = String(props.descript || props.DESCRIPT || props.report_type || props.TYPE || 'Report').trim();
-  const remarks = String(props.remarks || props.REMARKS || props.report_text || props.TEXT || '').trim();
-  const category = _stormCategoryFromText(`${desc} ${remarks}`);
-
-  const location = String(props.loc_desc || props.LOC_DESC || props.location || props.LOCATION || '').trim();
-  const magnitude = String(props.magnitude || props.MAGNITUDE || '').trim();
-  const units = String(props.units || props.UNITS || '').trim();
-  const magLabel = magnitude ? `${magnitude}${units ? ` ${units}` : ''}` : '';
-  const label = STORM_REPORT_CATEGORY_OPTIONS.find(o => o.id === category)?.label || category;
+  const desc = _stormEventText(props);
+  const remarks = String(props?.remarks || props?.REMARKS || props?.narrative || props?.report_text || props?.TEXT || '').trim();
+  const category = _stormCategoryFromProps(props);
+  const location = _stormLocationText(props);
+  const magLabel = _stormMagnitudeLabel(props, category, false);
+  const label = STORM_REPORT_CATEGORY_OPTIONS.find(opt => opt.id === category)?.label || category;
   const when = _stormDisplayTime(props);
+  const categoryColor = _stormColorForFeature(category, props);
+  const markerLabel = _stormMagnitudeLabel(props, category, true) || _stormShortEventLabel(props, category);
+  const reporter = String(props?.source || '').trim();
+  const eventMs = _stormEventTimeMs(props);
 
   return {
     type: 'Feature',
@@ -3938,13 +4584,15 @@ function _buildStormFeature(geom, props, sourceTag) {
     properties: {
       _category: category,
       _categoryLabel: label,
-      _color: STORM_REPORT_CATEGORY_COLORS[category] || '#E6E6E6',
+      _color: categoryColor,
       _title: desc || label,
       _when: when,
       _location: location,
       _magnitude: magLabel,
       _remarks: remarks,
-      _source: sourceTag,
+      _source: reporter ? `${sourceTag} · ${reporter}` : sourceTag,
+      _markerLabel: markerLabel,
+      _eventAtMs: Number.isFinite(eventMs) ? eventMs : '',
     },
   };
 }
@@ -4307,8 +4955,7 @@ function _parseSpotterPlacefile(text) {
 }
 
 function _stormRawCacheKey(sourceId) {
-  if (sourceId === 'SPOTTER') return 'SPOTTER';
-  return `LSR:${stormReportsWindow}`;
+  return String(sourceId || '').toUpperCase();
 }
 
 async function _loadStormRaw(sourceId, forceNetwork = false) {
@@ -4319,11 +4966,9 @@ async function _loadStormRaw(sourceId, forceNetwork = false) {
 
   let data = STORM_EMPTY_GEOJSON;
   if (sourceId === 'SPOTTER') {
-    const txt = await _fetchTextViaTauri(SPOTTER_REPORTS_URL);
-    data = _parseSpotterPlacefile(txt);
+    data = await _fetchGeoJsonViaTauri(SPOTTER_REPORTS_URL);
   } else {
-    const cfg = STORM_REPORT_LSR_WINDOWS.find(w => w.id === stormReportsWindow) || STORM_REPORT_LSR_WINDOWS[0];
-    data = await _fetchGeoJsonViaTauri(cfg.url);
+    data = await _fetchGeoJsonViaTauri(STORM_REPORT_LSR_URL);
   }
 
   stormRawCache.set(key, { fetchedAt: Date.now(), data });
@@ -4333,13 +4978,92 @@ async function _loadStormRaw(sourceId, forceNetwork = false) {
 function _buildStormStyledGeoJson(raw, sourceId) {
   const sourceTag = sourceId === 'SPOTTER'
     ? 'Spotter Network'
-    : `NWS Local Storm Reports (${stormReportsWindow}h)`;
+    : `NWS Local Storm Reports (${_stormWindowLabel(stormReportsWindow)})`;
 
   const out = [];
   const features = Array.isArray(raw?.features) ? raw.features : [];
   for (const feature of features) {
+    if (!_stormFeatureInWindow(feature?.properties || {}, stormReportsWindow)) continue;
     const built = _buildStormFeature(feature?.geometry, feature?.properties || {}, sourceTag);
     if (built) out.push(built);
+  }
+  return { type: 'FeatureCollection', features: out };
+}
+
+function _mpingMarkerCategory(props = {}) {
+  const category = String(props.category || '').trim();
+  switch (category) {
+    case 'Tornado': return 'TORNADO';
+    case 'Hail': return 'HAIL';
+    case 'Flood': return 'FLOOD';
+    case 'Rain/Snow': return 'WINTER';
+    case 'Wind Damage': return 'WIND';
+    case 'Storm Damage': return 'TSTM';
+    case 'Fog/Mist/Dust': return 'FOG';
+    case 'Blowing Snow / Reduced Visibility': return 'WINTER';
+    case 'Freezing Rain/Drizzle': return 'ICE';
+    case 'Ice Pellets/Sleet': return 'ICE';
+    default: return 'OTHER';
+  }
+}
+
+function _mpingMarkerColor(props = {}) {
+  const category = String(props.category || '').trim();
+  switch (category) {
+    case 'Rain/Snow': return '#4499ff';
+    case 'Hail': return '#EA60C6';
+    case 'Flood': return '#34D24A';
+    case 'Wind Damage': return '#F7B51A';
+    case 'Storm Damage': return '#FF7A1A';
+    case 'Fog/Mist/Dust': return '#A9ADB7';
+    case 'Blowing Snow / Reduced Visibility': return '#7FB0EB';
+    case 'Freezing Rain/Drizzle': return '#DDA0DD';
+    case 'Ice Pellets/Sleet': return '#EC74D0';
+    case 'Tornado': return '#FF3030';
+    case 'None': return '#777777';
+    case 'Test': return '#999999';
+    default: return '#8F949E';
+  }
+}
+
+function _mpingMarkerLabel(props = {}) {
+  const category = String(props.category || '').trim();
+  const byCategory = {
+    'Rain/Snow': 'Rain',
+    'Hail': 'Hail',
+    'Flood': 'Flood',
+    'Wind Damage': 'Wind',
+    'Storm Damage': 'Damage',
+    'Fog/Mist/Dust': 'Fog',
+    'Blowing Snow / Reduced Visibility': 'Snow',
+    'Freezing Rain/Drizzle': 'Ice',
+    'Ice Pellets/Sleet': 'Sleet',
+    'Tornado': 'Tornado',
+    'None': '',
+    'Test': 'Test',
+  };
+  if (Object.prototype.hasOwnProperty.call(byCategory, category)) return byCategory[category];
+  const description = String(props.description || '').trim();
+  return description.length <= 12 ? description : category;
+}
+
+function _buildMpingStyledGeoJson(raw) {
+  const features = Array.isArray(raw?.features) ? raw.features : [];
+  const out = [];
+  for (const feature of features) {
+    const coords = feature?.geometry?.coordinates;
+    if (!Array.isArray(coords) || coords.length < 2) continue;
+    const props = feature?.properties && typeof feature.properties === 'object' ? feature.properties : {};
+    out.push({
+      type: 'Feature',
+      geometry: { type: 'Point', coordinates: [coords[0], coords[1]] },
+      properties: {
+        ...props,
+        _markerCategory: _mpingMarkerCategory(props),
+        _markerLabel: _mpingMarkerLabel(props),
+        _color: _mpingMarkerColor(props),
+      },
+    });
   }
   return { type: 'FeatureCollection', features: out };
 }
@@ -4560,17 +5284,37 @@ function initStormReportLayers() {
     generateId: true,
   });
 
+  _ensureLsrIconImages(map);
+
   map.addLayer({
     id: 'storm-reports-dot',
-    type: 'circle',
+    type: 'symbol',
     source: 'storm-reports-src',
-    layout: { visibility: 'none' },
+    layout: {
+      visibility: 'none',
+      'icon-image': LSR_ICON_IMAGE_EXPR,
+      'icon-size': STORM_REPORT_ICON_SIZE_EXPR,
+      'icon-allow-overlap': true,
+      'icon-ignore-placement': true,
+      'icon-anchor': 'center',
+      'text-field': ['coalesce', ['get', '_markerLabel'], ''],
+      'text-font': ['DIN Offc Pro Medium', 'Arial Unicode MS Bold'],
+      'text-size': STORM_REPORT_TEXT_SIZE_EXPR,
+      'text-anchor': 'top',
+      'text-offset': [0, 1.02],
+      'text-allow-overlap': true,
+      'text-ignore-placement': true,
+      'text-optional': true,
+    },
     paint: {
-      'circle-color': ['coalesce', ['get', '_color'], '#E6E6E6'],
-      'circle-radius': ['interpolate', ['linear'], ['zoom'], 3, 2.5, 6, 3.6, 10, 5.2, 13, 7],
-      'circle-stroke-color': '#000000',
-      'circle-stroke-width': 1.15,
-      'circle-opacity': 0.95,
+      'icon-color': ['coalesce', ['get', '_color'], '#8F949E'],
+      'icon-opacity': 0.98,
+      'icon-halo-color': 'rgba(0,0,0,0.92)',
+      'icon-halo-width': ['interpolate', ['linear'], ['zoom'], 3, 0.8, 10, 1.2, 13, 1.4],
+      'text-color': '#ffffff',
+      'text-opacity': ['interpolate', ['linear'], ['zoom'], 3, 0, 4.5, 0.9, 10, 1],
+      'text-halo-color': 'rgba(0,0,0,0.95)',
+      'text-halo-width': 1.35,
     },
   }, 'stations-dot');
 
@@ -4607,32 +5351,37 @@ function initMpingLayers() {
     generateId: true,
   });
 
+  _ensureLsrIconImages(map);
+
   map.addLayer({
     id: MPING_LAYER_ID,
-    type: 'circle',
+    type: 'symbol',
     source: MPING_SOURCE_ID,
-    layout: { visibility: 'none' },
+    layout: {
+      visibility: 'none',
+      'icon-image': MPING_STORM_ICON_EXPR,
+      'icon-size': STORM_REPORT_ICON_SIZE_EXPR,
+      'icon-allow-overlap': true,
+      'icon-ignore-placement': true,
+      'icon-anchor': 'center',
+      'text-field': ['coalesce', ['get', '_markerLabel'], ''],
+      'text-font': ['DIN Offc Pro Medium', 'Arial Unicode MS Bold'],
+      'text-size': STORM_REPORT_TEXT_SIZE_EXPR,
+      'text-anchor': 'top',
+      'text-offset': [0, 1.02],
+      'text-allow-overlap': true,
+      'text-ignore-placement': true,
+      'text-optional': true,
+    },
     paint: {
-      'circle-color': [
-        'match', ['get', 'category'],
-        'Rain/Snow',                        '#4499ff',
-        'Hail',                             '#00e5ff',
-        'Flood',                            '#00cc44',
-        'Wind Damage',                      '#ffdd00',
-        'Storm Damage',                     '#ff8800',
-        'Fog/Mist/Dust',                    '#aabbcc',
-        'Blowing Snow / Reduced Visibility','#ddddff',
-        'Freezing Rain/Drizzle',            '#88aaff',
-        'Ice Pellets/Sleet',                '#99ccff',
-        'Tornado',                          '#ff3333',
-        'None',                             '#555555',
-        'Test',                             '#333333',
-        '#888888',
-      ],
-      'circle-radius': ['interpolate', ['linear'], ['zoom'], 3, 3, 6, 4.2, 10, 6, 13, 8],
-      'circle-stroke-color': 'rgba(0,0,0,0.55)',
-      'circle-stroke-width': 1,
-      'circle-opacity': 0.9,
+      'icon-color': ['coalesce', ['get', '_color'], '#8F949E'],
+      'icon-opacity': 0.98,
+      'icon-halo-color': 'rgba(0,0,0,0.92)',
+      'icon-halo-width': ['interpolate', ['linear'], ['zoom'], 3, 0.8, 10, 1.2, 13, 1.4],
+      'text-color': '#ffffff',
+      'text-opacity': ['interpolate', ['linear'], ['zoom'], 3, 0, 4.5, 0.9, 10, 1],
+      'text-halo-color': 'rgba(0,0,0,0.95)',
+      'text-halo-width': 1.35,
     },
   }, 'stations-dot');
 
@@ -4697,8 +5446,9 @@ async function refreshMpingLayer(forceNetwork = false) {
     }
   }
   if (!mpingVisible) return;
+  const styled = _buildMpingStyledGeoJson(data);
   _overlayMaps().forEach(m => {
-    m.getSource(MPING_SOURCE_ID)?.setData(data);
+    m.getSource(MPING_SOURCE_ID)?.setData(styled);
     if (m.getLayer(MPING_LAYER_ID)) m.setLayoutProperty(MPING_LAYER_ID, 'visibility', 'visible');
   });
 }
@@ -9497,7 +10247,38 @@ function _initOverlaysOnSecondaryMap(m) {
   // Storm Reports
   if (!m.getSource('storm-reports-src')) {
     m.addSource('storm-reports-src', { type: 'geojson', data: STORM_EMPTY_GEOJSON, generateId: true });
-    m.addLayer({ id: 'storm-reports-dot', type: 'circle', source: 'storm-reports-src', layout: { visibility: stormReportsVisible ? 'visible' : 'none' }, paint: { 'circle-color': ['coalesce', ['get', '_color'], '#E6E6E6'], 'circle-radius': ['interpolate', ['linear'], ['zoom'], 3, 2.5, 6, 3.6, 10, 5.2, 13, 7], 'circle-stroke-color': '#000000', 'circle-stroke-width': 1.15, 'circle-opacity': 0.95 } }, beforeId);
+    _ensureLsrIconImages(m);
+    m.addLayer({
+      id: 'storm-reports-dot',
+      type: 'symbol',
+      source: 'storm-reports-src',
+      layout: {
+        visibility: stormReportsVisible ? 'visible' : 'none',
+        'icon-image': LSR_ICON_IMAGE_EXPR,
+        'icon-size': STORM_REPORT_ICON_SIZE_EXPR,
+        'icon-allow-overlap': true,
+        'icon-ignore-placement': true,
+        'icon-anchor': 'center',
+        'text-field': ['coalesce', ['get', '_markerLabel'], ''],
+        'text-font': ['DIN Offc Pro Medium', 'Arial Unicode MS Bold'],
+        'text-size': STORM_REPORT_TEXT_SIZE_EXPR,
+        'text-anchor': 'top',
+        'text-offset': [0, 1.02],
+        'text-allow-overlap': true,
+        'text-ignore-placement': true,
+        'text-optional': true,
+      },
+      paint: {
+        'icon-color': ['coalesce', ['get', '_color'], '#8F949E'],
+        'icon-opacity': 0.98,
+        'icon-halo-color': 'rgba(0,0,0,0.92)',
+        'icon-halo-width': ['interpolate', ['linear'], ['zoom'], 3, 0.8, 10, 1.2, 13, 1.4],
+        'text-color': '#ffffff',
+        'text-opacity': ['interpolate', ['linear'], ['zoom'], 3, 0, 4.5, 0.9, 10, 1],
+        'text-halo-color': 'rgba(0,0,0,0.95)',
+        'text-halo-width': 1.35,
+      },
+    }, beforeId);
     m.on('mouseenter', 'storm-reports-dot', () => { m.getCanvas().style.cursor = 'pointer'; });
     m.on('mouseleave', 'storm-reports-dot', () => { m.getCanvas().style.cursor = ''; });
     m.on('click', 'storm-reports-dot', e => {
@@ -9511,7 +10292,38 @@ function _initOverlaysOnSecondaryMap(m) {
   // mPING
   if (!m.getSource(MPING_SOURCE_ID)) {
     m.addSource(MPING_SOURCE_ID, { type: 'geojson', data: mpingCachedData || MPING_EMPTY_GEOJSON, generateId: true });
-    m.addLayer({ id: MPING_LAYER_ID, type: 'circle', source: MPING_SOURCE_ID, layout: { visibility: mpingVisible ? 'visible' : 'none' }, paint: { 'circle-color': ['match', ['get', 'category'], 'Rain/Snow', '#4499ff', 'Hail', '#00e5ff', 'Flood', '#00cc44', 'Wind Damage', '#ffdd00', 'Storm Damage', '#ff8800', 'Fog/Mist/Dust', '#aabbcc', 'Blowing Snow / Reduced Visibility', '#ddddff', 'Freezing Rain/Drizzle', '#88aaff', 'Ice Pellets/Sleet', '#99ccff', 'Tornado', '#ff3333', 'None', '#555555', 'Test', '#333333', '#888888'], 'circle-radius': ['interpolate', ['linear'], ['zoom'], 3, 3, 6, 4.2, 10, 6, 13, 8], 'circle-stroke-color': 'rgba(0,0,0,0.55)', 'circle-stroke-width': 1, 'circle-opacity': 0.9 } }, beforeId);
+    _ensureLsrIconImages(m);
+    m.addLayer({
+      id: MPING_LAYER_ID,
+      type: 'symbol',
+      source: MPING_SOURCE_ID,
+      layout: {
+        visibility: mpingVisible ? 'visible' : 'none',
+        'icon-image': MPING_STORM_ICON_EXPR,
+        'icon-size': STORM_REPORT_ICON_SIZE_EXPR,
+        'icon-allow-overlap': true,
+        'icon-ignore-placement': true,
+        'icon-anchor': 'center',
+        'text-field': ['coalesce', ['get', '_markerLabel'], ''],
+        'text-font': ['DIN Offc Pro Medium', 'Arial Unicode MS Bold'],
+        'text-size': STORM_REPORT_TEXT_SIZE_EXPR,
+        'text-anchor': 'top',
+        'text-offset': [0, 1.02],
+        'text-allow-overlap': true,
+        'text-ignore-placement': true,
+        'text-optional': true,
+      },
+      paint: {
+        'icon-color': ['coalesce', ['get', '_color'], '#8F949E'],
+        'icon-opacity': 0.98,
+        'icon-halo-color': 'rgba(0,0,0,0.92)',
+        'icon-halo-width': ['interpolate', ['linear'], ['zoom'], 3, 0.8, 10, 1.2, 13, 1.4],
+        'text-color': '#ffffff',
+        'text-opacity': ['interpolate', ['linear'], ['zoom'], 3, 0, 4.5, 0.9, 10, 1],
+        'text-halo-color': 'rgba(0,0,0,0.95)',
+        'text-halo-width': 1.35,
+      },
+    }, beforeId);
     m.on('mouseenter', MPING_LAYER_ID, () => { m.getCanvas().style.cursor = 'pointer'; });
     m.on('mouseleave', MPING_LAYER_ID, () => { m.getCanvas().style.cursor = ''; });
     m.on('click', MPING_LAYER_ID, e => {
@@ -11660,7 +12472,7 @@ function clearAllRuntimeCaches() {
 }
 
 // Parallel decode queue for the active radar selection.
-const N_DECODE_WORKERS_L3 = 2;
+const N_DECODE_WORKERS_L3 = 4;
 const N_DECODE_WORKERS_L3_BURST = 8;
 const N_DECODE_WORKERS_L2 = 2;
 const L3_DECODE_BURST_MS = 7000;
@@ -12819,9 +13631,9 @@ async function _runOneDecodeWorker() {
       }
     }
     // Give the event loop a chance to render the map between frames.
-    // Priority frames yield 0 ms; background frames yield 50 ms so a quick
-    // product/tilt switch can always grab a free worker quickly.
-    await new Promise(r => setTimeout(r, job.priority ? 0 : 50));
+    // Priority frames yield 0 ms; background frames yield 16 ms (one rAF budget)
+    // so the map stays smooth while still loading history ~3× faster than before.
+    await new Promise(r => setTimeout(r, job.priority ? 0 : 16));
   }
   decodeWorkerCount--;
   // When the last worker exits, schedule the toast drain check.
@@ -14260,6 +15072,9 @@ function syncAlertSourceUi() {
 
 function setNwwsLoginOpen(open) {
   const next = !!open;
+  if (!next && nwwsLoginOverlay?.contains(document.activeElement)) {
+    nwwsLoginBtn?.focus();
+  }
   nwwsLoginOverlay?.classList.toggle('open', next);
   nwwsLoginOverlay?.setAttribute('aria-hidden', next ? 'false' : 'true');
   nwwsLoginBtn?.setAttribute('aria-expanded', next ? 'true' : 'false');
@@ -20616,9 +21431,12 @@ setTimeout(() => {
 setInterval(() => {
   if (watchesVisible) refreshWatchesOverlay(true, { forceNetwork: true });
   if (tvsVisible) refreshTvsOverlay(true, { forceNetwork: true });
-  if (stormReportsVisible) refreshStormReports(true, { forceNetwork: true });
   if (_alertsCleanupExpired()) _alertsScheduleSourceUpdate();
 }, 120000);
+
+setInterval(() => {
+  if (stormReportsVisible) refreshStormReports(true, { forceNetwork: true });
+}, STORM_REPORT_POLL_MS);
 
 setInterval(() => {
   if (mesoVisible) refreshMesoOverlay(true, { forceNetwork: true });

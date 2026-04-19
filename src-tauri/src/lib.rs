@@ -48,7 +48,7 @@ enum BackendState {
 
 // Default number of Python backend processes to spawn. Each process handles one
 // decode at a time; additional workers increase parallelism but also RAM usage.
-const DEFAULT_BACKEND_POOL_SIZE: usize = 1;
+const DEFAULT_BACKEND_POOL_SIZE: usize = 2;
 const BACKEND_LAZY_INIT_MESSAGE: &str = "Backend not started yet (lazy init)";
 
 fn backend_pool_size() -> usize {
@@ -3638,6 +3638,13 @@ async fn install_app_update(app: AppHandle, url: String) -> Result<String, Strin
     Ok(temp_path.to_string_lossy().into_owned())
 }
 
+#[tauri::command]
+fn open_devtools(app: AppHandle) {
+    if let Some(win) = app.get_webview_window("main") {
+        win.open_devtools();
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     // Warm reqwest client + first DNS/TLS handshake to the L3 bucket so
@@ -3683,7 +3690,8 @@ pub fn run() {
             start_nwws_bridge,
             stop_nwws_bridge,
             decode_wise_key,
-            list_wise_frames
+            list_wise_frames,
+            open_devtools
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application");
