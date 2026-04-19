@@ -99,6 +99,7 @@ function _cameraViewHasVideo(view, props = {}) {
   const directUrls = [
     view.url,
     view.video_url,
+    view.m3u8Url,
     view.m3u8_url,
     view.dash_url,
     view.streamingURL,
@@ -139,6 +140,7 @@ function _cameraFeatureHasVideo(props = {}) {
     props.hls_url,
     props.streamingURL,
     props.streamingVideoURL,
+    props.m3u8Url,
     props.m3u8_url,
     props.m3u8,
     props.hls_stream_protected,
@@ -757,13 +759,13 @@ function _normalizeCombinedFeature(f) {
   const p = f?.properties || {};
   const state = _cameraStateFromSources(
     p._state, p._merged_state, p.state, p.State, p.state_name,
-    p.city, p.name, p.location, p.locationName, p.nearbyPlace,
+    p.city, p.name, p.cameraName, p.location, p.locationName, p.nearbyPlace,
     p.county, p._source_file, p._source_url,
   );
-  const primaryName = p.name || p.title || p.description || p.locationName
+  const primaryName = p.name || p.cameraName || p.title || p.description || p.locationName
     || p.location || p.nearbyPlace || p.CameraLocation || p.camera_description
     || p.station_name || p.site_name || '';
-  const direction = String(p.CameraDirection || p.direction_name || '').trim();
+  const direction = String(p.CameraDirection || p.direction_name || p.directionLabel || '').trim();
   const displayName = primaryName
     ? (direction && !String(primaryName).toLowerCase().includes(` ${direction.toLowerCase()}`)
         ? `${primaryName} (${direction})` : primaryName)
@@ -772,7 +774,7 @@ function _normalizeCombinedFeature(f) {
     ...p,
     name: displayName,
     _state: state || String(p._state || p.state || '').trim().toUpperCase().slice(0, 2),
-  }, String(f?.id || p?.id || p?.camera_id || p?.deviceID || ''));
+  }, String(f?.id || p?.id || p?.cameraId || p?.camera_id || p?.deviceID || ''));
 }
 
 function _inMissouriBounds(lon, lat) {
@@ -803,7 +805,13 @@ function _composeTrafficCameraFeatures(datasets = {}) {
       ? (datasets.missouri.features || []).map(_normalizeCombinedFeature).filter(Boolean)
       : [];
     const ksFeatures = skipKs
-      ? (datasets.kansas.features || []).map(_normalizeCombinedFeature).filter(Boolean)
+      ? (datasets.kansas.features || []).map(f => {
+          if (!f?.properties) return _normalizeCombinedFeature(f);
+          // GitHub Kansas GeoJSON has no explicit state field — inject it so
+          // _isKansasTrafficCamera() fires and the signed-URL flow runs.
+          const enhanced = { ...f, properties: { _state: 'KS', state: 'Kansas', ...f.properties } };
+          return _normalizeCombinedFeature(enhanced);
+        }).filter(Boolean)
       : [];
 
     return [...combinedFeatures, ...moFeatures, ...ksFeatures];
