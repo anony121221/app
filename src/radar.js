@@ -9988,10 +9988,20 @@ function _paneFrameTimeEl(id) {
   return document.getElementById(`pane-frame-time-${id}`);
 }
 
+function _fmtLocalTime(ts) {
+  const d = new Date(ts);
+  let h = d.getHours();
+  const m = String(d.getMinutes()).padStart(2, '0');
+  const s = String(d.getSeconds()).padStart(2, '0');
+  const ampm = h >= 12 ? 'PM' : 'AM';
+  h = h % 12 || 12;
+  return `${h}:${m}:${s} ${ampm}`;
+}
+
 function _frameTimeLabelFor(key, frame = null) {
   const scanTimeMs = frame?.scan_time ? Date.parse(frame.scan_time) : NaN;
   const ts = Number.isFinite(scanTimeMs) ? scanTimeMs : parseKeyTimestampMs(String(key || ''));
-  return Number.isFinite(ts) ? new Date(ts).toUTCString().slice(17, 25) : '--:--:--';
+  return Number.isFinite(ts) ? _fmtLocalTime(ts) : '--:--:-- --';
 }
 
 function _setPaneFrameTime(id, key = '', frame = null) {
@@ -11083,7 +11093,7 @@ function _ensurePaneCell(id) {
   cell.className = 'map-cell';
   cell.id = `map-cell-${id}`;
   cell.dataset.pane = String(id);
-  cell.innerHTML = `<div id="map-pane-${id}" class="map-pane"></div><div class="pane-frame-time" id="pane-frame-time-${id}">--:--:--</div><div class="pane-crosshair"></div>`;
+  cell.innerHTML = `<div id="map-pane-${id}" class="map-pane"></div><div class="pane-frame-time" id="pane-frame-time-${id}">--:--:-- --</div><div class="pane-crosshair"></div>`;
   mapGridEl?.appendChild(cell);
   cell.addEventListener('pointerdown', () => _setActivePane(id));
   cell.addEventListener('mousedown', () => _setActivePane(id));
@@ -13417,7 +13427,7 @@ function _updateTlPosition() {
 
 function _setHistoryFrameLabelForKey(key) {
   const ts = parseKeyTimestampMs(key);
-  const timeStr = Number.isFinite(ts) ? new Date(ts).toUTCString().slice(17, 25) : '--:--';
+  const timeStr = Number.isFinite(ts) ? _fmtLocalTime(ts) : '--:--:-- --';
   setFrameLabel(timeStr, 'history');
 }
 
@@ -13781,7 +13791,7 @@ function showFrame(s3key, opts = {}) {
 // Called both from showFrame() and from completeSweep() after the sweep finishes.
 function showFrameMeta(s3key, data) {
   const t = data.scan_time ? new Date(data.scan_time) : null;
-  const timeStr = t ? t.toUTCString().slice(17, 25) : '--:--';
+  const timeStr = t ? _fmtLocalTime(t.getTime()) : '--:--:-- --';
   _setPaneFrameTime(1, s3key, data);
   document.getElementById('info-time').textContent = timeStr;
   document.getElementById('info-elev').textContent =
