@@ -182,10 +182,11 @@ function _cameraFeatureHasVideo(props = {}) {
 }
 
 function _cameraResolvedHasVideo(props = {}) {
-  const derived = _cameraFeatureHasVideo(props);
-  if (derived) return 1;
+  if (Object.prototype.hasOwnProperty.call(props, '_has_video')) {
+    return Number(props?._has_video) ? 1 : 0;
+  }
   if (_cameraHasKnownBrokenStreamUrl(props)) return 0;
-  if (Number(props?._has_video)) return 1;
+  if (_cameraFeatureHasVideo(props)) return 1;
   return 0;
 }
 
@@ -785,115 +786,44 @@ function _inKansasBounds(lon, lat) {
 }
 
 function _composeTrafficCameraFeatures(datasets = {}) {
-  // Combined dataset: all cameras already merged — no per-state dedup needed
-  if (datasets.combined) {
-    const skipMo = Boolean(datasets.missouri);
-    const skipKs = Boolean(datasets.kansas);
-    const combinedFeatures = (datasets.combined.features || [])
-      .filter(f => {
-        if (!skipMo && !skipKs) return true;
-        const c = _cameraCoords(f);
-        if (!c) return true;
-        if (skipMo && _inMissouriBounds(c[0], c[1])) return false;
-        if (skipKs && _inKansasBounds(c[0], c[1])) return false;
-        return true;
-      })
-      .map(_normalizeCombinedFeature)
-      .filter(Boolean);
-
-    const moFeatures = skipMo
-      ? (datasets.missouri.features || []).map(_normalizeCombinedFeature).filter(Boolean)
-      : [];
-    const ksFeatures = skipKs
-      ? (datasets.kansas.features || []).map(f => {
-          if (!f?.properties) return _normalizeCombinedFeature(f);
-          // GitHub Kansas GeoJSON has no explicit state field — inject it so
-          // _isKansasTrafficCamera() fires and the signed-URL flow runs.
-          const enhanced = { ...f, properties: { _state: 'KS', state: 'Kansas', ...f.properties } };
-          return _normalizeCombinedFeature(enhanced);
-        }).filter(Boolean)
-      : [];
-
-    return [...combinedFeatures, ...moFeatures, ...ksFeatures];
-  }
-
-  let features = [];
-  const kentuckyFeatures = datasets.kentucky ? _buildKentuckyTrimarcFeatures(datasets.kentucky) : [];
-  const hasLiveKentucky = kentuckyFeatures.length > 0;
-  const alabamaFeatures = datasets.alabama ? _buildAlabamaAlgoTrafficFeatures(datasets.alabama) : [];
-  const hasLiveAlabama = alabamaFeatures.length > 0;
-  const georgiaFeatures = datasets.georgia ? _buildGeorgia511Features(datasets.georgia) : [];
-  const hasLiveGeorgia = georgiaFeatures.length > 0;
-  const indianaFeatures = datasets.indiana ? _buildIndianaCarsFeatures(datasets.indiana) : [];
-  const hasLiveIndiana = indianaFeatures.length > 0;
-  const iowaFeatures = datasets.iowa ? _buildIowa511Features(datasets.iowa) : [];
-  const hasLiveIowa = iowaFeatures.length > 0;
-  const coloradoFeatures = datasets.colorado ? _buildColoradoCotTripFeatures(datasets.colorado) : [];
-  const hasLiveColorado = coloradoFeatures.length > 0;
-  const msFeatures = datasets.existing ? _buildMississippiGroupedFeatures(datasets.existing?.features || []) : [];
-
-  if (datasets.existing) {
-    const existing = datasets.existing;
-    const srcFeatures = Array.isArray(existing?.features)
-      ? existing.features.filter(f => (
-          !isOklahomaCameraFeature(f)
-          && !isMississippiCameraFeature(f)
-          && !(hasLiveAlabama && isAlabamaCameraFeature(f))
-          && !(hasLiveGeorgia && isGeorgiaCameraFeature(f))
-          && !(hasLiveIndiana && isIndianaCameraFeature(f))
-          && !(hasLiveIowa && isIowaCameraFeature(f))
-          && !(hasLiveColorado && isColoradoCameraFeature(f))
-          && !(hasLiveKentucky && isKentuckyCameraFeature(f))
-        ))
-      : [];
-
-    features = srcFeatures.map(f => {
+  const features = [];
+  for (const [stateCode, geojson] of Object.entries(datasets)) {
+    const srcFeatures = Array.isArray(geojson?.features) ? geojson.features : [];
+    let count = 0;
+    for (const f of srcFeatures) {
       const c = _cameraCoords(f);
-      if (!c) return null;
+      if (!c) continue;
       const p = f?.properties || {};
-      const state = _cameraStateFromSources(
-        p.state,
-        p.State,
-        p.state_name,
-        p.city,
-        p.name,
-        p.location,
-        p.locationName,
-        p.nearbyPlace,
-        p.county,
-        p._source_file,
-        p._source_url,
-      );
-      const primaryName = p.name
-        || p.title
-        || p.description
-        || p.locationName
-        || p.location
-        || p.nearbyPlace
-        || p.CameraLocation
-        || '';
-      const direction = String(p.CameraDirection || '').trim();
-      const displayName = primaryName
-        ? (direction && !String(primaryName).toLowerCase().includes(` ${direction.toLowerCase()}`)
-            ? `${primaryName} (${direction})`
-            : primaryName)
-        : 'Traffic Camera';
-      return _cameraPointFeature(c[0], c[1], {
+      const name = String(p.cameraName || p.name || p.title || p.camera_title || p.location || '').trim()
+        || `${stateCode} Traffic Camera`;
+      const rawId = String(f?.id || p?.id || p?.cameraId || p?.camera_id || p?.deviceID || '');
+      const stateId = rawId ? `${stateCode}:${rawId}` : '';
+      const extraProps = {};
+      if (stateCode === 'PA') {
+        const paId = String(p.view_id || p.cameraId || p.camera_id || rawId || '').trim()
+          || (String(p.imageUrl || '').match(/\/map\/Cctv\/(\d+)/)?.[1] || '');
+        if (paId) {
+          extraProps.view_id = paId;
+          if (!String(p.cameraId || p.camera_id || '').trim()) extraProps.cameraId = paId;
+        }
+      }
+      if (stateCode === 'KS') {
+        const ksId = String(p.cameraId || p.camera_id || rawId || '').trim();
+        if (ksId) {
+          extraProps.videoauth = 'true';
+          if (!String(p.cameraId || p.camera_id || '').trim()) extraProps.cameraId = ksId;
+        }
+      }
+      features.push(_cameraPointFeature(c[0], c[1], {
         ...p,
-        name: displayName,
-        _state: state,
-      }, String(f?.id || p?.id || ''));
-    }).filter(Boolean);
+        ...extraProps,
+        name,
+        _state: stateCode,
+      }, stateId));
+      count++;
+    }
+    if (count === 0) console.warn(`[Camera][Traffic] ${stateCode}: 0 valid features`);
   }
-
-  if (msFeatures.length) features.push(...msFeatures);
-  if (hasLiveAlabama) features.push(...alabamaFeatures);
-  if (hasLiveGeorgia) features.push(...georgiaFeatures);
-  if (hasLiveIndiana) features.push(...indianaFeatures);
-  if (hasLiveIowa) features.push(...iowaFeatures);
-  if (hasLiveColorado) features.push(...coloradoFeatures);
-  if (hasLiveKentucky) features.push(...kentuckyFeatures);
-  if (datasets.ok) features.push(..._buildOklahomaGroupedFeatures(datasets.ok));
   return features;
 }
 

@@ -316,35 +316,33 @@
 
     #city-search-panel {
 
-      position: absolute;
+      position: fixed;
 
-      top: 0;
+      top: 50%;
 
-      left: calc(100% + 6px);
+      left: 50%;
 
-      width: min(330px, calc(100vw - 66px));
+      width: min(520px, calc(100vw - 32px));
 
-      max-width: 0;
+      z-index: 70;
 
       opacity: 0;
 
-      transform: translateX(-4px);
+      transform: translate(-50%, -54%) scale(0.98);
 
       pointer-events: none;
 
-      overflow: hidden;
+      overflow: visible;
 
-      transition: max-width 0.14s ease, opacity 0.12s ease, transform 0.12s ease;
+      transition: opacity 0.14s ease, transform 0.14s ease;
 
     }
 
     #city-search-wrap.open #city-search-panel {
 
-      max-width: min(330px, calc(100vw - 66px));
-
       opacity: 1;
 
-      transform: translateX(0);
+      transform: translate(-50%, -50%) scale(1);
 
       pointer-events: auto;
 
@@ -352,11 +350,11 @@
 
     #city-search-box {
 
-      width: min(330px, calc(100vw - 66px));
+      width: 100%;
 
       border: 1px solid #2a2a2a;
 
-      border-radius: 4px;
+      border-radius: 6px;
 
       background: #000;
 
@@ -374,9 +372,9 @@
 
       outline: none;
 
-      padding: 7px 9px;
+      padding: 11px 13px;
 
-      font-size: 12px;
+      font-size: 15px;
 
       color: #e6e6e6;
 
@@ -390,7 +388,7 @@
 
       display: none;
 
-      max-height: 230px;
+      max-height: min(330px, calc(100vh - 190px));
 
       overflow-y: auto;
 
@@ -480,9 +478,9 @@
 
       text-align: left;
 
-      padding: 7px 9px;
+      padding: 9px 13px;
 
-      font-size: 12px;
+      font-size: 13px;
 
       cursor: pointer;
 
@@ -514,13 +512,25 @@
 
       color: #8f8f8f;
 
+      font-size: 12px;
+
+    }
+
+    .city-search-item.station-result .city-sub {
+
+      color: #aaa;
+
       font-size: 11px;
+
+      letter-spacing: 0.08em;
+
+      text-transform: uppercase;
 
     }
 
     .city-search-empty {
 
-      padding: 8px 9px;
+      padding: 10px 13px;
 
       color: #7a7a7a;
 
@@ -772,6 +782,93 @@
       background: rgba(0,0,0,0.6);
     }
 
+    #settings-section-alerts .settings-subblock {
+      gap: 0;
+      padding: 0;
+    }
+
+    #settings-section-alerts .alert-source-row {
+      padding: 10px 22px;
+      border-bottom: 1px solid #171717;
+    }
+
+    #settings-section-alerts .alert-source-row.disabled {
+      opacity: 0.48;
+    }
+
+    #settings-section-alerts .alert-source-row.disabled .toggle {
+      pointer-events: none;
+    }
+
+    #settings-section-alerts .alert-source-row .settings-row-left {
+      gap: 8px;
+    }
+
+    #settings-section-alerts .alert-source-status {
+      font-size: 10px;
+      color: #8a94a6;
+      text-align: right;
+      line-height: 1.25;
+      max-width: 150px;
+    }
+
+    #settings-section-alerts .alert-source-status.success {
+      color: #70f0a8;
+    }
+
+    #settings-section-alerts .alert-source-status.error {
+      color: #ff7272;
+    }
+
+    #settings-section-alerts .nwws-inline-body {
+      display: grid;
+      grid-template-rows: 0fr;
+      visibility: hidden;
+      overflow: hidden;
+      pointer-events: none;
+      transition: grid-template-rows 0.18s ease;
+      border-bottom: 1px solid #171717;
+    }
+
+    #nwws-settings-section.open .nwws-inline-body {
+      grid-template-rows: 1fr;
+      visibility: visible;
+      pointer-events: auto;
+    }
+
+    .nwws-inline-inner {
+      min-height: 0;
+      overflow: hidden;
+      display: grid;
+      gap: 8px;
+      padding: 2px 22px 12px;
+    }
+
+    .nwws-inline-field {
+      display: grid;
+      gap: 5px;
+    }
+
+    .nwws-inline-field .spc-filter-label {
+      font-size: 9px;
+      letter-spacing: 0.08em;
+      color: #8d98aa;
+    }
+
+    .nwws-inline-field .sp-text {
+      width: 100%;
+      height: 32px;
+      padding: 6px 8px;
+      font-size: 12px;
+    }
+
+    .nwws-inline-actions {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+    }
+
     .settings-section-inner {
       overflow: hidden;
       min-height: 0;
@@ -790,6 +887,90 @@
       padding-left: 22px;
       padding-right: 22px;
       background: transparent;
+    }
+
+    .settings-color-control {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 7px;
+      min-height: 28px;
+      min-width: 104px;
+      padding: 4px 8px;
+      border-radius: 6px;
+      border: 1px solid #262626;
+      background: #0a0a0a;
+    }
+
+    .settings-color-control.disabled {
+      opacity: 0.45;
+    }
+
+    .settings-color-control-label {
+      font-size: 9px;
+      font-weight: 700;
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+      color: #c8c8c8;
+      white-space: nowrap;
+    }
+
+    .settings-color-control input[type="color"] {
+      width: 34px;
+      height: 22px;
+      border: 1px solid #323232;
+      border-radius: 4px;
+      padding: 0;
+      background: #000;
+      cursor: pointer;
+    }
+
+    .settings-color-control input[type="color"]:disabled {
+      cursor: default;
+    }
+
+    #settings-section-radar-sites .settings-subblock {
+      gap: 0;
+      padding: 4px 18px 8px;
+    }
+
+    #settings-section-radar-sites .settings-section-head {
+      align-items: center;
+      padding: 13px 22px;
+    }
+
+    #settings-section-radar-sites .settings-row-left {
+      gap: 6px;
+      align-items: center;
+      justify-content: flex-start;
+    }
+
+    #settings-section-radar-sites .settings-subblock .sp-row {
+      padding: 8px 0;
+      border-bottom: 1px solid #171717;
+    }
+
+    #settings-section-radar-sites .sp-row-label {
+      line-height: 1.1;
+    }
+
+    #settings-section-radar-sites .settings-row-left .settings-expander-btn {
+      margin-left: 0;
+      width: 22px;
+      min-width: 22px;
+      height: 22px;
+      padding: 0;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+    }
+
+    #settings-section-radar-sites .sp-row-right {
+      align-items: center;
+    }
+
+    #settings-section-radar-sites .settings-subblock .sp-row:last-of-type {
+      border-bottom: none;
     }
 
     .settings-cache-row {
@@ -1679,6 +1860,272 @@
       gap: 12px;
 
       padding-top: 10px;
+
+    }
+
+    #report-details-overlay {
+
+      position: fixed;
+
+      inset: 0;
+
+      z-index: 47;
+
+      display: none;
+
+      align-items: flex-start;
+
+      justify-content: center;
+
+      padding: 72px 18px 18px;
+
+      background: rgba(0,0,0,0.28);
+
+      pointer-events: none;
+
+    }
+
+    #report-details-overlay.open {
+
+      display: flex;
+
+      pointer-events: auto;
+
+    }
+
+    #report-details-modal {
+
+      width: min(720px, calc(100vw - 28px));
+
+      max-height: min(78vh, calc(100vh - 36px));
+
+      background:
+        linear-gradient(180deg, rgba(255,255,255,0.035), rgba(255,255,255,0)),
+        #0d0d0d;
+
+      border: 1px solid #2a2a2a;
+
+      border-radius: 8px;
+
+      box-shadow: 0 18px 46px rgba(0,0,0,0.48);
+
+      overflow: hidden;
+
+      color: #f0f0f0;
+
+      display: flex;
+
+      flex-direction: column;
+
+    }
+
+    #report-details-header {
+
+      display: flex;
+
+      align-items: flex-start;
+
+      justify-content: space-between;
+
+      gap: 14px;
+
+      padding: 16px 18px 11px;
+
+      border-bottom: 1px solid #1d1d1d;
+
+      background: #101010;
+
+    }
+
+    #report-details-heading {
+
+      min-width: 0;
+
+      display: grid;
+
+      gap: 5px;
+
+    }
+
+    #report-details-title {
+
+      font-size: 28px;
+
+      font-weight: 500;
+
+      line-height: 1.08;
+
+      letter-spacing: 0.01em;
+
+      color: #ffffff;
+
+    }
+
+    #report-details-meta {
+
+      font-size: 10px;
+
+      font-weight: 800;
+
+      letter-spacing: 0.12em;
+
+      text-transform: uppercase;
+
+      color: #858585;
+
+    }
+
+    #report-details-close {
+
+      border: none;
+
+      background: transparent;
+
+      color: #777;
+
+      font-size: 33px;
+
+      line-height: 0.8;
+
+      cursor: pointer;
+
+      padding: 0;
+
+      transition: color 0.12s, transform 0.12s;
+
+    }
+
+    #report-details-close:hover {
+
+      color: #ffffff;
+
+      transform: scale(1.04);
+
+    }
+
+    #report-details-body {
+
+      overflow: auto;
+
+      padding: 12px 18px 16px;
+
+      display: grid;
+
+      gap: 12px;
+
+      scrollbar-width: thin;
+
+      scrollbar-color: #595959 #101010;
+
+    }
+
+    #report-details-body::-webkit-scrollbar { width: 9px; }
+
+    #report-details-body::-webkit-scrollbar-track { background: #101010; }
+
+    #report-details-body::-webkit-scrollbar-thumb {
+
+      background: #595959;
+
+      border-radius: 999px;
+
+      border: 2px solid #101010;
+
+    }
+
+    .report-details-grid {
+
+      display: grid;
+
+      grid-template-columns: 86px 1fr;
+
+      gap: 8px 14px;
+
+      align-items: start;
+
+    }
+
+    .report-details-k {
+
+      font-size: 12px;
+
+      color: #8a8a8a;
+
+      line-height: 1.35;
+
+    }
+
+    .report-details-v {
+
+      font-size: 13px;
+
+      font-weight: 700;
+
+      color: #f2f2f2;
+
+      line-height: 1.35;
+
+      word-break: break-word;
+
+      font-variant-numeric: tabular-nums;
+
+    }
+
+    .report-details-v.muted {
+
+      font-weight: 600;
+
+      color: #cfcfcf;
+
+    }
+
+    .report-details-linkish {
+
+      color: #9dc6ff;
+
+      text-decoration: underline;
+
+      text-underline-offset: 2px;
+
+    }
+
+    .report-details-block {
+
+      display: grid;
+
+      gap: 6px;
+
+      padding-top: 11px;
+
+      border-top: 1px solid #1f1f1f;
+
+    }
+
+    .report-details-block-title {
+
+      font-size: 10px;
+
+      font-weight: 800;
+
+      letter-spacing: 0.12em;
+
+      text-transform: uppercase;
+
+      color: #858585;
+
+    }
+
+    .report-details-block-text {
+
+      font-size: 13px;
+
+      line-height: 1.45;
+
+      color: #dddddd;
+
+      white-space: pre-wrap;
+
+      word-break: break-word;
 
     }
 
@@ -3569,6 +4016,11 @@
 
     .tools-item:hover:not(:disabled) { background: #111; color: #fff; }
 
+    .tools-item.active {
+      background: #0f1928;
+      color: #58a6ff;
+    }
+
     .tools-item:disabled { color: #3a3a3a; cursor: default; }
 
     #multi-pane-btn.open {
@@ -3824,7 +4276,8 @@
 
     /* ââ Drawing toolbar âââââââââââââââââââââââââââââââââââââââââââââââ */
 
-    #draw-toolbar {
+    #draw-toolbar,
+    #measure-toolbar {
 
       position: fixed; bottom: 10px; left: 50%; transform: translateX(-50%);
 
@@ -3840,7 +4293,8 @@
 
     }
 
-    .dt-label {
+    .dt-label,
+    .mt-label {
 
       font-size: 10px; font-weight: 700; letter-spacing: 0.08em;
 
@@ -3848,7 +4302,8 @@
 
     }
 
-    .dt-sep { width: 1px; height: 16px; background: #2a2a2a; flex-shrink: 0; margin: 0 2px; }
+    .dt-sep,
+    .mt-sep { width: 1px; height: 16px; background: #2a2a2a; flex-shrink: 0; margin: 0 2px; }
 
     #dt-colors { display: flex; gap: 4px; align-items: center; }
 
@@ -3924,7 +4379,8 @@
 
     #dt-width-val { font-size: 10px; color: #888; min-width: 22px; font-variant-numeric: tabular-nums; }
 
-    #dt-undo, #dt-clear, #dt-done {
+    #dt-undo, #dt-clear, #dt-done,
+    #mt-done {
 
       background: none; border: 1px solid #2a2a2a; border-radius: 3px;
 
@@ -3938,7 +4394,27 @@
 
     #dt-undo:hover, #dt-clear:hover { border-color: #555; color: #ccc; }
 
-    #dt-done:hover { border-color: #ff5555; color: #ff5555; }
+    #dt-done:hover,
+    #mt-done:hover { border-color: #ff5555; color: #ff5555; }
+
+    #measure-toolbar {
+      gap: 8px;
+      padding: 6px 11px;
+    }
+
+    #mt-readout {
+      color: #e8edf5;
+      font-size: 12px;
+      font-weight: 600;
+      font-variant-numeric: tabular-nums;
+      min-width: 98px;
+    }
+
+    #mt-hint {
+      color: #7f8691;
+      font-size: 10px;
+      white-space: nowrap;
+    }
 
 
 
@@ -4419,7 +4895,7 @@
 
     <div id="city-search-wrap">
 
-      <button id="city-search-btn" type="button" title="City Search" aria-label="City Search">
+      <button id="city-search-btn" type="button" title="Search (Ctrl+S)" aria-label="Search">
 
         <svg class="icon-search" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
 
@@ -4433,7 +4909,7 @@
 
         <div id="city-search-box">
 
-          <input id="city-search-input" type="text" autocomplete="off" placeholder="Search city...">
+          <input id="city-search-input" type="text" autocomplete="off" placeholder="Search city or radar site...">
 
           <div id="city-search-results"></div>
 
@@ -4501,12 +4977,52 @@
                 </label>
               </div>
 
-              <div class="sp-row">
-                <span class="sp-row-label">Radar Sites</span>
-                <label class="toggle">
-                  <input type="checkbox" id="toggle-radar-sites">
-                  <span class="toggle-track"></span>
-                </label>
+              <div class="settings-section" id="settings-section-radar-sites">
+                <div class="sp-row settings-section-head">
+                  <div class="settings-row-left">
+                    <span class="sp-row-label">Radar Sites</span>
+                    <button class="sp-btn sp-filter-btn settings-expander-btn" id="radar-sites-expand-btn" type="button" title="Radar Site Options" aria-expanded="false">
+                      <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+                        <path d="m9 6 6 6-6 6-1.41-1.41L12.17 12 7.59 7.41 9 6Z"/>
+                      </svg>
+                    </button>
+                  </div>
+                  <label class="toggle">
+                    <input type="checkbox" id="toggle-radar-sites">
+                    <span class="toggle-track"></span>
+                  </label>
+                </div>
+                <div class="settings-section-body">
+                  <div class="settings-section-inner">
+                    <div class="settings-subblock">
+                      <div class="sp-row">
+                        <span class="sp-row-label">Pill Radar Sites</span>
+                        <label class="toggle">
+                          <input type="checkbox" id="toggle-radar-sites-pill">
+                          <span class="toggle-track"></span>
+                        </label>
+                      </div>
+                      <div class="sp-row">
+                        <span class="sp-row-label">WSR-88D Color</span>
+                        <div class="sp-row-right">
+                          <label class="settings-color-control" id="radar-sites-wsr-color-wrap">
+                            <span class="settings-color-control-label">Color</span>
+                            <input type="color" id="radar-sites-wsr-color" value="#ffffff" aria-label="WSR-88D radar site color">
+                          </label>
+                        </div>
+                      </div>
+                      <div class="sp-row">
+                        <span class="sp-row-label">Terminal Color</span>
+                        <div class="sp-row-right">
+                          <label class="settings-color-control" id="radar-sites-terminal-color-wrap">
+                            <span class="settings-color-control-label">Color</span>
+                            <input type="color" id="radar-sites-terminal-color" value="#ffffff" aria-label="Terminal radar site color">
+                          </label>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                </div>
               </div>
             </div>
           </div>
@@ -4609,10 +5125,59 @@
                 </div>
                 <div class="settings-section-body">
                   <div class="settings-section-inner">
-                    <div class="sp-row settings-sub-row">
-                      <span class="sp-row-label">Customization</span>
-                      <div class="sp-row-right">
-                        <button class="sp-btn" id="warning-prefs-btn" type="button" aria-expanded="false">Customize</button>
+                    <div class="settings-subblock">
+                      <div class="sp-row alert-source-row">
+                        <span class="sp-row-label">Customization</span>
+                        <div class="sp-row-right">
+                          <button class="sp-btn" id="warning-prefs-btn" type="button" aria-expanded="false">Customize</button>
+                        </div>
+                      </div>
+                      <div class="sp-row alert-source-row" id="nws-api-source-row">
+                        <div class="settings-row-left">
+                          <span class="sp-row-label">NWS API</span>
+                        </div>
+                        <div class="sp-row-right">
+                          <span class="alert-source-status" id="nws-api-source-status"></span>
+                          <label class="toggle">
+                            <input type="checkbox" id="toggle-nws-api-alerts">
+                            <span class="toggle-track"></span>
+                          </label>
+                        </div>
+                      </div>
+                      <div id="nwws-settings-section">
+                        <div class="sp-row alert-source-row">
+                          <div class="settings-row-left">
+                            <button class="sp-btn sp-filter-btn settings-expander-btn" id="nwws-login-btn" type="button" title="NWWS Credentials" aria-expanded="false">
+                              <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+                                <path d="m9 6 6 6-6 6-1.41-1.41L12.17 12 7.59 7.41 9 6Z"/>
+                              </svg>
+                            </button>
+                            <span class="sp-row-label">NWWS</span>
+                          </div>
+                          <div class="sp-row-right">
+                            <span class="alert-source-status" id="nwws-credentials-status"></span>
+                            <label class="toggle">
+                              <input type="checkbox" id="toggle-nwws-alerts">
+                              <span class="toggle-track"></span>
+                            </label>
+                          </div>
+                        </div>
+                        <div class="nwws-inline-body">
+                          <div class="nwws-inline-inner">
+                            <label class="nwws-inline-field">
+                              <span class="spc-filter-label">Username</span>
+                              <input class="sp-text" id="nwws-username" type="text" placeholder="Enter NWWS username" autocomplete="username" spellcheck="false">
+                            </label>
+                            <label class="nwws-inline-field">
+                              <span class="spc-filter-label">Password</span>
+                              <input class="sp-text" id="nwws-password" type="password" placeholder="Enter NWWS password" autocomplete="current-password" spellcheck="false">
+                            </label>
+                            <div class="nwws-inline-actions">
+                              <button class="sp-btn" id="nwws-credentials-save" type="button">Save</button>
+                              <span class="sp-note" id="nwws-login-status"></span>
+                            </div>
+                          </div>
+                        </div>
                       </div>
                     </div>
                   </div>
@@ -4827,13 +5392,6 @@
                 </div>
               </div>
 
-              <div class="sp-row">
-                <span class="sp-row-label">NWWS</span>
-                <div class="sp-row-right" style="flex:1;justify-content:flex-end;gap:10px;">
-                  <span class="sp-note" id="nwws-credentials-status"></span>
-                  <button class="sp-btn" id="nwws-login-btn" type="button" aria-expanded="false">Login</button>
-                </div>
-              </div>
             </div>
           </div>
         </div>
@@ -4979,37 +5537,6 @@
       </div>
       <div id="warning-prefs-body">
         <div class="warning-settings-list" id="warning-settings-list"></div>
-      </div>
-    </section>
-  </div>
-
-  <div id="nwws-login-overlay" aria-hidden="true">
-    <section id="nwws-login-modal" aria-labelledby="nwws-login-title">
-      <div id="nwws-login-header">
-        <div class="warning-prefs-title-wrap">
-          <div class="warning-prefs-title" id="nwws-login-title">NWWS</div>
-        </div>
-        <button id="nwws-login-close" type="button" aria-label="Close NWWS login">
-          <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
-            <path d="M18.3 5.71 12 12l6.3 6.29-1.41 1.42L10.59 13.4 4.29 19.71 2.88 18.3 9.17 12 2.88 5.71 4.29 4.29l6.3 6.3 6.3-6.3 1.41 1.42Z"/>
-          </svg>
-        </button>
-      </div>
-      <div id="nwws-login-body">
-        <div class="nwws-login-form">
-          <div class="settings-subblock">
-            <span class="spc-filter-label">Username</span>
-            <input class="sp-text" id="nwws-username" type="text" placeholder="Enter NWWS username" autocomplete="username" spellcheck="false">
-          </div>
-          <div class="settings-subblock">
-            <span class="spc-filter-label">Password</span>
-            <input class="sp-text" id="nwws-password" type="password" placeholder="Enter NWWS password" autocomplete="current-password" spellcheck="false">
-          </div>
-          <div class="settings-action-row">
-            <button class="sp-btn" id="nwws-credentials-save" type="button">Login</button>
-            <span class="sp-note" id="nwws-login-status"></span>
-          </div>
-        </div>
       </div>
     </section>
   </div>
@@ -5193,6 +5720,7 @@
           <div id="tools-dropdown">
             <button id="recent-frames-btn" class="tools-item" type="button">Download Recent Frames</button>
             <button id="draw-btn" class="tools-item" type="button">Drawing</button>
+            <button id="measure-btn" class="tools-item" type="button">Measure</button>
             <button id="multi-pane-btn" class="tools-item" type="button">Multi Pane</button>
             <button id="my-location-btn" class="tools-item" type="button" title="Your location is never sent anywhere — stored on this device only">My Location</button>
           </div>
@@ -5329,6 +5857,15 @@
 
   </div>
 
+  <div id="measure-toolbar">
+    <span class="mt-label">Measure</span>
+    <div class="mt-sep"></div>
+    <span id="mt-readout">Hold and drag</span>
+    <span id="mt-hint">Release to clear</span>
+    <div class="mt-sep"></div>
+    <button id="mt-done">&times; Done</button>
+  </div>
+
 
 
   <!-- decode-toast removed: replaced by #load-bar-fill in control island -->
@@ -5397,6 +5934,30 @@
       </div>
 
       <div id="alert-details-body"></div>
+
+    </div>
+
+  </div>
+
+  <div id="report-details-overlay" aria-hidden="true">
+
+    <div id="report-details-modal">
+
+      <div id="report-details-header">
+
+        <div id="report-details-heading">
+
+          <div id="report-details-title">Report Details</div>
+
+          <div id="report-details-meta">Storm Report</div>
+
+        </div>
+
+        <button id="report-details-close" type="button" aria-label="Close report details">&times;</button>
+
+      </div>
+
+      <div id="report-details-body"></div>
 
     </div>
 

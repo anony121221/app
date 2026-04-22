@@ -446,8 +446,49 @@ const VIEWABLE_STATIONS = Object.freeze(
   Object.fromEntries(VIEWABLE_STATION_IDS.map(id => [id, STATIONS[id]])),
 );
 
+const RADAR_SITE_DEFAULT_WSR_COLOR = '#FFFFFF';
+const RADAR_SITE_DEFAULT_TERMINAL_COLOR = '#FFFFFF';
+const RADAR_SITE_LEGACY_TERMINAL_COLOR = '#6FD2FF';
+
+function _normalizeRadarSiteColor(color, fallback) {
+  return _normalizeSpcHex(color) || fallback;
+}
+
+function _parseHexColorRgb(color, fallback = '#FFFFFF') {
+  const normalized = _normalizeRadarSiteColor(color, fallback) || fallback;
+  const raw = normalized.slice(1);
+  return {
+    r: parseInt(raw.slice(0, 2), 16),
+    g: parseInt(raw.slice(2, 4), 16),
+    b: parseInt(raw.slice(4, 6), 16),
+  };
+}
+
+function _mixRgb(a, b, t = 0.5) {
+  const ratio = Math.max(0, Math.min(1, Number(t) || 0));
+  return {
+    r: Math.round(a.r + ((b.r - a.r) * ratio)),
+    g: Math.round(a.g + ((b.g - a.g) * ratio)),
+    b: Math.round(a.b + ((b.b - a.b) * ratio)),
+  };
+}
+
+function _rgbCss(rgb, alpha = 1) {
+  const r = Math.max(0, Math.min(255, Math.round(Number(rgb?.r) || 0)));
+  const g = Math.max(0, Math.min(255, Math.round(Number(rgb?.g) || 0)));
+  const b = Math.max(0, Math.min(255, Math.round(Number(rgb?.b) || 0)));
+  if (alpha >= 1) return `rgb(${r}, ${g}, ${b})`;
+  return `rgba(${r}, ${g}, ${b}, ${Math.max(0, Math.min(1, Number(alpha) || 0))})`;
+}
+
+function _radarSiteConfiguredColorForKind(kind) {
+  return String(kind || '').trim().toLowerCase() === 'tdwr'
+    ? radarSitesTerminalColor
+    : radarSitesWsrColor;
+}
+
 function stationDotColor(id) {
-  return '#ffffff';
+  return _radarSiteConfiguredColorForKind(stationKind(id));
 }
 
 function supportedL3FamiliesForStation(id) {
@@ -674,7 +715,16 @@ const FAMILY_PRODUCTS = {
   EET: { '0.5': ['EET'] },
 };
 
-const STATION_LAYER_IDS = ['stations-dot', 'stations-hover', 'stations-active', 'stations-label'];
+const STATION_DOT_LAYER_IDS = ['stations-dot', 'stations-hover', 'stations-active', 'stations-label'];
+const STATION_PILL_LAYER_IDS = ['stations-pill', 'stations-pill-hover', 'stations-pill-active'];
+const STATION_LAYER_IDS = [...STATION_DOT_LAYER_IDS, ...STATION_PILL_LAYER_IDS];
+const STATION_INTERACTIVE_LAYER_IDS = ['stations-dot', 'stations-pill'];
+const STATION_PILL_IMAGE_WSR = 'station-pill-wsr';
+const STATION_PILL_IMAGE_TDWR = 'station-pill-tdwr';
+const STATION_PILL_HOVER_IMAGE_WSR = 'station-pill-hover-wsr';
+const STATION_PILL_HOVER_IMAGE_TDWR = 'station-pill-hover-tdwr';
+const STATION_PILL_ACTIVE_IMAGE_WSR = 'station-pill-active-wsr';
+const STATION_PILL_ACTIVE_IMAGE_TDWR = 'station-pill-active-tdwr';
 
 const SPC_OUTLOOK_SOURCES = {
   DAY1: {
@@ -1084,6 +1134,14 @@ function _getNwwsBridgeCredentials() {
     return { username: null, password: null, configured: false };
   }
   return { username, password, configured: true };
+}
+
+function _shouldUseNwwsBridge() {
+  return nwwsEnabled === true && _getNwwsBridgeCredentials().configured && !nwwsFatalStopInFlight;
+}
+
+function _shouldUseNwsApiAlerts() {
+  return !_shouldUseNwwsBridge() && nwsApiEnabled === true;
 }
 // Reverse map: S3 product code ? { family, tilt } for L3 combo-key derivation
 const PRODUCT_TO_FAMILY_TILT = (() => {
@@ -4388,6 +4446,50 @@ function _stormDisplayTime(props) {
   return iso.replace('T', ' ');
 }
 
+function _formatReportDateTime(value) {
+  const rawNum = Number(value);
+  let ms = Number.isFinite(rawNum) && rawNum > 0 ? rawNum : NaN;
+  if (!Number.isFinite(ms)) {
+    const rawText = String(value || '').trim();
+    const parsed = rawText ? Date.parse(rawText) : NaN;
+    if (Number.isFinite(parsed)) ms = parsed;
+    else return rawText;
+  }
+  return new Date(ms).toLocaleString(undefined, {
+    month: 'numeric',
+    day: 'numeric',
+    year: 'numeric',
+    hour: 'numeric',
+    minute: '2-digit',
+  });
+}
+
+function _reportAgeText(value) {
+  const rawNum = Number(value);
+  let ms = Number.isFinite(rawNum) && rawNum > 0 ? rawNum : NaN;
+  if (!Number.isFinite(ms)) {
+    const parsed = Date.parse(String(value || '').trim());
+    if (Number.isFinite(parsed)) ms = parsed;
+  }
+  if (!Number.isFinite(ms)) return '';
+  const deltaMs = Math.max(0, Date.now() - ms);
+  const min = Math.floor(deltaMs / 60000);
+  if (min < 1) return 'now';
+  if (min < 60) return `${min} min ago`;
+  const hr = Math.floor(min / 60);
+  if (hr < 24) return `${hr} hour${hr === 1 ? '' : 's'} ago`;
+  const day = Math.floor(hr / 24);
+  return `${day} day${day === 1 ? '' : 's'} ago`;
+}
+
+function _reportCoordsText(coords) {
+  if (!Array.isArray(coords) || coords.length < 2) return '';
+  const lon = Number(coords[0]);
+  const lat = Number(coords[1]);
+  if (!Number.isFinite(lat) || !Number.isFinite(lon)) return '';
+  return `${lat.toFixed(4)}, ${lon.toFixed(4)}`;
+}
+
 function _stormEventTimeMs(props) {
   const candidates = [
     Number(props?.event_at_ms),
@@ -4634,6 +4736,8 @@ function _buildStormFeature(geom, props, sourceTag) {
   const markerLabel = _stormMagnitudeLabel(props, category, true) || _stormShortEventLabel(props, category);
   const reporter = String(props?.source || '').trim();
   const eventMs = _stormEventTimeMs(props);
+  const issued = _formatReportDateTime(props?.issued_at_ms || props?.issued_at || props?.generated_at_ms || props?.generated_at);
+  const office = String(props?.office || props?.OFFICE || '').trim();
 
   return {
     type: 'Feature',
@@ -4648,6 +4752,10 @@ function _buildStormFeature(geom, props, sourceTag) {
       _magnitude: magLabel,
       _remarks: remarks,
       _source: reporter ? `${sourceTag} · ${reporter}` : sourceTag,
+      _reporter: reporter,
+      _database: sourceTag,
+      _issued: issued,
+      _office: office,
       _markerLabel: markerLabel,
       _eventAtMs: Number.isFinite(eventMs) ? eventMs : '',
     },
@@ -5332,6 +5440,109 @@ function _stormReportPopupHtml(props) {
   `;
 }
 
+function _reportDetailsRowsHtml(rows = []) {
+  return rows
+    .filter(row => row && String(row.value ?? '').trim())
+    .map(row => {
+      const label = _escapeHtml(row.label || '');
+      const value = _escapeHtml(String(row.value ?? '').trim());
+      const cls = row.muted ? 'report-details-v muted' : row.linkish ? 'report-details-v report-details-linkish' : 'report-details-v';
+      return `<div class="report-details-k">${label}</div><div class="${cls}">${value}</div>`;
+    })
+    .join('');
+}
+
+function openReportDetailsModal(detail = {}) {
+  const overlay = document.getElementById('report-details-overlay');
+  const titleEl = document.getElementById('report-details-title');
+  const metaEl = document.getElementById('report-details-meta');
+  const bodyEl = document.getElementById('report-details-body');
+  if (!overlay || !titleEl || !metaEl || !bodyEl) return;
+  if (stormReportsPopup) { stormReportsPopup.remove(); stormReportsPopup = null; }
+  if (mpingPopup) { mpingPopup.remove(); mpingPopup = null; }
+  if (spotterLocationsPopup) { spotterLocationsPopup.remove(); spotterLocationsPopup = null; }
+
+  titleEl.textContent = String(detail.title || 'Report Details');
+  metaEl.textContent = String(detail.meta || 'Report');
+  const rowsHtml = _reportDetailsRowsHtml(detail.rows || []);
+  const remarks = String(detail.remarks || '').trim();
+  bodyEl.innerHTML = `
+    ${rowsHtml ? `<div class="report-details-grid">${rowsHtml}</div>` : ''}
+    ${remarks ? `<div class="report-details-block">
+      <div class="report-details-block-title">${_escapeHtml(detail.remarksTitle || 'Details')}</div>
+      <div class="report-details-block-text">${_escapeHtml(remarks)}</div>
+    </div>` : ''}
+  `;
+  overlay.classList.add('open');
+  overlay.setAttribute('aria-hidden', 'false');
+}
+
+function closeReportDetailsModal() {
+  const overlay = document.getElementById('report-details-overlay');
+  overlay?.classList.remove('open');
+  overlay?.setAttribute('aria-hidden', 'true');
+}
+
+function _openStormReportDetails(props = {}, coords = []) {
+  const eventTime = props?._when || _formatReportDateTime(props?._eventAtMs);
+  const age = _reportAgeText(props?._eventAtMs);
+  openReportDetailsModal({
+    title: props?._title || 'Storm Report',
+    meta: props?._categoryLabel || 'Storm Report',
+    rows: [
+      { label: 'Location', value: props?._location },
+      { label: 'Magnitude', value: props?._magnitude },
+      { label: 'Event Time', value: eventTime && age ? `${eventTime} (${age})` : eventTime },
+      { label: 'Issued', value: props?._issued },
+      { label: 'Source', value: props?._reporter || props?._source },
+      { label: 'Office', value: props?._office, linkish: true },
+      { label: 'Coordinates', value: _reportCoordsText(coords), linkish: true },
+      { label: 'Database', value: props?._database || props?._source },
+    ],
+    remarks: props?._remarks,
+    remarksTitle: 'Report Text',
+  });
+}
+
+function _openMpingReportDetails(props = {}, coords = []) {
+  const eventValue = props?.obtime || props?.observed_at || props?.time || props?.valid_time || '';
+  const eventTime = _formatReportDateTime(eventValue);
+  const age = _reportAgeText(eventValue);
+  const title = String(props?.description || props?.category || 'mPING Report').trim();
+  openReportDetailsModal({
+    title,
+    meta: 'mPING Report',
+    rows: [
+      { label: 'Category', value: props?.category },
+      { label: 'Event Time', value: eventTime && age ? `${eventTime} (${age})` : eventTime },
+      { label: 'Source', value: 'mPING' },
+      { label: 'Coordinates', value: _reportCoordsText(coords), linkish: true },
+    ],
+    remarks: title !== String(props?.category || '').trim() ? '' : String(props?.description || '').trim(),
+    remarksTitle: 'Report Text',
+  });
+}
+
+function _openSpotterLocationDetails(props = {}, coords = []) {
+  const updatedValue = props?.obtime_utc || props?.updated_at || props?.updated || props?.time || '';
+  const updated = _formatReportDateTime(updatedValue);
+  const age = _reportAgeText(updatedValue);
+  const name = String(props?.label || props?.name || props?.callsign || 'Spotter').trim();
+  openReportDetailsModal({
+    title: name,
+    meta: 'Spotter Network Position',
+    rows: [
+      { label: 'Status', value: props?.status },
+      { label: 'Updated', value: updated && age ? `${updated} (${age})` : updated },
+      { label: 'Callsign', value: props?.callsign || props?.spotter || props?.id },
+      { label: 'Coordinates', value: _reportCoordsText(coords), linkish: true },
+      { label: 'Source', value: 'Spotter Network' },
+    ],
+    remarks: props?.remarks || props?.description || props?.detail || '',
+    remarksTitle: 'Notes',
+  });
+}
+
 function initStormReportLayers() {
   if (stormReportsMapReady) return;
 
@@ -5381,16 +5592,7 @@ function initStormReportLayers() {
     if (!Array.isArray(e?.features) || !e.features.length) return;
     const f = e.features[0];
     const coords = Array.isArray(f?.geometry?.coordinates) ? [...f.geometry.coordinates] : [e.lngLat.lng, e.lngLat.lat];
-    if (stormReportsPopup) stormReportsPopup.remove();
-    stormReportsPopup = new mapboxgl.Popup({
-      closeButton: true,
-      closeOnClick: true,
-      className: 'storm-popup',
-      maxWidth: '300px',
-    })
-      .setLngLat(coords)
-      .setHTML(_stormReportPopupHtml(f?.properties || {}))
-      .addTo(map);
+    _openStormReportDetails(f?.properties || {}, coords);
   });
 
   stormReportsMapReady = true;
@@ -5449,25 +5651,7 @@ function initMpingLayers() {
     const f = e.features[0];
     const p = f.properties || {};
     const coords = f.geometry?.coordinates ? [...f.geometry.coordinates] : [e.lngLat.lng, e.lngLat.lat];
-    const time = p.obtime ? new Date(p.obtime).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }) : '—';
-    const accentMap = {
-      'Rain/Snow': '#4499ff', 'Hail': '#00e5ff', 'Flood': '#00cc44',
-      'Wind Damage': '#ffdd00', 'Storm Damage': '#ff8800', 'Tornado': '#ff3333',
-    };
-    const accent = accentMap[p.category] || '#888888';
-    const html = `<div class="storm-popup-card" style="--storm-accent:${accent}">
-      <div class="storm-popup-title">${p.description || p.category || 'mPING Report'}</div>
-      <div class="storm-popup-meta">mPING · ${p.category || ''}</div>
-      <div class="storm-popup-grid">
-        <span class="storm-popup-k">Time</span>
-        <span class="storm-popup-v">${time}</span>
-      </div>
-    </div>`;
-    if (mpingPopup) mpingPopup.remove();
-    mpingPopup = new mapboxgl.Popup({ closeButton: true, closeOnClick: true, className: 'storm-popup', maxWidth: '260px' })
-      .setLngLat(coords)
-      .setHTML(html)
-      .addTo(map);
+    _openMpingReportDetails(p, coords);
   });
 
   mpingMapReady = true;
@@ -5541,20 +5725,7 @@ function initSpotterLocationLayers() {
     const f = e.features[0];
     const p = f.properties || {};
     const coords = f.geometry?.coordinates ? [...f.geometry.coordinates] : [e.lngLat.lng, e.lngLat.lat];
-    const time = p.obtime_utc || '—';
-    const html = `<div class="storm-popup-card" style="--storm-accent:#ff2222">
-      <div class="storm-popup-title">${p.label || p.name || 'Spotter'}</div>
-      <div class="storm-popup-meta">Spotter Network · ${p.status || ''}</div>
-      <div class="storm-popup-grid">
-        <span class="storm-popup-k">Updated</span>
-        <span class="storm-popup-v">${time}</span>
-      </div>
-    </div>`;
-    if (spotterLocationsPopup) spotterLocationsPopup.remove();
-    spotterLocationsPopup = new mapboxgl.Popup({ closeButton: true, closeOnClick: true, className: 'storm-popup', maxWidth: '260px' })
-      .setLngLat(coords)
-      .setHTML(html)
-      .addTo(map);
+    _openSpotterLocationDetails(p, coords);
   });
 
   spotterLocationsMapReady = true;
@@ -7848,13 +8019,13 @@ function _stopNwwsBridgeForFatal(message) {
   nwwsLastStatusSig = '';
   nwwsLastAlertsGeneratedAt = '';
   nwwsHasPublishedSnapshot = false;
-  stopNwsApiPolling();
   invoke('stop_nwws_bridge')
     .catch(() => {})
     .finally(() => {
       const text = String(message || 'Fatal NWWS error');
       console.warn('[NWWS] Fatal bridge error — bridge stopped:', text);
       setNwwsCredentialsStatus(`NWWS bridge stopped: ${text}`, true);
+      applyAlertSourceMode();
     });
 }
 
@@ -8123,7 +8294,7 @@ async function refreshNwsApiAlerts(opts = {}) {
 function startNwsApiPolling() {
   nwsApiPollEnforceMode = false;
   if (!nwsApiPollProvider) nwsApiPollProvider = ALERT_SOURCE_NWS_API;
-  console.info(`[NWWS] Starting NWS API alert polling (${nwsApiPollProvider}) every ${NWS_API_POLL_MS} ms`);
+  console.info(`[NWS API] Starting alert polling (${nwsApiPollProvider}) every ${NWS_API_POLL_MS} ms`);
   if (nwsApiPollTimer == null) {
     nwsApiPollTimer = setInterval(() => {
       refreshNwsApiAlerts({
@@ -8147,12 +8318,36 @@ function stopNwsApiPolling() {
 }
 
 function applyAlertSourceMode() {
-  alertSourceMode = ALERT_SOURCE_NWWS;
-  stopNwsApiPolling();
-  _alertsClearProviderFeatures(ALERT_SOURCE_NWS_API);
+  const useNwws = _shouldUseNwwsBridge();
+  const useNwsApi = _shouldUseNwsApiAlerts();
+  alertSourceMode = useNwws ? ALERT_SOURCE_NWWS : ALERT_SOURCE_NWS_API;
   _resetWarningNotificationPriming();
   _scheduleWarningNotificationPriming();
-  ensureNwwsBridge().catch(() => {});
+  if (useNwws) {
+    stopNwsApiPolling();
+    _alertsClearProviderFeatures(ALERT_SOURCE_NWS_API);
+    ensureNwwsBridge().catch(() => {});
+  } else {
+    stopNwsApiPolling();
+    if (nwwsBridgeStartPromise || nwwsHasPublishedSnapshot || nwwsLastAlertsGeneratedAt) {
+      invoke('stop_nwws_bridge').catch(() => {});
+    }
+    nwwsBridgeStartPromise = null;
+    nwwsLastStatusSig = '';
+    nwwsLastAlertsGeneratedAt = '';
+    nwwsHasPublishedSnapshot = false;
+    _alertsClearProviderFeatures(ALERT_SOURCE_NWWS);
+    _alertsClearProviderFeatures(ALERT_SOURCE_NWS_BOOTSTRAP);
+    if (useNwsApi && alertsVisible) {
+      nwsApiPollProvider = ALERT_SOURCE_NWS_API;
+      startNwsApiPolling();
+    } else {
+      _alertsClearProviderFeatures(ALERT_SOURCE_NWS_API);
+    }
+    if (!nwwsEnabled) setNwwsCredentialsStatus('Disabled');
+    else if (!_getNwwsBridgeCredentials().configured) setNwwsCredentialsStatus('Missing credentials');
+  }
+  syncNwwsSettingsUi();
 }
 
 function initAlertLayers() {
@@ -9726,6 +9921,9 @@ const map = new mapboxgl.Map({
 // Disable Mapbox's built-in keyboard handler so arrow keys are used
 // exclusively for frame navigation (stepHistory) without panning the map.
 map.keyboard.disable();
+// Keep the radar view north-up; right-click drag should not rotate/pitch the map.
+map.dragRotate.disable();
+map.touchZoomRotate.disableRotation();
 
 const mapGridEl = document.getElementById('map-grid');
 const mapCellOneEl = document.getElementById('map-cell-1');
@@ -9998,9 +10196,20 @@ function _fmtLocalTime(ts) {
   return `${h}:${m}:${s} ${ampm}`;
 }
 
+function _parseFrameScanTimeMs(scanTime, key = '') {
+  const keyTs = parseKeyTimestampMs(String(key || ''));
+  const raw = String(scanTime || '').trim();
+  if (raw) {
+    const normalized = raw.replace(' ', 'T');
+    const withZone = /(?:Z|[+-]\d{2}:\d{2})$/i.test(normalized) ? normalized : `${normalized}Z`;
+    const parsed = Date.parse(withZone);
+    if (Number.isFinite(parsed)) return parsed;
+  }
+  return Number.isFinite(keyTs) ? keyTs : NaN;
+}
+
 function _frameTimeLabelFor(key, frame = null) {
-  const scanTimeMs = frame?.scan_time ? Date.parse(frame.scan_time) : NaN;
-  const ts = Number.isFinite(scanTimeMs) ? scanTimeMs : parseKeyTimestampMs(String(key || ''));
+  const ts = _parseFrameScanTimeMs(frame?.scan_time, key);
   return Number.isFinite(ts) ? _fmtLocalTime(ts) : '--:--:-- --';
 }
 
@@ -10257,7 +10466,12 @@ function _bindCameraLayerEventsOnMap(layerId, m) {
   m.on('click', layerId, e => {
     if (!Array.isArray(e?.features) || !e.features.length) return;
     e.preventDefault();
-    openCamera(_cameraPayloadFromFeature(e.features[0]));
+    const payload = _cameraPayloadFromFeature(e.features[0]);
+    if (_cameraShouldDeferProtectedResolve(payload, resolveUrls(payload))) {
+      setTimeout(() => openCamera(payload), 0);
+    } else {
+      openCamera(payload);
+    }
   });
 }
 
@@ -10388,7 +10602,7 @@ function _initOverlaysOnSecondaryMap(m) {
       if (!e.features?.length) return;
       const f = e.features[0];
       const coords = Array.isArray(f?.geometry?.coordinates) ? [...f.geometry.coordinates] : [e.lngLat.lng, e.lngLat.lat];
-      new mapboxgl.Popup({ closeButton: true, closeOnClick: true, className: 'storm-popup', maxWidth: '300px' }).setLngLat(coords).setHTML(_stormReportPopupHtml(f?.properties || {})).addTo(m);
+      _openStormReportDetails(f?.properties || {}, coords);
     });
   }
 
@@ -10433,9 +10647,7 @@ function _initOverlaysOnSecondaryMap(m) {
       if (!e.features?.length) return;
       const f = e.features[0]; const p = f.properties || {};
       const coords = f.geometry?.coordinates ? [...f.geometry.coordinates] : [e.lngLat.lng, e.lngLat.lat];
-      const time = p.obtime ? new Date(p.obtime).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }) : '—';
-      const accentMap = { 'Rain/Snow': '#4499ff', 'Hail': '#00e5ff', 'Flood': '#00cc44', 'Wind Damage': '#ffdd00', 'Storm Damage': '#ff8800', 'Tornado': '#ff3333' };
-      new mapboxgl.Popup({ closeButton: true, closeOnClick: true, className: 'storm-popup', maxWidth: '260px' }).setLngLat(coords).setHTML(`<div class="storm-popup-card" style="--storm-accent:${accentMap[p.category] || '#888888'}"><div class="storm-popup-title">${p.description || p.category || 'mPING Report'}</div><div class="storm-popup-meta">mPING · ${p.category || ''}</div><div class="storm-popup-grid"><span class="storm-popup-k">Time</span><span class="storm-popup-v">${time}</span></div></div>`).addTo(m);
+      _openMpingReportDetails(p, coords);
     });
   }
 
@@ -10449,7 +10661,7 @@ function _initOverlaysOnSecondaryMap(m) {
       if (!e.features?.length) return;
       const f = e.features[0]; const p = f.properties || {};
       const coords = f.geometry?.coordinates ? [...f.geometry.coordinates] : [e.lngLat.lng, e.lngLat.lat];
-      new mapboxgl.Popup({ closeButton: true, closeOnClick: true, className: 'storm-popup', maxWidth: '260px' }).setLngLat(coords).setHTML(`<div class="storm-popup-card" style="--storm-accent:#ff2222"><div class="storm-popup-title">${p.label || p.name || 'Spotter'}</div><div class="storm-popup-meta">Spotter Network · ${p.status || ''}</div><div class="storm-popup-grid"><span class="storm-popup-k">Updated</span><span class="storm-popup-v">${p.obtime_utc || '—'}</span></div></div>`).addTo(m);
+      _openSpotterLocationDetails(p, coords);
     });
   }
 
@@ -11014,6 +11226,8 @@ function _createSecondaryPane(id) {
     renderWorldCopies: false,
   });
   paneMap.keyboard.disable();
+  paneMap.dragRotate.disable();
+  paneMap.touchZoomRotate.disableRotation();
 
   const pane = {
     id,
@@ -11042,11 +11256,13 @@ function _createSecondaryPane(id) {
     _paneEnsureSweepLayer(pane);
     _initOverlaysOnSecondaryMap(paneMap);
     _initDrawLayersOnMap(paneMap);
+    _initMeasureLayersOnMap(paneMap);
     _bindDrawInteractionsOnMap(paneMap, id);
     _applyDrawInteractionStateOnMap(paneMap);
     updateDrawingsSource();
     updateDrawPreview(null);
     setDrawPreviewStyle();
+    updateMeasurementSources();
     bringCityLabelsAboveRadar(paneMap);
     // Sync current overlay data to this new pane
     if (spcMapReady && spcVisible) void refreshSpcOverlay(true);
@@ -11678,6 +11894,9 @@ function cancelSweep(promoteNewFrame = false) {
 
 // Finish freehand draw stroke if mouse released outside map canvas
 window.addEventListener('mouseup', () => {
+  if (measureMode && measureMouseDown) {
+    clearMeasurePreview();
+  }
   if (!drawMode || !drawMouseDown) return;
   drawMouseDown = false;
   drawActiveMap = null;
@@ -11708,6 +11927,94 @@ function setDrawPreviewStyle() {
   });
 }
 
+function _isMapToolModeActive() {
+  return drawMode || measureMode;
+}
+
+function _syncMapToolUi() {
+  document.getElementById('tools-btn')?.classList.toggle('active', _isMapToolModeActive());
+  document.getElementById('draw-btn')?.classList.toggle('active', drawMode);
+  document.getElementById('measure-btn')?.classList.toggle('active', measureMode);
+  const drawToolbar = document.getElementById('draw-toolbar');
+  if (drawToolbar) drawToolbar.style.display = drawMode ? 'flex' : 'none';
+  const measureToolbar = document.getElementById('measure-toolbar');
+  if (measureToolbar) measureToolbar.style.display = measureMode ? 'flex' : 'none';
+}
+
+function _geoPathDistanceKm(coords) {
+  if (!Array.isArray(coords) || coords.length < 2) return 0;
+  let total = 0;
+  for (let i = 1; i < coords.length; i += 1) {
+    const prev = coords[i - 1];
+    const next = coords[i];
+    if (!Array.isArray(prev) || !Array.isArray(next) || prev.length < 2 || next.length < 2) continue;
+    total += _geoDistanceKm(prev[0], prev[1], next[0], next[1]);
+  }
+  return total;
+}
+
+function _formatMeasureDistance(km) {
+  if (!Number.isFinite(km) || km <= 0) return '0 ft';
+  const feet = km * 3280.8398950131;
+  const miles = km * 0.62137119223733;
+  if (feet < 1000) return `${Math.round(feet).toLocaleString()} ft`;
+  if (miles < 10) return `${miles.toFixed(2)} mi`;
+  if (miles < 100) return `${miles.toFixed(1)} mi`;
+  return `${Math.round(miles).toLocaleString()} mi`;
+}
+
+function _measurePreviewCoords() {
+  const coords = measurePoints.map(pt => [pt[0], pt[1]]);
+  if (measurePreviewLngLat && measurePoints.length) coords.push([measurePreviewLngLat.lng, measurePreviewLngLat.lat]);
+  return coords;
+}
+
+function updateMeasurementSources() {
+  const previewCoords = measureMode ? _measurePreviewCoords() : [];
+  const previewDistance = previewCoords.length >= 2 ? _formatMeasureDistance(_geoPathDistanceKm(previewCoords)) : '';
+  const previewLabelFeatures = previewDistance
+    ? [{
+        type: 'Feature',
+        geometry: { type: 'Point', coordinates: previewCoords[previewCoords.length - 1] },
+        properties: { label: previewDistance },
+      }]
+    : [];
+  const previewData = {
+    type: 'Feature',
+    geometry: { type: 'LineString', coordinates: previewCoords.length >= 2 ? previewCoords : [] },
+    properties: {},
+  };
+  const previewLabelData = { type: 'FeatureCollection', features: previewLabelFeatures };
+  _overlayMaps().forEach(m => {
+    m.getSource('measure-preview')?.setData(previewData);
+    m.getSource('measurement-preview-labels')?.setData(previewLabelData);
+  });
+  const readoutEl = document.getElementById('mt-readout');
+  const hintEl = document.getElementById('mt-hint');
+  if (readoutEl) {
+    if (previewDistance) readoutEl.textContent = previewDistance;
+    else readoutEl.textContent = 'Hold and drag';
+  }
+  if (hintEl) {
+    hintEl.textContent = measureMouseDown ? 'Release to clear' : 'Hold and drag to measure';
+  }
+}
+
+function setMeasurePreview(lngLat) {
+  measurePreviewLngLat = lngLat
+    ? { lng: Number(lngLat.lng), lat: Number(lngLat.lat) }
+    : null;
+  updateMeasurementSources();
+}
+
+function clearMeasurePreview() {
+  measureMouseDown = false;
+  measureActiveMap = null;
+  measurePoints = [];
+  measurePreviewLngLat = null;
+  updateMeasurementSources();
+}
+
 function finishDrawLine() {
   if (drawPoints.length < 2) { drawPoints = []; return; }
   drawFeatures.push({
@@ -11731,13 +12038,13 @@ function clearAllDrawings() {
 }
 
 function startDrawMode() {
+  if (measureMode) exitMeasureMode();
   drawMode = true;
   drawMouseDown = false;
   drawActiveMap = null;
   drawLastPx = null;
   drawPoints = [];
-  document.getElementById('draw-toolbar').style.display = 'flex';
-  document.getElementById('tools-btn')?.classList.add('active');
+  _syncMapToolUi();
   _overlayMaps().forEach(_applyDrawInteractionStateOnMap);
   setDrawPreviewStyle();
   closeToolsMenu();
@@ -11751,9 +12058,26 @@ function exitDrawMode() {
   drawPoints = [];
   updateDrawPreview(null);
   drawMode = false;
-  document.getElementById('draw-toolbar').style.display = 'none';
-  document.getElementById('tools-btn')?.classList.remove('active');
+  _syncMapToolUi();
   _overlayMaps().forEach(_applyDrawInteractionStateOnMap);
+}
+
+function startMeasureMode() {
+  if (drawMode) exitDrawMode();
+  measureMode = true;
+  clearMeasurePreview();
+  _syncMapToolUi();
+  _overlayMaps().forEach(_applyDrawInteractionStateOnMap);
+  closeToolsMenu();
+  updateMeasurementSources();
+}
+
+function exitMeasureMode() {
+  clearMeasurePreview();
+  measureMode = false;
+  _syncMapToolUi();
+  _overlayMaps().forEach(_applyDrawInteractionStateOnMap);
+  updateMeasurementSources();
 }
 
 let radarLayer = null;      // always points to the currently-active pool layer
@@ -11856,12 +12180,108 @@ function bringCityLabelsAboveRadar(targetMap = map) {
     try { targetMap.moveLayer(id); } catch (_) {}
   }
   // Keep radar IDs above city labels so they stay readable.
+  try { targetMap.moveLayer('stations-pill'); } catch (_) {}
+  try { targetMap.moveLayer('stations-pill-hover'); } catch (_) {}
+  try { targetMap.moveLayer('stations-pill-active'); } catch (_) {}
   try { targetMap.moveLayer('stations-label'); } catch (_) {}
 }
 
 const _stationInteractionMaps = new WeakSet();
 const _drawInteractionMaps = new WeakSet();
+const _mapToolDomBindings = new WeakSet();
 let drawActiveMap = null;
+
+function _buildStationPillPath(ctx, x, y, width, height, radius) {
+  const r = Math.max(0, Math.min(radius, Math.min(width, height) / 2));
+  ctx.beginPath();
+  ctx.moveTo(x + r, y);
+  ctx.lineTo(x + width - r, y);
+  ctx.arcTo(x + width, y, x + width, y + r, r);
+  ctx.lineTo(x + width, y + height - r);
+  ctx.arcTo(x + width, y + height, x + width - r, y + height, r);
+  ctx.lineTo(x + r, y + height);
+  ctx.arcTo(x, y + height, x, y + height - r, r);
+  ctx.lineTo(x, y + r);
+  ctx.arcTo(x, y, x + r, y, r);
+  ctx.closePath();
+}
+
+function _stationPillIconExpr(normal = true) {
+  const wsr = normal ? STATION_PILL_IMAGE_WSR : STATION_PILL_ACTIVE_IMAGE_WSR;
+  const tdwr = normal ? STATION_PILL_IMAGE_TDWR : STATION_PILL_ACTIVE_IMAGE_TDWR;
+  return ['case', ['==', ['get', 'stationKind'], 'tdwr'], tdwr, wsr];
+}
+
+function _stationPillHoverIconExpr() {
+  return ['case', ['==', ['get', 'stationKind'], 'tdwr'], STATION_PILL_HOVER_IMAGE_TDWR, STATION_PILL_HOVER_IMAGE_WSR];
+}
+
+function _createStationPillImage(accentHex, opts = {}) {
+  const active = opts?.active === true;
+  const hover = opts?.hover === true;
+  const width = 88;
+  const height = 34;
+  const canvas = document.createElement('canvas');
+  canvas.width = width;
+  canvas.height = height;
+  const ctx = canvas.getContext('2d');
+  if (!ctx) return null;
+  ctx.clearRect(0, 0, width, height);
+  const accent = _parseHexColorRgb(accentHex, '#FFFFFF');
+  const white = { r: 255, g: 255, b: 255 };
+  const pillBase = { r: 30, g: 58, b: 95 };
+  const fill = _mixRgb(pillBase, accent, active ? 0.22 : hover ? 0.15 : 0.1);
+  const border = _mixRgb(white, accent, active ? 0.18 : hover ? 0.1 : 0.04);
+  const innerLine = _mixRgb(white, fill, active ? 0.5 : hover ? 0.42 : 0.34);
+  const topSheen = _mixRgb(white, fill, 0.82);
+
+  _buildStationPillPath(ctx, 2.5, 2.5, width - 5, height - 5, 15.5);
+  ctx.fillStyle = _rgbCss(fill);
+  ctx.fill();
+
+  _buildStationPillPath(ctx, 2.5, 2.5, width - 5, height - 5, 15.5);
+  ctx.lineWidth = active ? 1.9 : hover ? 1.6 : 1.35;
+  ctx.strokeStyle = _rgbCss(border, 0.98);
+  ctx.stroke();
+
+  _buildStationPillPath(ctx, 4.1, 4.1, width - 8.2, height - 8.2, 13.5);
+  ctx.lineWidth = 0.8;
+  ctx.strokeStyle = _rgbCss(innerLine, active ? 0.24 : hover ? 0.2 : 0.16);
+  ctx.stroke();
+
+  ctx.beginPath();
+  ctx.moveTo(11, 6.6);
+  ctx.lineTo(width - 11, 6.6);
+  ctx.lineWidth = 0.9;
+  ctx.strokeStyle = _rgbCss(topSheen, active ? 0.24 : hover ? 0.18 : 0.12);
+  ctx.stroke();
+
+  return {
+    image: ctx.getImageData(0, 0, width, height),
+    options: {
+      pixelRatio: 2,
+      stretchX: [[20, 68]],
+      stretchY: [[13, 20]],
+      content: [17, 5, 71, 28],
+    },
+  };
+}
+
+function _setOrUpdateMapImage(targetMap, imageId, spec) {
+  if (!targetMap || !spec?.image) return;
+  if (targetMap.hasImage(imageId)) targetMap.updateImage(imageId, spec.image);
+  else targetMap.addImage(imageId, spec.image, spec.options);
+}
+
+function _ensureStationPillImages(targetMap) {
+  if (!targetMap) return;
+  _setOrUpdateMapImage(targetMap, STATION_PILL_IMAGE_WSR, _createStationPillImage(radarSitesWsrColor));
+  _setOrUpdateMapImage(targetMap, STATION_PILL_IMAGE_TDWR, _createStationPillImage(radarSitesTerminalColor));
+  _setOrUpdateMapImage(targetMap, STATION_PILL_HOVER_IMAGE_WSR, _createStationPillImage(radarSitesWsrColor, { hover: true }));
+  _setOrUpdateMapImage(targetMap, STATION_PILL_HOVER_IMAGE_TDWR, _createStationPillImage(radarSitesTerminalColor, { hover: true }));
+  _setOrUpdateMapImage(targetMap, STATION_PILL_ACTIVE_IMAGE_WSR, _createStationPillImage(radarSitesWsrColor, { active: true }));
+  _setOrUpdateMapImage(targetMap, STATION_PILL_ACTIVE_IMAGE_TDWR, _createStationPillImage(radarSitesTerminalColor, { active: true }));
+}
 
 function _stationFeatureCollection() {
   return {
@@ -11881,35 +12301,75 @@ function _stationFeatureCollection() {
   };
 }
 
+function _setStationsHoverFilterOnMap(targetMap, stationId = '') {
+  if (!targetMap) return;
+  const nextId = (stationId && VIEWABLE_STATIONS[stationId]) ? stationId : '';
+  if (targetMap.getLayer('stations-hover')) {
+    targetMap.setFilter('stations-hover', ['==', 'id', radarSitePillMode ? '' : nextId]);
+  }
+  if (targetMap.getLayer('stations-pill-hover')) {
+    targetMap.setFilter('stations-pill-hover', ['==', 'id', radarSitePillMode ? nextId : '']);
+  }
+}
+
+function _setStationsActiveFilterOnMap(targetMap, stationId = '') {
+  if (!targetMap) return;
+  const nextId = (stationId && VIEWABLE_STATIONS[stationId]) ? stationId : '';
+  if (targetMap.getLayer('stations-active')) {
+    targetMap.setFilter('stations-active', ['==', 'id', radarSitePillMode ? '' : nextId]);
+  }
+  if (targetMap.getLayer('stations-pill-active')) {
+    targetMap.setFilter('stations-pill-active', ['==', 'id', radarSitePillMode ? nextId : '']);
+  }
+}
+
 function _syncStationLayerVisibilityOnMap(targetMap, visible = radarSitesVisible) {
   if (!targetMap) return;
-  const vis = visible ? 'visible' : 'none';
-  STATION_LAYER_IDS.forEach(id => {
-    if (targetMap.getLayer(id)) targetMap.setLayoutProperty(id, 'visibility', vis);
+  const showDots = visible && !radarSitePillMode;
+  const showPills = visible && radarSitePillMode;
+  STATION_DOT_LAYER_IDS.forEach(id => {
+    if (targetMap.getLayer(id)) targetMap.setLayoutProperty(id, 'visibility', showDots ? 'visible' : 'none');
   });
-  if (visible && targetMap.getLayer('stations-label')) {
+  STATION_PILL_LAYER_IDS.forEach(id => {
+    if (targetMap.getLayer(id)) targetMap.setLayoutProperty(id, 'visibility', showPills ? 'visible' : 'none');
+  });
+  if (showDots && targetMap.getLayer('stations-label')) {
     targetMap.setFilter('stations-label', ['has', 'name']);
+  } else if (targetMap.getLayer('stations-label')) {
+    targetMap.setFilter('stations-label', ['==', 'id', '']);
   }
   if (!visible) {
-    if (targetMap.getLayer('stations-hover')) targetMap.setFilter('stations-hover', ['==', 'id', '']);
-    if (targetMap.getLayer('stations-active')) targetMap.setFilter('stations-active', ['==', 'id', '']);
+    _setStationsHoverFilterOnMap(targetMap, '');
+    _setStationsActiveFilterOnMap(targetMap, '');
   }
 }
 
 function _setStationsActiveFilter(stationId = '') {
-  const nextId = (stationId && VIEWABLE_STATIONS[stationId]) ? stationId : '';
   _overlayMaps().forEach(m => {
-    if (m.getLayer('stations-active')) m.setFilter('stations-active', ['==', 'id', nextId]);
+    _setStationsActiveFilterOnMap(m, stationId);
   });
 }
 
 function _clearStationsHoverFilter() {
   _overlayMaps().forEach(m => {
-    if (m.getLayer('stations-hover')) m.setFilter('stations-hover', ['==', 'id', '']);
+    _setStationsHoverFilterOnMap(m, '');
   });
 }
 
+function _refreshStationSourceData() {
+  const data = _stationFeatureCollection();
+  _overlayMaps().forEach(m => {
+    const src = m.getSource('stations');
+    if (src) src.setData(data);
+    _ensureStationPillImages(m);
+    _syncStationLayerVisibilityOnMap(m, radarSitesVisible);
+    bringCityLabelsAboveRadar(m);
+  });
+  if (radarSitesVisible) _setStationsActiveFilter(canonicalStationId(activeStation));
+}
+
 function _initStationsOnMap(targetMap, paneId = 1) {
+  _ensureStationPillImages(targetMap);
   if (!targetMap.getSource('stations')) {
     targetMap.addSource('stations', {
       type: 'geojson',
@@ -11962,6 +12422,86 @@ function _initStationsOnMap(targetMap, paneId = 1) {
       },
     });
   }
+  if (!targetMap.getLayer('stations-pill')) {
+    targetMap.addLayer({
+      id: 'stations-pill',
+      type: 'symbol',
+      source: 'stations',
+      layout: {
+        'icon-image': _stationPillIconExpr(true),
+        'icon-size': ['interpolate', ['linear'], ['zoom'], 3, 0.68, 8, 0.79, 12, 0.9],
+        'icon-text-fit': 'both',
+        'icon-text-fit-padding': [3, 10, 3, 10],
+        'icon-allow-overlap': true,
+        'icon-ignore-placement': true,
+        'text-field': ['get', 'label'],
+        'text-size': 13,
+        'text-font': ['Open Sans Bold', 'Arial Unicode MS Regular'],
+        'text-anchor': 'center',
+        'text-allow-overlap': true,
+        'text-ignore-placement': true,
+      },
+      paint: {
+        'text-color': '#ffffff',
+        'text-halo-color': '#000000',
+        'text-halo-width': 1.25,
+      },
+    });
+  }
+  if (!targetMap.getLayer('stations-pill-hover')) {
+    targetMap.addLayer({
+      id: 'stations-pill-hover',
+      type: 'symbol',
+      source: 'stations',
+      filter: ['==', 'id', ''],
+      layout: {
+        'icon-image': _stationPillHoverIconExpr(),
+        'icon-size': ['interpolate', ['linear'], ['zoom'], 3, 0.71, 8, 0.83, 12, 0.95],
+        'icon-text-fit': 'both',
+        'icon-text-fit-padding': [3, 10, 3, 10],
+        'icon-allow-overlap': true,
+        'icon-ignore-placement': true,
+        'text-field': ['get', 'label'],
+        'text-size': 13,
+        'text-font': ['Open Sans Bold', 'Arial Unicode MS Regular'],
+        'text-anchor': 'center',
+        'text-allow-overlap': true,
+        'text-ignore-placement': true,
+      },
+      paint: {
+        'text-color': '#ffffff',
+        'text-halo-color': '#000000',
+        'text-halo-width': 1.25,
+      },
+    });
+  }
+  if (!targetMap.getLayer('stations-pill-active')) {
+    targetMap.addLayer({
+      id: 'stations-pill-active',
+      type: 'symbol',
+      source: 'stations',
+      filter: ['==', 'id', ''],
+      layout: {
+        'icon-image': _stationPillIconExpr(false),
+        'icon-size': ['interpolate', ['linear'], ['zoom'], 3, 0.72, 8, 0.84, 12, 0.97],
+        'icon-text-fit': 'both',
+        'icon-text-fit-padding': [3, 10, 3, 10],
+        'icon-allow-overlap': true,
+        'icon-ignore-placement': true,
+        'text-field': ['get', 'label'],
+        'text-size': 13,
+        'text-font': ['Open Sans Bold', 'Arial Unicode MS Regular'],
+        'text-anchor': 'center',
+        'text-allow-overlap': true,
+        'text-ignore-placement': true,
+      },
+      paint: {
+        'text-color': '#ffffff',
+        'text-halo-color': '#000000',
+        'text-halo-width': 1.25,
+      },
+    });
+  }
   if (!targetMap.getLayer('stations-label')) {
     targetMap.addLayer({
       id: 'stations-label',
@@ -11975,40 +12515,46 @@ function _initStationsOnMap(targetMap, paneId = 1) {
         'text-allow-overlap': true,
         'text-ignore-placement': true,
       },
-      paint: { 'text-color': '#ffffff', 'text-halo-color': '#000000', 'text-halo-width': 1.35 },
+      paint: {
+        'text-color': ['coalesce', ['get', 'dotColor'], '#ffffff'],
+        'text-halo-color': '#000000',
+        'text-halo-width': 1.35,
+      },
     });
   }
   _syncStationLayerVisibilityOnMap(targetMap, radarSitesVisible);
-  if (radarSitesVisible && targetMap.getLayer('stations-active')) {
-    const selectedStation = canonicalStationId(activeStation);
-    targetMap.setFilter('stations-active', ['==', 'id', (selectedStation && VIEWABLE_STATIONS[selectedStation]) ? selectedStation : '']);
-  }
+  if (radarSitesVisible) _setStationsActiveFilterOnMap(targetMap, canonicalStationId(activeStation));
   if (_stationInteractionMaps.has(targetMap)) return;
   _stationInteractionMaps.add(targetMap);
   let hoverId = '';
-  targetMap.on('mousemove', 'stations-dot', e => {
-    if (drawMode) {
+  const handleStationMove = e => {
+    if (_isMapToolModeActive()) {
       hoverId = '';
-      if (targetMap.getLayer('stations-hover')) targetMap.setFilter('stations-hover', ['==', 'id', '']);
+      _setStationsHoverFilterOnMap(targetMap, '');
       targetMap.getCanvas().style.cursor = 'crosshair';
       return;
     }
     const id = e.features?.[0]?.properties?.id || '';
     if (!id || id === hoverId) return;
     hoverId = id;
-    if (targetMap.getLayer('stations-hover')) targetMap.setFilter('stations-hover', ['==', 'id', id]);
+    _setStationsHoverFilterOnMap(targetMap, id);
     targetMap.getCanvas().style.cursor = 'pointer';
-  });
-  targetMap.on('mouseleave', 'stations-dot', () => {
+  };
+  const handleStationLeave = () => {
     hoverId = '';
-    if (targetMap.getLayer('stations-hover')) targetMap.setFilter('stations-hover', ['==', 'id', '']);
-    targetMap.getCanvas().style.cursor = drawMode ? 'crosshair' : '';
-  });
-  targetMap.on('click', 'stations-dot', e => {
-    if (drawMode) return;
+    _setStationsHoverFilterOnMap(targetMap, '');
+    targetMap.getCanvas().style.cursor = _isMapToolModeActive() ? 'crosshair' : '';
+  };
+  const handleStationClick = e => {
+    if (_isMapToolModeActive()) return;
     if (paneId > 1) _setActivePane(paneId);
     const stationId = e.features?.[0]?.properties?.id;
     if (stationId) selectStation(stationId);
+  };
+  STATION_INTERACTIVE_LAYER_IDS.forEach(layerId => {
+    targetMap.on('mousemove', layerId, handleStationMove);
+    targetMap.on('mouseleave', layerId, handleStationLeave);
+    targetMap.on('click', layerId, handleStationClick);
   });
 }
 
@@ -12050,10 +12596,61 @@ function _initDrawLayersOnMap(targetMap) {
   }
 }
 
+function _initMeasureLayersOnMap(targetMap) {
+  const lineBeforeId = targetMap.getLayer('stations-dot') ? 'stations-dot' : undefined;
+  const labelBeforeId = targetMap.getLayer('stations-label') ? 'stations-label' : lineBeforeId;
+  if (!targetMap.getSource('measure-preview')) {
+    targetMap.addSource('measure-preview', {
+      type: 'geojson',
+      data: { type: 'Feature', geometry: { type: 'LineString', coordinates: [] }, properties: {} },
+    });
+  }
+  if (!targetMap.getLayer('measure-preview')) {
+    targetMap.addLayer({
+      id: 'measure-preview',
+      type: 'line',
+      source: 'measure-preview',
+      layout: { 'line-cap': 'round', 'line-join': 'round' },
+      paint: {
+        'line-color': '#ffffff',
+        'line-width': ['interpolate', ['linear'], ['zoom'], 3, 1.8, 8, 2.4, 12, 3.1],
+        'line-opacity': 0.98,
+      },
+    }, lineBeforeId);
+  }
+  if (!targetMap.getSource('measurement-preview-labels')) {
+    targetMap.addSource('measurement-preview-labels', {
+      type: 'geojson',
+      data: { type: 'FeatureCollection', features: [] },
+    });
+  }
+  if (!targetMap.getLayer('measurement-preview-labels')) {
+    targetMap.addLayer({
+      id: 'measurement-preview-labels',
+      type: 'symbol',
+      source: 'measurement-preview-labels',
+      layout: {
+        'text-field': ['coalesce', ['get', 'label'], ''],
+        'text-font': ['DIN Offc Pro Medium', 'Arial Unicode MS Bold'],
+        'text-size': ['interpolate', ['linear'], ['zoom'], 3, 9, 8, 10.5, 12, 12],
+        'text-anchor': 'top',
+        'text-offset': [0, 0.95],
+        'text-allow-overlap': true,
+        'text-ignore-placement': true,
+      },
+      paint: {
+        'text-color': '#ffe082',
+        'text-halo-color': 'rgba(0,0,0,0.95)',
+        'text-halo-width': 1.35,
+      },
+    }, labelBeforeId);
+  }
+}
+
 function _applyDrawInteractionStateOnMap(targetMap) {
   if (!targetMap) return;
-  targetMap.getCanvas().style.cursor = drawMode ? 'crosshair' : '';
-  if (drawMode) {
+  targetMap.getCanvas().style.cursor = _isMapToolModeActive() ? 'crosshair' : '';
+  if (_isMapToolModeActive()) {
     targetMap.dragPan.disable();
     targetMap.doubleClickZoom.disable();
   } else {
@@ -12066,6 +12663,15 @@ function _bindDrawInteractionsOnMap(targetMap, paneId = 1) {
   if (!targetMap || _drawInteractionMaps.has(targetMap)) return;
   _drawInteractionMaps.add(targetMap);
   targetMap.on('mousedown', e => {
+    if (measureMode) {
+      if (paneId > 1) _setActivePane(paneId);
+      measureMouseDown = true;
+      measureActiveMap = targetMap;
+      measurePoints = [[e.lngLat.lng, e.lngLat.lat]];
+      measurePreviewLngLat = null;
+      updateMeasurementSources();
+      return;
+    }
     if (!drawMode) return;
     if (paneId > 1) _setActivePane(paneId);
     drawMouseDown = true;
@@ -12075,6 +12681,15 @@ function _bindDrawInteractionsOnMap(targetMap, paneId = 1) {
     updateDrawPreview(null);
   });
   targetMap.on('mousemove', e => {
+    if (measureMode) {
+      if (!measureMouseDown || measureActiveMap !== targetMap) {
+        if (measurePreviewLngLat) setMeasurePreview(null);
+      } else if (paneId > 1 && activePaneId !== paneId) {
+        setMeasurePreview(null);
+      } else if (measurePoints.length > 0) {
+        setMeasurePreview(e.lngLat);
+      }
+    }
     if (!drawMode || !drawMouseDown || drawActiveMap !== targetMap || !drawLastPx) return;
     const dx = e.point.x - drawLastPx[0];
     const dy = e.point.y - drawLastPx[1];
@@ -12083,13 +12698,39 @@ function _bindDrawInteractionsOnMap(targetMap, paneId = 1) {
     drawPoints.push([e.lngLat.lng, e.lngLat.lat]);
     updateDrawPreview(null);
   });
-  targetMap.on('mouseup', () => {
+  targetMap.on('mouseup', e => {
+    if (measureMode && measureMouseDown && measureActiveMap === targetMap) {
+      if (e?.originalEvent) {
+        e.originalEvent.preventDefault?.();
+        e.originalEvent.stopPropagation?.();
+        if (typeof e.originalEvent.stopImmediatePropagation === 'function') e.originalEvent.stopImmediatePropagation();
+      }
+      clearMeasurePreview();
+      return;
+    }
     if (!drawMode || !drawMouseDown || drawActiveMap !== targetMap) return;
     drawMouseDown = false;
     drawActiveMap = null;
     drawLastPx = null;
     if (drawPoints.length >= 2) finishDrawLine();
     else { drawPoints = []; updateDrawPreview(null); }
+  });
+  const canvasContainer = targetMap.getCanvasContainer();
+  if (!canvasContainer || _mapToolDomBindings.has(targetMap)) return;
+  _mapToolDomBindings.add(targetMap);
+  canvasContainer.addEventListener('click', ev => {
+    if (!measureMode) return;
+    ev.preventDefault();
+    ev.stopPropagation();
+    if (typeof ev.stopImmediatePropagation === 'function') ev.stopImmediatePropagation();
+  }, true);
+  canvasContainer.addEventListener('mousemove', () => {
+    if (_isMapToolModeActive()) targetMap.getCanvas().style.cursor = 'crosshair';
+  });
+  canvasContainer.addEventListener('mouseleave', () => {
+    if (measureMode && measureMouseDown && measureActiveMap === targetMap) clearMeasurePreview();
+    else if (measureMode && measurePreviewLngLat) setMeasurePreview(null);
+    if (_isMapToolModeActive()) targetMap.getCanvas().style.cursor = 'crosshair';
   });
 }
 
@@ -12224,6 +12865,7 @@ map.on('load', () => {
 
   // -- Drawing sources / layers ----------------------------------------
   _initDrawLayersOnMap(map);
+  _initMeasureLayersOnMap(map);
 
   initSpcOverlayLayers();
   initMesoOverlayLayers();
@@ -12239,6 +12881,7 @@ map.on('load', () => {
   _scheduleDeferredStartupSync();
   _bindDrawInteractionsOnMap(map, 1);
   _applyDrawInteractionStateOnMap(map);
+  updateMeasurementSources();
 });
 
 // -- State ---------------------------------------------------------------------
@@ -12259,6 +12902,9 @@ let spcRenderedKey = '';
 let mesoVisible = false;
 let mesoFilterSelection = { precip: true, convective: true, winter: true };
 let radarSitesVisible = true;
+let radarSitePillMode = false;
+let radarSitesWsrColor = RADAR_SITE_DEFAULT_WSR_COLOR;
+let radarSitesTerminalColor = RADAR_SITE_DEFAULT_TERMINAL_COLOR;
 let mesoMapReady = false;
 let mesoLoadSeq = 0;
 let mesoRenderedKey = '';
@@ -12314,7 +12960,9 @@ let alertsSeeded = false;
 let overlayFlashNowMs = Date.now();
 let overlayFlashBlackPhase = false;
 let overlayFlashTimer = null;
-let alertSourceMode = ALERT_SOURCE_NWWS;
+let alertSourceMode = ALERT_SOURCE_NWS_API;
+let nwsApiEnabled = true;
+let nwwsEnabled = true;
 let nwsApiPollTimer = null;
 let nwsApiPollEnforceMode = false;
 let nwsApiPollProvider = ALERT_SOURCE_NWS_API;
@@ -12438,6 +13086,11 @@ let drawThickness = 2;
 let drawStyle = 'solid';
 let drawPoints = [];    // current in-progress freehand line [[lng, lat], ...]
 let drawFeatures = [];  // all completed line features
+let measureMode = false;
+let measureMouseDown = false;
+let measurePoints = []; // current in-progress measure line [[lng, lat], ...]
+let measurePreviewLngLat = null;
+let measureActiveMap = null;
 
 // S3 key string ? decoded frame data (universal cache for all combos + history)
 const frameCache = new Map();
@@ -13790,8 +14443,8 @@ function showFrame(s3key, opts = {}) {
 // Update UI info (time/elev/code/label) for a given key+data without re-rendering.
 // Called both from showFrame() and from completeSweep() after the sweep finishes.
 function showFrameMeta(s3key, data) {
-  const t = data.scan_time ? new Date(data.scan_time) : null;
-  const timeStr = t ? _fmtLocalTime(t.getTime()) : '--:--:-- --';
+  const scanTimeMs = _parseFrameScanTimeMs(data?.scan_time, s3key);
+  const timeStr = Number.isFinite(scanTimeMs) ? _fmtLocalTime(scanTimeMs) : '--:--:-- --';
   _setPaneFrameTime(1, s3key, data);
   document.getElementById('info-time').textContent = timeStr;
   document.getElementById('info-elev').textContent =
@@ -14421,6 +15074,7 @@ const citySearchBtn = document.getElementById('city-search-btn');
 const citySearchInput = document.getElementById('city-search-input');
 const citySearchResults = document.getElementById('city-search-results');
 const CITY_SEARCH_MIN_CHARS = 2;
+const CITY_SEARCH_MAX_STATION_RESULTS = 8;
 let citySearchTimer = null;
 let citySearchReqSeq = 0;
 let citySearchOpen = false;
@@ -14454,6 +15108,42 @@ function _setCitySearchOpen(open) {
   _clearCitySearchResults();
 }
 
+function _stationSearchResults(query) {
+  const raw = String(query || '').trim();
+  const q = raw.toUpperCase().replace(/[^A-Z0-9]/g, '');
+  if (q.length < CITY_SEARCH_MIN_CHARS) return [];
+  const scored = [];
+  for (const [stationId, station] of Object.entries(VIEWABLE_STATIONS)) {
+    const label = displayStationId(stationId);
+    const shortId = stationId.startsWith('K') && stationId.length === 4 ? stationId.slice(1) : stationId;
+    const stationName = String(station?.[2] || '');
+    const nameNorm = stationName.toUpperCase().replace(/[^A-Z0-9]/g, '');
+    const labelNorm = String(label || stationId).toUpperCase().replace(/[^A-Z0-9]/g, '');
+    let score = Infinity;
+    if (q === stationId || q === labelNorm) score = 0;
+    else if (q === shortId) score = 1;
+    else if (stationId.startsWith(q) || labelNorm.startsWith(q)) score = 2;
+    else if (shortId.startsWith(q)) score = 3;
+    else if (nameNorm.includes(q)) score = 4;
+    if (!Number.isFinite(score)) continue;
+    scored.push({ stationId, station, label, score });
+  }
+  scored.sort((a, b) => a.score - b.score || String(a.stationId).localeCompare(String(b.stationId)));
+  return scored.slice(0, CITY_SEARCH_MAX_STATION_RESULTS).map(({ stationId, station, label }) => {
+    const lat = Number(station?.[0]);
+    const lon = Number(station?.[1]);
+    const name = String(station?.[2] || '').trim();
+    const type = isTerminalStation(stationId) ? 'Terminal Radar' : 'WSR-88D Radar';
+    return {
+      _searchType: 'station',
+      stationId,
+      text: `${label} - ${name}`,
+      place_name: `${type} Site`,
+      center: [lon, lat],
+    };
+  });
+}
+
 function _renderCitySearchResults(features = []) {
   if (!citySearchResults) return;
   citySearchResults.innerHTML = '';
@@ -14470,7 +15160,7 @@ function _renderCitySearchResults(features = []) {
   features.forEach(f => {
     const btn = document.createElement('button');
     btn.type = 'button';
-    btn.className = 'city-search-item';
+    btn.className = `city-search-item${f?._searchType === 'station' ? ' station-result' : ''}`;
     const main = document.createElement('span');
     main.className = 'city-main';
     main.textContent = String(f.text || f.place_name || 'Unknown');
@@ -14480,11 +15170,19 @@ function _renderCitySearchResults(features = []) {
     btn.appendChild(main);
     btn.appendChild(sub);
     btn.addEventListener('click', () => {
+      if (f?._searchType === 'station') {
+        const stationId = canonicalStationId(f.stationId);
+        if (VIEWABLE_STATIONS[stationId]) {
+          selectStation(stationId, { recenter: true });
+          _setCitySearchOpen(false);
+        }
+        return;
+      }
       const center = Array.isArray(f.center) ? f.center : (Array.isArray(f.geometry?.coordinates) ? f.geometry.coordinates : null);
       if (!center || center.length < 2) return;
       const lng = Number(center[0]);
       const lat = Number(center[1]);
-      const nearestStation = _nearestRadarStationId(lng, lat);
+      const nearestStation = _nearestWsrRadarStationId(lng, lat);
       if (nearestStation) selectStation(nearestStation, { recenter: false });
       const bbox = Array.isArray(f.bbox) && f.bbox.length === 4 ? f.bbox : null;
       if (bbox) {
@@ -14505,6 +15203,8 @@ async function _runCitySearch(query) {
     return;
   }
   const reqId = ++citySearchReqSeq;
+  const stationResults = _stationSearchResults(q);
+  if (stationResults.length) _renderCitySearchResults(stationResults);
   try {
     const url = `https://api.mapbox.com/geocoding/v5/mapbox.places/${encodeURIComponent(q)}.json?access_token=${encodeURIComponent(MAPBOX_TOKEN)}&autocomplete=true&types=place,locality,district,region,postcode,neighborhood&limit=10`;
     const resp = await fetch(url);
@@ -14512,10 +15212,10 @@ async function _runCitySearch(query) {
     const json = await resp.json();
     if (reqId !== citySearchReqSeq) return;
     const features = Array.isArray(json?.features) ? json.features : [];
-    _renderCitySearchResults(features);
+    _renderCitySearchResults([...stationResults, ...features]);
   } catch (_) {
     if (reqId !== citySearchReqSeq) return;
-    _renderCitySearchResults([]);
+    _renderCitySearchResults(stationResults);
   }
 }
 
@@ -15039,6 +15739,25 @@ function setAlertsFilterOpen(open) {
   btn.setAttribute('aria-expanded', open ? 'true' : 'false');
 }
 
+function setRadarSiteSettingsOpen(open) {
+  const panel = document.getElementById('settings-section-radar-sites');
+  const btn = document.getElementById('radar-sites-expand-btn');
+  if (!panel || !btn) return;
+  panel.classList.toggle('open', open);
+  btn.classList.toggle('open', open);
+  btn.setAttribute('aria-expanded', open ? 'true' : 'false');
+}
+
+function syncRadarSiteSettingsUi() {
+  if (toggleRadarSitesPill) toggleRadarSitesPill.checked = radarSitePillMode;
+  if (radarSitesWsrColorInput) radarSitesWsrColorInput.value = radarSitesWsrColor;
+  if (radarSitesTerminalColorInput) radarSitesTerminalColorInput.value = radarSitesTerminalColor;
+  if (radarSitesWsrColorInput) radarSitesWsrColorInput.disabled = false;
+  if (radarSitesTerminalColorInput) radarSitesTerminalColorInput.disabled = false;
+  radarSitesWsrColorWrap?.classList.remove('disabled');
+  radarSitesTerminalColorWrap?.classList.remove('disabled');
+}
+
 function syncMesoFilterUi() {
   if (toggleMesoPrecip) toggleMesoPrecip.checked = mesoFilterSelection.precip !== false;
   if (toggleMesoConvective) toggleMesoConvective.checked = mesoFilterSelection.convective !== false;
@@ -15055,6 +15774,12 @@ const toggleWatches = document.getElementById('toggle-watches');
 const toggleLightning = document.getElementById('toggle-lightning');
 const toggleTvs = document.getElementById('toggle-tvs');
 const toggleRadarSites = document.getElementById('toggle-radar-sites');
+const toggleRadarSitesPill = document.getElementById('toggle-radar-sites-pill');
+const radarSitesExpandBtn = document.getElementById('radar-sites-expand-btn');
+const radarSitesWsrColorInput = document.getElementById('radar-sites-wsr-color');
+const radarSitesTerminalColorInput = document.getElementById('radar-sites-terminal-color');
+const radarSitesWsrColorWrap = document.getElementById('radar-sites-wsr-color-wrap');
+const radarSitesTerminalColorWrap = document.getElementById('radar-sites-terminal-color-wrap');
 const toggleStormReports = document.getElementById('toggle-storm-reports');
 const toggleStormReportsLsr = document.getElementById('toggle-storm-reports-lsr');
 const toggleStormReportsSpotter = document.getElementById('toggle-storm-reports-spotter');
@@ -15088,6 +15813,11 @@ const appUpdateProgressTextEl = document.getElementById('app-update-progress-tex
 const appUpdateNotesEl = document.getElementById('app-update-notes');
 const appUpdateInstallBtn = document.getElementById('app-update-install');
 const appUpdateLaterBtn = document.getElementById('app-update-later');
+const toggleNwsApiAlerts = document.getElementById('toggle-nws-api-alerts');
+const toggleNwwsAlerts = document.getElementById('toggle-nwws-alerts');
+const nwsApiSourceRow = document.getElementById('nws-api-source-row');
+const nwsApiSourceStatus = document.getElementById('nws-api-source-status');
+const nwwsSettingsSection = document.getElementById('nwws-settings-section');
 const nwwsLoginBtn = document.getElementById('nwws-login-btn');
 const nwwsLoginOverlay = document.getElementById('nwws-login-overlay');
 const nwwsLoginClose = document.getElementById('nwws-login-close');
@@ -15113,6 +15843,8 @@ const warningsDropdownEmpty = document.getElementById('warnings-dropdown-empty')
 const warningsDropdownCount = document.getElementById('warnings-dropdown-count');
 const alertDetailsOverlay = document.getElementById('alert-details-overlay');
 const alertDetailsClose = document.getElementById('alert-details-close');
+const reportDetailsOverlay = document.getElementById('report-details-overlay');
+const reportDetailsClose = document.getElementById('report-details-close');
 const YOUTUBE_EMBED_NOTE = 'YouTube embeds only.';
 let appUpdateBusy = false;
 let appUpdateInfo = null;
@@ -15122,9 +15854,15 @@ alertDetailsClose?.addEventListener('click', closeAlertDetailsModal);
 alertDetailsOverlay?.addEventListener('click', e => {
   if (e.target === alertDetailsOverlay) closeAlertDetailsModal();
 });
+reportDetailsClose?.addEventListener('click', closeReportDetailsModal);
+reportDetailsOverlay?.addEventListener('click', e => {
+  if (e.target === reportDetailsOverlay) closeReportDetailsModal();
+});
 document.addEventListener('keydown', e => {
   if (e.key === 'Escape' && alertDetailsOverlay?.classList.contains('open')) closeAlertDetailsModal();
+  if (e.key === 'Escape' && reportDetailsOverlay?.classList.contains('open')) closeReportDetailsModal();
   if (e.key === 'Escape' && nwwsLoginOverlay?.classList.contains('open')) setNwwsLoginOpen(false);
+  if (e.key === 'Escape' && nwwsSettingsSection?.classList.contains('open')) setNwwsLoginOpen(false);
   if (e.key === 'Escape' && appUpdateOverlay?.classList.contains('open') && !appUpdateBusy) {
     setAppUpdateModalOpen(false);
   }
@@ -15154,7 +15892,7 @@ appUpdateOverlay?.addEventListener('click', e => {
 });
 nwwsLoginBtn?.addEventListener('click', e => {
   e.stopPropagation();
-  setNwwsLoginOpen(true);
+  setNwwsLoginOpen(!nwwsSettingsSection?.classList.contains('open'));
 });
 nwwsCredentialsSaveBtn?.addEventListener('click', () => { void saveNwwsCredentialsAndReconnect(); });
 nwwsPasswordInput?.addEventListener('keydown', e => {
@@ -15169,19 +15907,37 @@ nwwsUsernameInput?.addEventListener('keydown', e => {
     void saveNwwsCredentialsAndReconnect();
   }
 });
+toggleNwsApiAlerts?.addEventListener('change', () => {
+  if (_shouldUseNwwsBridge()) {
+    toggleNwsApiAlerts.checked = true;
+    return;
+  }
+  nwsApiEnabled = Boolean(toggleNwsApiAlerts.checked);
+  saveSettings();
+  applyAlertSourceMode();
+});
+toggleNwwsAlerts?.addEventListener('change', () => {
+  nwwsEnabled = Boolean(toggleNwwsAlerts.checked);
+  if (nwwsEnabled && !_getNwwsBridgeCredentials().configured) {
+    setNwwsLoginOpen(true);
+  }
+  if (!nwwsEnabled) nwwsFatalStopInFlight = false;
+  saveSettings();
+  applyAlertSourceMode();
+});
 
 function syncAlertSourceUi() {
-  alertSourceMode = ALERT_SOURCE_NWWS;
+  if (toggleNwsApiAlerts) toggleNwsApiAlerts.checked = _shouldUseNwwsBridge() ? true : nwsApiEnabled;
+  if (toggleNwwsAlerts) toggleNwwsAlerts.checked = nwwsEnabled;
   applyAlertSourceMode();
 }
 
 function setNwwsLoginOpen(open) {
   const next = !!open;
-  if (!next && nwwsLoginOverlay?.contains(document.activeElement)) {
+  if (!next && nwwsSettingsSection?.contains(document.activeElement)) {
     nwwsLoginBtn?.focus();
   }
-  nwwsLoginOverlay?.classList.toggle('open', next);
-  nwwsLoginOverlay?.setAttribute('aria-hidden', next ? 'false' : 'true');
+  nwwsSettingsSection?.classList.toggle('open', next);
   nwwsLoginBtn?.setAttribute('aria-expanded', next ? 'true' : 'false');
   if (next) {
     syncNwwsSettingsUi();
@@ -15481,17 +16237,39 @@ function setNwwsCredentialsStatus(text = '', isError = false) {
 }
 
 function syncNwwsSettingsUi() {
+  const creds = _getNwwsBridgeCredentials();
+  const useNwws = _shouldUseNwwsBridge();
+  const useNwsApi = _shouldUseNwsApiAlerts();
   if (nwwsUsernameInput && nwwsUsernameInput.value !== nwwsUsername) {
     nwwsUsernameInput.value = nwwsUsername || '';
   }
   if (nwwsPasswordInput && nwwsPasswordInput.value !== nwwsPassword) {
     nwwsPasswordInput.value = nwwsPassword || '';
   }
-  if (nwwsLoginBtn) {
-    nwwsLoginBtn.textContent = (_getNwwsBridgeCredentials().configured ? 'Edit' : 'Login');
+  if (toggleNwwsAlerts) toggleNwwsAlerts.checked = nwwsEnabled;
+  if (toggleNwsApiAlerts) {
+    toggleNwsApiAlerts.checked = useNwws ? true : nwsApiEnabled;
+    toggleNwsApiAlerts.disabled = useNwws;
+  }
+  nwsApiSourceRow?.classList.toggle('disabled', useNwws);
+  if (nwsApiSourceStatus) {
+    if (useNwws) {
+      nwsApiSourceStatus.textContent = 'Startup only';
+      nwsApiSourceStatus.classList.remove('error');
+      nwsApiSourceStatus.classList.add('success');
+    } else if (useNwsApi) {
+      nwsApiSourceStatus.textContent = 'Active';
+      nwsApiSourceStatus.classList.remove('error');
+      nwsApiSourceStatus.classList.add('success');
+    } else {
+      nwsApiSourceStatus.textContent = 'Off';
+      nwsApiSourceStatus.classList.toggle('error', alertsVisible);
+      nwsApiSourceStatus.classList.remove('success');
+    }
   }
   if (!nwwsCredentialsStatus?.textContent) {
-    setNwwsCredentialsStatus(_getNwwsBridgeCredentials().configured ? 'Saved locally' : 'Not configured');
+    if (!nwwsEnabled) setNwwsCredentialsStatus('Disabled');
+    else setNwwsCredentialsStatus(creds.configured ? 'Saved locally' : 'Missing credentials');
   }
 }
 
@@ -15500,8 +16278,8 @@ async function saveNwwsCredentialsAndReconnect() {
   nwwsPassword = _normalizeNwwsCredential(nwwsPasswordInput?.value || '');
   saveSettings();
   syncNwwsSettingsUi();
-  setNwwsLoginOpen(false);
-  setNwwsCredentialsStatus(_getNwwsBridgeCredentials().configured ? 'Saving and reconnecting...' : 'Not configured');
+  nwwsFatalStopInFlight = false;
+  setNwwsCredentialsStatus(_getNwwsBridgeCredentials().configured ? 'Saving and reconnecting...' : 'Missing credentials');
   try {
     await invoke('stop_nwws_bridge');
   } catch (_) {}
@@ -15509,11 +16287,7 @@ async function saveNwwsCredentialsAndReconnect() {
   nwwsLastStatusSig = '';
   nwwsLastAlertsGeneratedAt = '';
   _resetWarningNotificationPriming();
-  if (_getNwwsBridgeCredentials().configured) {
-    try {
-      await ensureNwwsBridge();
-    } catch (_) {}
-  }
+  applyAlertSourceMode();
 }
 
 function formatCacheBytes(bytes) {
@@ -15694,6 +16468,13 @@ document.getElementById('alerts-filter-btn')?.addEventListener('click', e => {
   setAlertsFilterOpen(open);
 });
 
+radarSitesExpandBtn?.addEventListener('click', e => {
+  e.stopPropagation();
+  const panel = document.getElementById('settings-section-radar-sites');
+  const open = !panel?.classList.contains('open');
+  setRadarSiteSettingsOpen(open);
+});
+
 [
   ['precip', toggleMesoPrecip],
   ['convective', toggleMesoConvective],
@@ -15712,6 +16493,7 @@ if (toggleAlerts) {
     alertsVisible = Boolean(toggleAlerts.checked);
     _setAlertLayersVisible(alertsVisible);
     _alertsRefreshPresentationNow();
+    applyAlertSourceMode();
     saveSettings();
   });
 }
@@ -15747,6 +16529,40 @@ if (toggleRadarSites) {
   toggleRadarSites.addEventListener('change', () => {
     radarSitesVisible = Boolean(toggleRadarSites.checked);
     setStationLayersVisible(radarSitesVisible);
+    saveSettings();
+  });
+}
+
+if (toggleRadarSitesPill) {
+  toggleRadarSitesPill.addEventListener('change', () => {
+    radarSitePillMode = Boolean(toggleRadarSitesPill.checked);
+    _clearStationsHoverFilter();
+    _refreshStationSourceData();
+    syncRadarSiteSettingsUi();
+    saveSettings();
+  });
+}
+
+if (radarSitesWsrColorInput) {
+  radarSitesWsrColorInput.addEventListener('input', () => {
+    radarSitesWsrColor = _normalizeRadarSiteColor(radarSitesWsrColorInput.value, RADAR_SITE_DEFAULT_WSR_COLOR);
+    _refreshStationSourceData();
+  });
+  radarSitesWsrColorInput.addEventListener('change', () => {
+    radarSitesWsrColor = _normalizeRadarSiteColor(radarSitesWsrColorInput.value, RADAR_SITE_DEFAULT_WSR_COLOR);
+    _refreshStationSourceData();
+    saveSettings();
+  });
+}
+
+if (radarSitesTerminalColorInput) {
+  radarSitesTerminalColorInput.addEventListener('input', () => {
+    radarSitesTerminalColor = _normalizeRadarSiteColor(radarSitesTerminalColorInput.value, RADAR_SITE_DEFAULT_TERMINAL_COLOR);
+    _refreshStationSourceData();
+  });
+  radarSitesTerminalColorInput.addEventListener('change', () => {
+    radarSitesTerminalColor = _normalizeRadarSiteColor(radarSitesTerminalColorInput.value, RADAR_SITE_DEFAULT_TERMINAL_COLOR);
+    _refreshStationSourceData();
     saveSettings();
   });
 }
@@ -16711,6 +17527,15 @@ document.addEventListener('click', e => {
 document.addEventListener('keydown', e => {
   const tag = e.target?.tagName;
   const typing = tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || e.target?.isContentEditable;
+  if ((e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey && String(e.key || '').toLowerCase() === 's') {
+    e.preventDefault();
+    setSettingsOpen(false);
+    setInfoPopupOpen(false);
+    closeToolsMenu();
+    _setCitySearchOpen(true);
+    citySearchInput?.select();
+    return;
+  }
   if (!typing && e.shiftKey && !e.ctrlKey && !e.metaKey && !e.altKey) {
     const k = String(e.key || '').toLowerCase();
     let switched = false;
@@ -16757,6 +17582,12 @@ document.addEventListener('keydown', e => {
     }
     return;
   }
+  if (!typing && !e.ctrlKey && !e.metaKey && !e.altKey && (e.key === 'm' || e.key === 'M')) {
+    e.preventDefault();
+    if (measureMode) exitMeasureMode();
+    else startMeasureMode();
+    return;
+  }
   if (e.key === 'Escape') {
     if (boardContextMenuOpen) {
       _setBoardContextMenuOpen(false);
@@ -16770,6 +17601,7 @@ document.addEventListener('keydown', e => {
       setWarningPrefsOpen(false);
       return;
     }
+    if (measureMode) { exitMeasureMode(); return; }
     if (drawMode) { exitDrawMode(); return; }
     setSpcFilterOpen(false);
     setStormFilterOpen(false);
@@ -16789,6 +17621,7 @@ document.addEventListener('keyup', e => {
 window.addEventListener('blur', () => {
   _setBoardContextMenuOpen(false);
   _clearHistoryHold();
+  if (measureMode && measureMouseDown) clearMeasurePreview();
 });
 
 function closeToolsMenu() {
@@ -16814,6 +17647,11 @@ document.getElementById('tools-btn')?.addEventListener('click', (e) => {
 document.getElementById('draw-btn')?.addEventListener('click', () => {
   closeToolsMenu();
   if (drawMode) exitDrawMode(); else startDrawMode();
+});
+
+document.getElementById('measure-btn')?.addEventListener('click', () => {
+  closeToolsMenu();
+  if (measureMode) exitMeasureMode(); else startMeasureMode();
 });
 
 // -- My Location (client-side only, never transmitted) -------------------------
@@ -17050,6 +17888,10 @@ document.getElementById('dt-clear')?.addEventListener('click', () => {
 });
 
 document.getElementById('dt-done')?.addEventListener('click', exitDrawMode);
+document.getElementById('mt-done')?.addEventListener('click', exitMeasureMode);
+
+_syncMapToolUi();
+updateMeasurementSources();
 
 setActiveSelectionUi(activeFamily, activeTilt);
 
@@ -17335,12 +18177,58 @@ if (tiltSelect) {
 }
 
 // -- Camera / chaser overlays -------------------------------------------------
-const TRAFFIC_CAMERAS_COMBINED_URL = 'https://raw.githubusercontent.com/anony121221/maps-data/main/All%20Combined/radar-app-cameras.geojson';
-const TRAFFIC_CAMERAS_MO_URL = 'https://raw.githubusercontent.com/anony121221/maps-data/main/Missouri/missouri.geojson';
-const TRAFFIC_CAMERAS_KS_URL = 'https://raw.githubusercontent.com/anony121221/maps-data/main/Kansas/kansas_cameras.geojson';
+const TRAFFIC_CAMERA_STATE_URLS = {
+  AL: 'https://traffic-camera-worker.colewx.workers.dev/geojson/AL',
+  AR: 'https://traffic-camera-worker.colewx.workers.dev/geojson/AR',
+  AZ: 'https://traffic-camera-worker.colewx.workers.dev/geojson/AZ',
+  CA: 'https://traffic-camera-worker.colewx.workers.dev/geojson/CA',
+  CO: 'https://traffic-camera-worker.colewx.workers.dev/geojson/CO',
+  CT: 'https://traffic-camera-worker.colewx.workers.dev/geojson/CT',
+  DE: 'https://traffic-camera-worker.colewx.workers.dev/geojson/DE',
+  FL: 'https://traffic-camera-worker.colewx.workers.dev/geojson/FL',
+  GA: 'https://traffic-camera-worker.colewx.workers.dev/geojson/GA',
+  IA: 'https://traffic-camera-worker.colewx.workers.dev/geojson/IA',
+  ID: 'https://traffic-camera-worker.colewx.workers.dev/geojson/ID',
+  IL: 'https://traffic-camera-worker.colewx.workers.dev/geojson/IL',
+  IN: 'https://traffic-camera-worker.colewx.workers.dev/geojson/IN',
+  KS: 'https://traffic-camera-worker.colewx.workers.dev/geojson/KS',
+  KY: 'https://traffic-camera-worker.colewx.workers.dev/geojson/KY',
+  LA: 'https://traffic-camera-worker.colewx.workers.dev/geojson/LA',
+  MA: 'https://traffic-camera-worker.colewx.workers.dev/geojson/MA',
+  MD: 'https://traffic-camera-worker.colewx.workers.dev/geojson/MD',
+  ME: 'https://traffic-camera-worker.colewx.workers.dev/geojson/ME',
+  MI: 'https://traffic-camera-worker.colewx.workers.dev/geojson/MI',
+  MN: 'https://traffic-camera-worker.colewx.workers.dev/geojson/MN',
+  MO: 'https://traffic-camera-worker.colewx.workers.dev/geojson/MO',
+  MS: 'https://traffic-camera-worker.colewx.workers.dev/geojson/MS',
+  MT: 'https://traffic-camera-worker.colewx.workers.dev/geojson/MT',
+  NC: 'https://traffic-camera-worker.colewx.workers.dev/geojson/NC',
+  ND: 'https://traffic-camera-worker.colewx.workers.dev/geojson/ND',
+  NE: 'https://traffic-camera-worker.colewx.workers.dev/geojson/NE',
+  NH: 'https://traffic-camera-worker.colewx.workers.dev/geojson/NH',
+  NM: 'https://traffic-camera-worker.colewx.workers.dev/geojson/NM',
+  NV: 'https://traffic-camera-worker.colewx.workers.dev/geojson/NV',
+  NY: 'https://traffic-camera-worker.colewx.workers.dev/geojson/NY',
+  OH: 'https://traffic-camera-worker.colewx.workers.dev/geojson/OH',
+  OK: 'https://traffic-camera-worker.colewx.workers.dev/geojson/OK',
+  OR: 'https://traffic-camera-worker.colewx.workers.dev/geojson/OR',
+  PA: 'https://traffic-camera-worker.colewx.workers.dev/geojson/PA',
+  RI: 'https://traffic-camera-worker.colewx.workers.dev/geojson/RI',
+  SC: 'https://traffic-camera-worker.colewx.workers.dev/geojson/SC',
+  SD: 'https://traffic-camera-worker.colewx.workers.dev/geojson/SD',
+  TN: 'https://traffic-camera-worker.colewx.workers.dev/geojson/TN',
+  TX: 'https://traffic-camera-worker.colewx.workers.dev/geojson/TX',
+  UT: 'https://traffic-camera-worker.colewx.workers.dev/geojson/UT',
+  VA: 'https://traffic-camera-worker.colewx.workers.dev/geojson/VA',
+  VT: 'https://traffic-camera-worker.colewx.workers.dev/geojson/VT',
+  WA: 'https://traffic-camera-worker.colewx.workers.dev/geojson/WA',
+  WI: 'https://traffic-camera-worker.colewx.workers.dev/geojson/WI',
+  WV: 'https://traffic-camera-worker.colewx.workers.dev/geojson/WV',
+  NJ: 'https://traffic-camera-worker.colewx.workers.dev/geojson/NJ',
+};
 const TRAFFIC_COMBINED_FETCH_TIMEOUT_MS = 150000;
-const WEATHER_CYCLONEPORT_URL = 'https://cycloneportfeed.colewx.workers.dev/';
-const WEATHER_HAZCAMS_URL = 'https://raw.githubusercontent.com/anony121221/maps-data/refs/heads/main/Hazcams/hazcams.geojson';
+const WEATHER_CYCLONEPORT_URL = 'https://data3.radaromega.com/api/live-devices';
+const WEATHER_HAZCAMS_URL = 'https://data2.weatherwise.app/vendors/hazcams/stations.geojson';
 const CHASERS_WXWISE_URL = 'https://data2.weatherwise.app/chasers/chasers.geojson';
 const CHASERS_RADAROMEGA_URL = 'https://data3.radaromega.com/api/mobile-devices';
 
@@ -17499,6 +18387,7 @@ const RO_CHASER_POLL_MS = 3000;
 const CAMERA_STARTUP_RETRY_MS = 1500;
 const CAMERA_STARTUP_RETRY_MAX = 6;
 const CAMERA_PLAYBACK_START_TIMEOUT_MS = 12000;
+const CAMERA_PROTECTED_STREAM_CACHE_MS = 60_000;
 let cameraStartupRetryToken = 0;
 var cameraStartupRetryTimer = null;
 let cameraHls = null;
@@ -17508,8 +18397,45 @@ let cameraPlaybackStartupTimer = null;
 let cameraShareUrl = '';
 let cameraActiveProps = null;
 let cameraSyncSeq = 0;
+let cameraPlaybackSeq = 0;
 let cameraStartupPrefetchStarted = false;
+const _cameraProtectedStreamCache = new Map();
 const YOUTUBE_ALLOWED_HOSTS = new Set(['youtube.com', 'm.youtube.com', 'youtu.be', 'youtube-nocookie.com']);
+
+function _cameraProtectedCacheGet(key) {
+  const cacheKey = String(key || '').trim();
+  if (!cacheKey) return null;
+  const entry = _cameraProtectedStreamCache.get(cacheKey);
+  if (!entry) return null;
+  if (!Number.isFinite(entry.expiresAt) || entry.expiresAt <= Date.now()) {
+    _cameraProtectedStreamCache.delete(cacheKey);
+    return null;
+  }
+  return { ...entry.value };
+}
+
+function _cameraProtectedCacheSet(key, value, ttlMs = CAMERA_PROTECTED_STREAM_CACHE_MS) {
+  const cacheKey = String(key || '').trim();
+  if (!cacheKey || !value || typeof value !== 'object') return;
+  _cameraProtectedStreamCache.set(cacheKey, {
+    expiresAt: Date.now() + Math.max(5_000, Number(ttlMs) || CAMERA_PROTECTED_STREAM_CACHE_MS),
+    value: { ...value },
+  });
+}
+
+function _cameraStripTokenParam(url) {
+  const raw = String(url || '').trim();
+  if (!raw) return '';
+  try {
+    const parsed = new URL(raw);
+    parsed.searchParams.delete('token');
+    return parsed.toString();
+  } catch (_) {
+    return raw
+      .replace(/([?&])token=[^&]*/i, '$1')
+      .replace(/[?&]$/, '');
+  }
+}
 
 function _cameraTrimSerializableList(list) {
   if (!Array.isArray(list) || !list.length) return '';
@@ -17573,8 +18499,10 @@ function _cameraTrimPayload(props = {}) {
       payload[key] = value;
     }
   });
-  if (Object.prototype.hasOwnProperty.call(props, '_has_video') || _cameraFeatureHasVideo(props)) {
-    payload._has_video = _cameraResolvedHasVideo(props);
+  if (Object.prototype.hasOwnProperty.call(props, '_has_video')) {
+    payload._has_video = Number(props._has_video) ? 1 : 0;
+  } else if (_cameraFeatureHasVideo(props)) {
+    payload._has_video = 1;
   }
   return payload;
 }
@@ -17636,7 +18564,7 @@ function _ingestCameraFeatureSet(kind, rawFeatures) {
       properties: {
         _camera_id: payloadId,
         _state: String(props._state || '').trim().toUpperCase(),
-        _has_video: _cameraResolvedHasVideo(props),
+        _has_video: Number(payload._has_video) ? 1 : 0,
       },
     });
   });
@@ -17800,9 +18728,6 @@ function _cameraFeatureHasVideo(props = {}) {
   if (definiteStreamFields.some(v => String(v || '').trim())) return true;
   if ([props.url2, props.URL2, props.url, props.html].some(v => _isLikelyVideoStreamUrl(v))) return true;
 
-  const { dashUrl, hlsUrl } = resolveUrls(props);
-  if (_isLikelyVideoStreamUrl(dashUrl) || _isLikelyVideoStreamUrl(hlsUrl)) return true;
-
   const grouped = props.cameras;
   if (grouped) {
     try {
@@ -17831,10 +18756,11 @@ function _cameraFeatureHasVideo(props = {}) {
 }
 
 function _cameraResolvedHasVideo(props = {}) {
-  const derived = _cameraFeatureHasVideo(props);
-  if (derived) return 1;
+  if (Object.prototype.hasOwnProperty.call(props, '_has_video')) {
+    return Number(props?._has_video) ? 1 : 0;
+  }
   if (_cameraHasKnownBrokenStreamUrl(props)) return 0;
-  if (Number(props?._has_video)) return 1;
+  if (_cameraFeatureHasVideo(props)) return 1;
   return 0;
 }
 
@@ -18703,105 +19629,44 @@ function _buildOklahomaGroupedFeatures(raw) {
 }
 
 function _composeTrafficCameraFeatures(datasets = {}) {
-  let features = [];
-
-  const kentuckyFeatures = datasets.kentucky
-    ? _buildKentuckyTrimarcFeatures(datasets.kentucky)
-    : [];
-  const hasLiveKentucky = kentuckyFeatures.length > 0;
-
-  const alabamaFeatures = datasets.alabama
-    ? _buildAlabamaAlgoTrafficFeatures(datasets.alabama)
-    : [];
-  const hasLiveAlabama = alabamaFeatures.length > 0;
-
-  const georgiaFeatures = datasets.georgia
-    ? _buildGeorgia511Features(datasets.georgia)
-    : [];
-  const hasLiveGeorgia = georgiaFeatures.length > 0;
-
-  const indianaFeatures = datasets.indiana
-    ? _buildIndianaCarsFeatures(datasets.indiana)
-    : [];
-  const hasLiveIndiana = indianaFeatures.length > 0;
-
-  const iowaFeatures = datasets.iowa
-    ? _buildIowa511Features(datasets.iowa)
-    : [];
-  const hasLiveIowa = iowaFeatures.length > 0;
-
-  const coloradoFeatures = datasets.colorado
-    ? _buildColoradoCotTripFeatures(datasets.colorado)
-    : [];
-  const hasLiveColorado = coloradoFeatures.length > 0;
-
-  const msFeatures = datasets.existing
-    ? _buildMississippiGroupedFeatures(datasets.existing?.features || [])
-    : [];
-
-  if (datasets.existing) {
-    const existing = datasets.existing;
-    const srcFeatures = Array.isArray(existing?.features)
-      ? existing.features.filter(f => (
-          !isOklahomaCameraFeature(f)
-          && !isMississippiCameraFeature(f)
-          && !(hasLiveAlabama && isAlabamaCameraFeature(f))
-          && !(hasLiveGeorgia && isGeorgiaCameraFeature(f))
-          && !(hasLiveIndiana && isIndianaCameraFeature(f))
-          && !(hasLiveIowa && isIowaCameraFeature(f))
-          && !(hasLiveColorado && isColoradoCameraFeature(f))
-          && !(hasLiveKentucky && isKentuckyCameraFeature(f))
-        ))
-      : [];
-
-    features = srcFeatures.map(f => {
+  const features = [];
+  for (const [stateCode, geojson] of Object.entries(datasets)) {
+    const srcFeatures = Array.isArray(geojson?.features) ? geojson.features : [];
+    let count = 0;
+    for (const f of srcFeatures) {
       const c = _cameraCoords(f);
-      if (!c) return null;
+      if (!c) continue;
       const p = f?.properties || {};
-      const state = _cameraStateFromSources(
-        p.state,
-        p.State,
-        p.state_name,
-        p.city,
-        p.name,
-        p.location,
-        p.locationName,
-        p.nearbyPlace,
-        p.county,
-        p._source_file,
-        p._source_url,
-      );
-      const primaryName = p.name
-        || p.title
-        || p.description
-        || p.locationName
-        || p.location
-        || p.nearbyPlace
-        || p.CameraLocation
-        || '';
-      const direction = String(p.CameraDirection || '').trim();
-      const displayName = primaryName
-        ? (direction && !String(primaryName).toLowerCase().includes(` ${direction.toLowerCase()}`)
-            ? `${primaryName} (${direction})`
-            : primaryName)
-        : 'Traffic Camera';
-      return _cameraPointFeature(c[0], c[1], {
+      const name = String(p.cameraName || p.name || p.title || p.camera_title || p.location || '').trim()
+        || `${stateCode} Traffic Camera`;
+      const rawId = String(f?.id || p?.id || p?.cameraId || p?.camera_id || p?.deviceID || '');
+      const stateId = rawId ? `${stateCode}:${rawId}` : '';
+      const extraProps = {};
+      if (stateCode === 'PA') {
+        const paId = String(p.view_id || p.cameraId || p.camera_id || rawId || '').trim()
+          || (String(p.imageUrl || '').match(/\/map\/Cctv\/(\d+)/)?.[1] || '');
+        if (paId) {
+          extraProps.view_id = paId;
+          if (!String(p.cameraId || p.camera_id || '').trim()) extraProps.cameraId = paId;
+        }
+      }
+      if (stateCode === 'KS') {
+        const ksId = String(p.cameraId || p.camera_id || rawId || '').trim();
+        if (ksId) {
+          extraProps.videoauth = 'true';
+          if (!String(p.cameraId || p.camera_id || '').trim()) extraProps.cameraId = ksId;
+        }
+      }
+      features.push(_cameraPointFeature(c[0], c[1], {
         ...p,
-        name: displayName,
-        _state: state,
-      }, String(f?.id || p?.id || ''));
-    }).filter(Boolean);
+        ...extraProps,
+        name,
+        _state: stateCode,
+      }, stateId));
+      count++;
+    }
+    if (count === 0) console.warn(`[Camera][Traffic] ${stateCode}: 0 valid features`);
   }
-
-  if (msFeatures.length) features.push(...msFeatures);
-  if (hasLiveAlabama) features.push(...alabamaFeatures);
-  if (hasLiveGeorgia) features.push(...georgiaFeatures);
-  if (hasLiveIndiana) features.push(...indianaFeatures);
-  if (hasLiveIowa) features.push(...iowaFeatures);
-  if (hasLiveColorado) features.push(...coloradoFeatures);
-  if (hasLiveKentucky) features.push(...kentuckyFeatures);
-  if (datasets.ok) features.push(..._buildOklahomaGroupedFeatures(datasets.ok));
-
   return features;
 }
 
@@ -18813,12 +19678,20 @@ async function loadCameras(opts = {}) {
     try {
       const startMs = Date.now();
       const fetchOpts = { timeoutMs: TRAFFIC_COMBINED_FETCH_TIMEOUT_MS, preferDirect: true, cacheMode: 'force-cache' };
-      const [combined, missouri, kansas] = await Promise.all([
-        _fetchGeoJsonViaTauri(TRAFFIC_CAMERAS_COMBINED_URL, fetchOpts),
-        _fetchGeoJsonViaTauri(TRAFFIC_CAMERAS_MO_URL, fetchOpts).catch(() => null),
-        _fetchGeoJsonViaTauri(TRAFFIC_CAMERAS_KS_URL, fetchOpts).catch(() => null),
-      ]);
-      const datasets = { combined, ...(missouri && { missouri }), ...(kansas && { kansas }) };
+      const stateEntries = Object.entries(TRAFFIC_CAMERA_STATE_URLS);
+      const results = await Promise.allSettled(
+        stateEntries.map(([, url]) => _fetchGeoJsonViaTauri(url, fetchOpts))
+      );
+      const datasets = {};
+      for (let i = 0; i < stateEntries.length; i++) {
+        const [stateCode] = stateEntries[i];
+        const result = results[i];
+        if (result.status === 'fulfilled') {
+          datasets[stateCode] = result.value;
+        } else {
+          console.warn(`[Camera][Traffic] ${stateCode} failed:`, result.reason);
+        }
+      }
       let finalFeatures = [];
       try {
         finalFeatures = await _composeTrafficCameraFeaturesOffMain(datasets);
@@ -18852,46 +19725,104 @@ async function loadWeatherCameras(opts = {}) {
   if (weatherLoadPromise) return weatherLoadPromise;
   const deferApply = Boolean(opts?.deferApply);
   weatherLoadPromise = (async () => {
+    const startMs = Date.now();
     try {
-      const [cycloneRaw, hazcamsRaw] = await Promise.all([
+      const [cycloneResult, hazcamsResult] = await Promise.allSettled([
         _fetchGeoJsonViaTauri(WEATHER_CYCLONEPORT_URL),
         _fetchGeoJsonViaTauri(WEATHER_HAZCAMS_URL),
       ]);
 
       const features = [];
+      let cycloneCount = 0;
+      let hazcamsCount = 0;
 
-      const cycloneFeatures = Array.isArray(cycloneRaw?.features) ? cycloneRaw.features : [];
-      for (const f of cycloneFeatures) {
-        const c = _cameraCoords(f);
-        if (!c) continue;
-        const p = f?.properties || {};
-        const state = _cameraStateFromSources(p.state, p.name, p.uuid);
-        features.push(_cameraPointFeature(c[0], c[1], {
-          name: p.name || 'CyclonePort Camera',
-          m3u8: p.m3u8 || null,
-          uuid: p.uuid || '',
-          source: 'CyclonePort',
-          _state: state,
-        }, String(f?.id || p?.uuid || '')));
+      if (cycloneResult.status === 'fulfilled') {
+        const cycloneRaw = cycloneResult.value;
+        const cycloneRows = Array.isArray(cycloneRaw)
+          ? cycloneRaw
+          : Array.isArray(cycloneRaw?.devices)
+            ? cycloneRaw.devices
+            : Array.isArray(cycloneRaw?.features)
+              ? cycloneRaw.features
+              : [];
+        for (const row of cycloneRows) {
+          if (row?.geometry?.coordinates) {
+            const c = _cameraCoords(row);
+            if (!c) continue;
+            const p = row?.properties || {};
+            const state = _cameraStateFromSources(p.state, p.name, p.uuid);
+            features.push(_cameraPointFeature(c[0], c[1], {
+              name: p.name || 'CyclonePort Camera',
+              m3u8: p.m3u8 || p.videoUrl || p.video_url || p.url || null,
+              snapshotUrl: p.snapshotUrl || p.icon_url || p.imageUrl || null,
+              uuid: p.uuid || '',
+              source: 'CyclonePort',
+              _state: state,
+            }, String(row?.id || p?.uuid || '')));
+            cycloneCount += 1;
+            continue;
+          }
+          const lon = Number(row?.last_location_lon);
+          const lat = Number(row?.last_location_lat);
+          if (!Number.isFinite(lon) || !Number.isFinite(lat)) continue;
+          const state = _cameraStateFromSources(row?.state, row?.name, row?.uuid);
+          features.push(_cameraPointFeature(lon, lat, {
+            name: row?.name || 'CyclonePort Camera',
+            m3u8: row?.url || row?.videoUrl || row?.video_url || row?.m3u8 || null,
+            snapshotUrl: row?.icon_url || row?.snapshotUrl || null,
+            uuid: row?.uuid || '',
+            source: 'CyclonePort',
+            moved_at: row?.last_telemetry_at || '',
+            _state: state,
+          }, String(row?.uuid || row?.id || '')));
+          cycloneCount += 1;
+        }
+      } else {
+        console.warn('[Camera][Weather] CyclonePORT fetch failed', {
+          url: WEATHER_CYCLONEPORT_URL,
+          error: String(cycloneResult.reason || ''),
+        });
       }
 
-      const hazFeatures = Array.isArray(hazcamsRaw?.features) ? hazcamsRaw.features : [];
-      for (const f of hazFeatures) {
-        const c = _cameraCoords(f);
-        if (!c) continue;
-        const p = f?.properties || {};
-        const state = String(p.state || '').trim();
-        features.push(_cameraPointFeature(c[0], c[1], {
-          name: state ? `${state} HazCam` : 'HazCam',
-          m3u8: p.videoUrl || null,
-          state,
-          source: 'Hazcams',
-          _state: _cameraStateFromSources(state),
-        }));
+      if (hazcamsResult.status === 'fulfilled') {
+        const hazcamsRaw = hazcamsResult.value;
+        const hazFeatures = Array.isArray(hazcamsRaw?.features) ? hazcamsRaw.features : [];
+        for (const f of hazFeatures) {
+          const c = _cameraCoords(f);
+          if (!c) continue;
+          const p = f?.properties || {};
+          if (p.online === false) continue;
+          const stationId = String(f?.id || p?.id || '').trim();
+          const state = _cameraStateFromSources(p.state, p.name, p.id);
+          features.push(_cameraPointFeature(c[0], c[1], {
+            name: p.name || (state ? `${state} HazCam` : 'HazCam'),
+            m3u8: stationId ? `https://video.hazcams.com/${encodeURIComponent(stationId)}/index.m3u8` : null,
+            snapshotUrl: stationId
+              ? `https://data.hazcams.com/thumbnails/${encodeURIComponent(stationId)}/large.webp`
+              : (p.thumbnail_source || null),
+            livestreaming: p.video === true,
+            id: stationId,
+            state,
+            source: 'Hazcams',
+            _state: state,
+          }, String(stationId || p?.name || '')));
+          hazcamsCount += 1;
+        }
+      } else {
+        console.warn('[Camera][Weather] HazCams fetch failed', {
+          url: WEATHER_HAZCAMS_URL,
+          error: String(hazcamsResult.reason || ''),
+        });
       }
 
       if (!features.length) throw new Error('No weather camera features');
       weatherCameraFeatures = _ingestCameraFeatureSet('weather', features);
+      console.info('[Camera][Weather] load complete', {
+        cycloneport: cycloneCount,
+        hazcams: hazcamsCount,
+        count: features.length,
+        ms: Date.now() - startMs,
+      });
       weatherCamerasLoaded = true;
       if (!deferApply) _scheduleCameraSourceApply({ weather: true });
     } catch (err) {
@@ -19191,7 +20122,8 @@ async function syncCameraLayersFromState() {
 
 // Custom hls.js 1.x loader — all requests routed through Tauri proxy.
 // Stats shape matches hls.js 1.x LoaderStats interface.
-function makeTauriHlsLoader() {
+function makeTauriHlsLoader(options = {}) {
+  const useProtectedBinaryPath = options?.binaryFragments === true;
   function TauriLoader(_config) {
     this._aborted = false;
     this.stats = {
@@ -19214,6 +20146,40 @@ function makeTauriHlsLoader() {
       });
     }
     try {
+      const contextType = String(context?.type || '').toLowerCase();
+      const useBinaryResponse = useProtectedBinaryPath
+        && context.responseType === 'arraybuffer'
+        && (
+          contextType === 'fragment'
+          || contextType === 'key'
+          || /\.(?:ts|m4s|mp4)(?:[?#]|$)/i.test(reqUrl)
+          || /\/media_[^/?#]+/i.test(reqUrl)
+        );
+      if (useBinaryResponse) {
+        const bytes = await invoke('fetch_url_bytes', { url: context.url });
+        if (this._aborted) return;
+        const t = performance.now();
+        this.stats.loading.first = t;
+        this.stats.loading.end = t;
+        const data = bytes instanceof Uint8Array
+          ? (
+              bytes.byteOffset === 0 && bytes.byteLength === bytes.buffer.byteLength
+                ? bytes.buffer
+                : bytes.slice().buffer
+            )
+          : bytes;
+        const len = Number(data?.byteLength || 0);
+        this.stats.loaded = this.stats.total = len;
+        if (isIndianaReq) {
+          console.info('[Camera][IN][Loader] binary success', {
+            url: reqUrl,
+            bytes: len,
+          });
+        }
+        callbacks.onSuccess({ data, url: context.url }, this.stats, context, null);
+        return;
+      }
+
       const result = await invoke('fetch_url_base64', { url: context.url });
       if (this._aborted) return;
 
@@ -19262,13 +20228,15 @@ function makeTauriHlsLoader() {
       callbacks.onSuccess({ data, url: resolvedUrl }, this.stats, context, null);
     } catch (e) {
       if (this._aborted) return;
+      const statusMatch = String(e || '').match(/HTTP\s+(\d{3})/i);
+      const statusCode = statusMatch ? Number(statusMatch[1]) : 0;
       if (isIndianaReq) {
         console.warn('[Camera][IN][Loader] exception', {
           url: reqUrl,
           error: String(e || ''),
         });
       }
-      callbacks.onError({ code: 0, text: String(e) }, context, null, this.stats);
+      callbacks.onError({ code: statusCode, text: String(e) }, context, null, this.stats);
     }
   };
   return TauriLoader;
@@ -19363,18 +20331,37 @@ async function _resolveKansasSignedCameraUrls(props = {}, current = {}) {
     title: '',
   };
   if (!_isKansasTrafficCamera(props) || !_cameraResolvedHasVideo(props)) return next;
-  const cameraId = String(props?.cameraId ?? props?.camera_id ?? props?.id ?? '').trim();
+  const rawCameraId = String(props?.cameraId ?? props?.camera_id ?? props?.id ?? '').trim()
+    .replace(/^[A-Z]{2}:/, '');
+  const cameraId = rawCameraId.startsWith('camera/') ? rawCameraId.slice(7) : rawCameraId;
   if (!cameraId) {
+    console.warn('[Camera][KS] KanDrive missing cameraId', props);
     next.hlsUrl = '';
+    return next;
+  }
+  const cacheKey = `KS:${cameraId}`;
+  const cached = _cameraProtectedCacheGet(cacheKey);
+  if (cached?.hlsUrl || cached?.snapshotUrl || cached?.title) {
+    next.hlsUrl = String(cached.hlsUrl || '').trim();
+    next.snapshotUrl = String(cached.snapshotUrl || '').trim() || next.snapshotUrl;
+    next.title = String(cached.title || '').trim();
     return next;
   }
   next.hlsUrl = '';
   try {
     const resolved = await invoke('fetch_kandrive_stream', { cameraId });
     next.hlsUrl = String(resolved?.stream_url || '').trim();
+    if (!next.hlsUrl) console.warn('[Camera][KS] KanDrive resolver returned empty stream_url', { cameraId });
     const resolvedSnapshot = String(resolved?.snapshot_url || '').trim();
     if (resolvedSnapshot) next.snapshotUrl = resolvedSnapshot;
     next.title = String(resolved?.title || '').trim();
+    if (next.hlsUrl || next.snapshotUrl || next.title) {
+      _cameraProtectedCacheSet(cacheKey, {
+        hlsUrl: next.hlsUrl,
+        snapshotUrl: next.snapshotUrl,
+        title: next.title,
+      });
+    }
   } catch (err) {
     console.warn('[Camera][KS] signed stream resolve failed', {
       cameraId,
@@ -19682,11 +20669,28 @@ function _showCameraUnavailable(content) {
   content.innerHTML = noFeedEl();
 }
 
+function _cameraLogFailure(stage, props = {}, extra = {}) {
+  const title = _cameraDisplayTitle(props);
+  const source = String(props?.source || props?._provider || props?._state || '').trim();
+  const payload = {
+    title,
+    source,
+    state: String(props?._state || props?.state || '').trim(),
+    id: String(props?.id || props?.cameraId || props?.camera_id || props?.uuid || '').trim(),
+    snapshotUrl: String(props?.snapshotUrl || props?.imageUrl || props?.image_url || '').trim(),
+    hlsUrl: String(props?.hls_url || props?.m3u8 || props?.m3u8_url || props?.m3u8Url || props?.videoUrl || props?.video_url || '').trim(),
+    dashUrl: String(props?.dash_url || props?.mpd_url || props?.dash || '').trim(),
+    ...extra,
+  };
+  console.warn(`[Camera] ${stage}`, payload);
+}
+
 function _armCameraPlaybackStartupTimer(content) {
   _clearCameraPlaybackStartupTimer();
   cameraPlaybackStartupTimer = setTimeout(() => {
     const modal = document.getElementById('camera-modal');
     if (modal?.style.display === 'none') return;
+    _cameraLogFailure('startup timeout', cameraActiveProps || {}, {});
     _showCameraUnavailable(content);
   }, CAMERA_PLAYBACK_START_TIMEOUT_MS);
 }
@@ -19746,6 +20750,7 @@ async function _startCameraHlsPlayback(content, hlsUrl, snapshotUrl, props = {})
   const isIndiana = isIndianaCameraFeature({ properties: props || {} });
   const isHawaii = isHawaiiCameraFeature({ properties: props || {} });
   let playUrl = String(hlsUrl || '').trim();
+  const useProtectedTrafficPlayback = _isProtectedTrafficPlayback(props, playUrl);
   if (isIndiana) {
     console.info('[Camera][IN] start HLS playback', {
       hlsUrl: playUrl || '',
@@ -19754,6 +20759,7 @@ async function _startCameraHlsPlayback(content, hlsUrl, snapshotUrl, props = {})
     });
   }
   if (!playUrl) {
+    _cameraLogFailure('missing HLS URL', props, { hasSnapshot: Boolean(snapshotUrl) });
     if (isIndiana) {
       console.warn('[Camera][IN] missing HLS URL, falling back', {
         hasSnapshot: Boolean(snapshotUrl),
@@ -19820,16 +20826,30 @@ async function _startCameraHlsPlayback(content, hlsUrl, snapshotUrl, props = {})
     playbackReady = true;
     _clearCameraPlaybackStartupTimer();
   };
-  const failPlayback = () => _showCameraUnavailable(content);
+  const failPlayback = () => {
+    _cameraLogFailure('video element error', props, { url: playUrl, transport: 'hls' });
+    _showCameraUnavailable(content);
+  };
   video.addEventListener('loadeddata', markPlaybackReady, { once: true });
   video.addEventListener('canplay', markPlaybackReady, { once: true });
   video.addEventListener('playing', markPlaybackReady, { once: true });
   video.addEventListener('error', failPlayback, { once: true });
 
+  if (useProtectedTrafficPlayback) {
+    await _cameraWaitForMapQuiet();
+    await _cameraDelay(90);
+    const modal = document.getElementById('camera-modal');
+    if (!content?.isConnected || modal?.style.display === 'none') return;
+  }
   cameraHls = new Hls({
-    loader: makeTauriHlsLoader(),
+    loader: makeTauriHlsLoader({ binaryFragments: useProtectedTrafficPlayback }),
     lowLatencyMode: false,
-    enableWorker: false,
+    enableWorker: useProtectedTrafficPlayback,
+    startFragPrefetch: false,
+    maxBufferLength: useProtectedTrafficPlayback ? 6 : 30,
+    maxMaxBufferLength: useProtectedTrafficPlayback ? 12 : 600,
+    backBufferLength: useProtectedTrafficPlayback ? 0 : Infinity,
+    capLevelToPlayerSize: useProtectedTrafficPlayback,
   });
   let networkRecoveries = 0;
   let mediaRecoveries = 0;
@@ -19896,6 +20916,11 @@ async function _startCameraHlsPlayback(content, hlsUrl, snapshotUrl, props = {})
       ))
     );
     if (shouldFailFast) {
+      _cameraLogFailure('HLS fail-fast', props, {
+        url: playUrl,
+        status: startupStatus,
+        details: data?.details || '',
+      });
       _showCameraUnavailable(content);
       return;
     }
@@ -19942,6 +20967,12 @@ async function _startCameraHlsPlayback(content, hlsUrl, snapshotUrl, props = {})
           hasSnapshot: Boolean(snapshotUrl),
         });
       }
+      _cameraLogFailure('HLS fatal error', props, {
+        url: playUrl,
+        type: data?.type || '',
+        details: data?.details || '',
+        status: startupStatus,
+      });
       _showCameraUnavailable(content);
     }
   });
@@ -19951,6 +20982,7 @@ async function _startCameraDashPlayback(content, dashUrl, snapshotUrl, props = {
   const isAlabama = _isAlabamaAlgoCamera(props);
   const playUrl = String(dashUrl || '').trim();
   if (!playUrl) {
+    _cameraLogFailure('missing DASH URL', props, { hasSnapshot: Boolean(snapshotUrl) });
     if (snapshotUrl) {
       content.innerHTML = '';
       showSnapshot(content, snapshotUrl);
@@ -20022,7 +21054,10 @@ async function _startCameraDashPlayback(content, dashUrl, snapshotUrl, props = {
   content.appendChild(video);
   _armCameraPlaybackStartupTimer(content);
   const markPlaybackReady = () => _clearCameraPlaybackStartupTimer();
-  const failPlayback = () => _showCameraUnavailable(content);
+  const failPlayback = () => {
+    _cameraLogFailure('video element error', props, { url: manifestUrl, transport: 'dash' });
+    _showCameraUnavailable(content);
+  };
   video.addEventListener('loadeddata', markPlaybackReady, { once: true });
   video.addEventListener('canplay', markPlaybackReady, { once: true });
   video.addEventListener('playing', markPlaybackReady, { once: true });
@@ -20037,6 +21072,12 @@ async function _startCameraDashPlayback(content, dashUrl, snapshotUrl, props = {
       severity: detail?.severity || 0,
       category: detail?.category || 0,
       data: detail?.data || [],
+    });
+    _cameraLogFailure('DASH player error', props, {
+      url: manifestUrl,
+      code: detail?.code || 0,
+      severity: detail?.severity || 0,
+      category: detail?.category || 0,
     });
     _showCameraUnavailable(content);
   });
@@ -20061,6 +21102,10 @@ async function _startCameraDashPlayback(content, dashUrl, snapshotUrl, props = {
     await video.play().catch(() => {});
   } catch (err) {
     console.warn('[Camera][AL] DASH load failed, falling back to snapshot', {
+      url: manifestUrl,
+      error: String(err || ''),
+    });
+    _cameraLogFailure('DASH load failed', props, {
       url: manifestUrl,
       error: String(err || ''),
     });
@@ -20347,6 +21392,304 @@ async function _copyCameraShareUrl() {
   } catch (_) {}
 }
 
+function _cameraWaitForPaint() {
+  return new Promise(resolve => {
+    requestAnimationFrame(() => requestAnimationFrame(resolve));
+  });
+}
+
+function _cameraDelay(ms = 0) {
+  return new Promise(resolve => setTimeout(resolve, Math.max(0, Number(ms) || 0)));
+}
+
+async function _cameraWaitForMapQuiet(maxWaitMs = 1200) {
+  const startedAt = performance.now();
+  while ((map?.isMoving?.() || map?.isZooming?.() || map?.isRotating?.()) && performance.now() - startedAt < maxWaitMs) {
+    await _cameraDelay(80);
+  }
+  await _cameraWaitForPaint();
+}
+
+function _cameraPlaybackStillCurrent(seq, content, props = null) {
+  if (seq !== cameraPlaybackSeq) return false;
+  if (!content?.isConnected) return false;
+  const modal = document.getElementById('camera-modal');
+  if (modal?.style.display === 'none') return false;
+  if (props && cameraActiveProps && props !== cameraActiveProps) return false;
+  return true;
+}
+
+function _cameraPendingSnapshotUrl(props = {}, urls = {}) {
+  const directSnapshot = String(urls?.snapshotUrl || '').trim();
+  if (directSnapshot) return directSnapshot;
+  const floridaImageUrl = String(props?.imageUrl || '').trim();
+  if (floridaImageUrl.includes('fl511.com/map/Cctv')) return floridaImageUrl;
+  return '';
+}
+
+function _cameraShouldDeferProtectedResolve(props = {}, urls = {}) {
+  const hlsUrl = String(urls?.hlsUrl || '').trim();
+  if (_isKansasTrafficCamera(props) && _cameraResolvedHasVideo(props)) return true;
+  if (String(props?.imageUrl || '').trim().includes('fl511.com/map/Cctv')) return true;
+  if (hlsUrl.includes('arcadis-ivds.com')) return true;
+  return false;
+}
+
+function _isProtectedTrafficPlayback(props = {}, hlsUrl = '') {
+  const state = String(props?._state || props?.state || '').trim().toUpperCase();
+  const playUrl = String(hlsUrl || '').trim();
+  if (state === 'KS' && _cameraResolvedHasVideo(props)) return true;
+  if (String(props?.imageUrl || '').trim().includes('fl511.com/map/Cctv')) return true;
+  if (playUrl.includes('arcadis-ivds.com')) return true;
+  if (state === 'PA' && (playUrl || props?.view_id || props?.cameraId || props?.camera_id)) return true;
+  return false;
+}
+
+function _showCameraLoading(content, snapshotUrl = '') {
+  _destroyActiveCameraPlayback();
+  if (!content) return;
+  content.innerHTML = '';
+  content.innerHTML = `
+    <div class="camera-unavailable-state" role="status" aria-live="polite">
+      <div class="camera-unavailable-title">Loading camera stream...</div>
+      <div class="camera-unavailable-subtitle">${snapshotUrl ? 'Starting secure video' : 'Resolving secure video'}</div>
+    </div>
+  `;
+}
+
+async function _renderCameraPlayback(content, urls, props = {}) {
+  if (!content) return;
+  const dashUrl = String(urls?.dashUrl || '').trim();
+  const hlsUrl = String(urls?.hlsUrl || '').trim();
+  const snapshotUrl = String(urls?.snapshotUrl || '').trim();
+  _destroyActiveCameraPlayback();
+  content.innerHTML = '';
+  if (dashUrl) {
+    await _startCameraDashPlayback(content, dashUrl, snapshotUrl, props);
+    return;
+  }
+  if (hlsUrl) {
+    await _startCameraHlsPlayback(content, hlsUrl, snapshotUrl, props);
+    return;
+  }
+  if (snapshotUrl) {
+    showSnapshot(content, snapshotUrl);
+    return;
+  }
+  _cameraLogFailure('no playable camera URL', props, {});
+  content.innerHTML = noFeedEl();
+}
+
+async function _resolveCameraPlaybackUrls(props = {}) {
+  let { dashUrl, hlsUrl, snapshotUrl } = resolveUrls(props);
+  let resolvedTitle = '';
+  if (isIndianaCameraFeature({ properties: props || {} })) {
+    console.info('[Camera][IN] resolved camera URLs', {
+      dashUrl: dashUrl || '',
+      hlsUrl: hlsUrl || '',
+      snapshotUrl: snapshotUrl || '',
+      title: _cameraDisplayTitle(props),
+    });
+  }
+
+  if (_isKansasTrafficCamera(props || {})) {
+    const resolved = await _resolveKansasSignedCameraUrls(props || {}, {
+      dashUrl,
+      hlsUrl,
+      snapshotUrl,
+    });
+    dashUrl = resolved.dashUrl || dashUrl;
+    hlsUrl = resolved.hlsUrl;
+    snapshotUrl = resolved.snapshotUrl || snapshotUrl;
+    resolvedTitle = String(resolved.title || '').trim();
+  }
+
+  // Georgia 511: bare navigator.dot.ga.gov URLs are unsigned and often 401/403/503.
+  // Always fetch a fresh signed playlist URL using imageId at click time.
+  const isGeorgia = isGeorgiaCameraFeature({ properties: props || {} });
+  if (isGeorgia) {
+    const imageUrl = String(props.image_url || props.imageUrl || '').trim();
+    let imageId = String(props.imageId || props.image_id || '').trim();
+    if (!imageId) {
+      const m = imageUrl.match(/\/map\/Cctv\/(\d+)/i);
+      if (m) imageId = String(m[1] || '').trim();
+    }
+    if (imageId) {
+      try {
+        const tokenUrl = `https://511ga.org/Camera/GetVideoUrl?imageId=${encodeURIComponent(imageId)}&_=${Date.now()}`;
+        const r = await invoke('fetch_url_base64', { url: tokenUrl });
+        if (r?.status >= 200 && r?.status < 400 && r?.body_base64) {
+          const raw = _decodeBase64Text(r.body_base64).trim();
+          let signed = raw;
+          try { signed = JSON.parse(raw); } catch (_) {}
+          const signedUrl = String(signed || '').trim();
+          if (/^https?:\/\//i.test(signedUrl)) {
+            hlsUrl = signedUrl;
+          }
+        }
+      } catch (_) {}
+    }
+    if (!snapshotUrl && imageUrl) snapshotUrl = imageUrl;
+  }
+
+  const wisconsinTooltipId = _cameraWisconsinTooltipId(props);
+  if (wisconsinTooltipId) {
+    snapshotUrl = snapshotUrl || _cameraWisconsinSnapshotUrl(props);
+    if (!hlsUrl) {
+      try {
+        const tooltipUrl = `https://511wi.gov/tooltip/Cameras/${encodeURIComponent(wisconsinTooltipId)}?lang=en-US`;
+        const r = await invoke('fetch_url_base64', { url: tooltipUrl });
+        if (r?.status >= 200 && r?.status < 400 && r?.body_base64) {
+          const html = _decodeBase64Text(r.body_base64);
+          const tooltipVideoUrl = _extractWisconsinTooltipVideoUrl(html, tooltipUrl);
+          if (tooltipVideoUrl) hlsUrl = tooltipVideoUrl;
+          if (!snapshotUrl) {
+            const imgMatch = html.match(/<img[^>]+src=["']([^"']+)["']/i);
+            if (imgMatch) snapshotUrl = _cameraAbsoluteUrl(imgMatch[1], tooltipUrl);
+          }
+        }
+      } catch (_) {}
+    }
+  }
+
+  // FL511 (Florida): imageUrl = https://www.fl511.com/map/Cctv/<imageId>
+  // Use the two-step divas.cloud token flow to get a live HLS URL.
+  if (props.imageUrl && props.imageUrl.includes('fl511.com/map/Cctv')) {
+    snapshotUrl = snapshotUrl || props.imageUrl; // snapshot fallback
+    const m = props.imageUrl.match(/\/map\/Cctv\/(\d+)/);
+    if (m) {
+      const imageId = parseInt(m[1]);
+      const cacheKey = `FL:${imageId}`;
+      const cached = _cameraProtectedCacheGet(cacheKey);
+      if (cached?.hlsUrl || cached?.snapshotUrl) {
+        hlsUrl = String(cached.hlsUrl || '').trim() || hlsUrl;
+        snapshotUrl = String(cached.snapshotUrl || '').trim() || snapshotUrl;
+      } else {
+        const baseChannelUrl = _cameraStripTokenParam(hlsUrl);
+        try {
+          const r = await invoke('fetch_fl511_stream', {
+            imageId,
+            channelUrl: /divas\.cloud/i.test(baseChannelUrl) ? baseChannelUrl : '',
+          });
+          if (r && r.stream_url) {
+            hlsUrl = String(r.stream_url || '').trim();
+          } else if (r && r.stream_token) {
+            // No channel URL returned — discover it from the tooltip endpoint
+            try {
+              const tooltipUrl = `https://www.fl511.com/tooltip/Cameras/${imageId}?lang=en-US`;
+              const tr = await invoke('fetch_url_base64', { url: tooltipUrl });
+              if (tr.status === 200 && tr.body_base64) {
+                const html = _decodeBase64Text(tr.body_base64);
+                const chanMatch = html.match(/https:\/\/[^"']+divas\.cloud[^"']+index\.m3u8[^"']*/i);
+                if (chanMatch) {
+                  const baseTooltipChannel = _cameraStripTokenParam(chanMatch[0]);
+                  const sep = baseTooltipChannel.includes('?') ? '&' : '?';
+                  hlsUrl = `${baseTooltipChannel}${sep}token=${r.stream_token}`;
+                } else {
+                  console.warn('[Camera][FL511] tooltip missing channel URL', { imageId });
+                }
+              } else {
+                console.warn('[Camera][FL511] tooltip fetch failed', { imageId, status: Number(tr?.status) || 0 });
+              }
+            } catch (tooltipErr) {
+              console.warn('[Camera][FL511] tooltip/channel resolve failed for imageId=' + imageId, tooltipErr);
+            }
+          } else {
+            console.warn('[Camera][FL511] resolve failed for imageId=' + imageId, r);
+          }
+        } catch (err) {
+          console.warn('[Camera][FL511] resolve failed for imageId=' + imageId, err);
+        }
+        if (hlsUrl || snapshotUrl) {
+          _cameraProtectedCacheSet(cacheKey, {
+            hlsUrl: String(hlsUrl || '').trim(),
+            snapshotUrl: String(snapshotUrl || '').trim(),
+          });
+        }
+      }
+    }
+  }
+
+  // NY511 (New York): imageUrl = https://511ny.org/map/Cctv/<imageId>
+  // Same ASP.NET token portal pattern.  Show snapshot via proxy; HLS is skyvdn (direct).
+  if (props.imageUrl && props.imageUrl.includes('511ny.org/map/Cctv') && !snapshotUrl) {
+    snapshotUrl = props.imageUrl;
+  }
+
+  // Pennsylvania (PennDOT/511pa.com): arcadis-ivds HLS needs a short-lived token.
+  // view_id is the imageId for GetVideoUrl; m3u8_url is the channel base URL.
+  if (hlsUrl && hlsUrl.includes('arcadis-ivds.com')) {
+    const effectiveViewId = String(props.view_id || props.cameraId || props.camera_id || props.id || '').trim()
+      .replace(/^[A-Z]{2}:/, '')
+      .replace(/^camera\//, '');
+    if (!effectiveViewId) {
+      console.warn('[Camera][PA] 511pa missing view_id/cameraId', props);
+      hlsUrl = null;
+    } else {
+      const channelUrl = _cameraStripTokenParam(hlsUrl);
+      const cacheKey = `PA:${effectiveViewId}:${channelUrl}`;
+      const cached = _cameraProtectedCacheGet(cacheKey);
+      if (cached?.hlsUrl) {
+        hlsUrl = String(cached.hlsUrl || '').trim();
+      } else {
+        try {
+          const streamUrl = await invoke('fetch_pendot_stream', {
+            imageId: effectiveViewId,
+            channelUrl,
+          });
+          if (streamUrl) {
+            hlsUrl = String(streamUrl || '').trim();
+            _cameraProtectedCacheSet(cacheKey, { hlsUrl });
+          } else {
+            console.warn('[Camera][PA] 511pa resolver returned empty stream URL', {
+              imageId: effectiveViewId,
+              channelUrl,
+            });
+            hlsUrl = null; // fall through to snapshot
+          }
+        } catch (e) {
+          console.warn('[Camera][PA] 511pa signed stream resolve failed', {
+            imageId: effectiveViewId,
+            channelUrl,
+            error: String(e || ''),
+          });
+          hlsUrl = null; // fall through to snapshot
+        }
+      }
+    }
+  }
+
+  // Texas: workers.dev returns 404 ? fall back to TxDOT JSON endpoint
+  if (!snapshotUrl && props.snapshot_json_url) {
+    try {
+      const r = await invoke('fetch_url_base64', { url: props.snapshot_json_url });
+      if (r.status === 200) {
+        const raw = atob(r.body_base64);
+        if (r.content_type.includes('json')) {
+          const j = JSON.parse(raw);
+          // TxDOT returns {imageData: base64, contentType: "image/jpeg"} or similar
+          if (j.imageData || j.base64Image || j.image) {
+            const b64  = j.imageData || j.base64Image || j.image;
+            const mime = j.contentType || j.mimeType || 'image/jpeg';
+            snapshotUrl = `data:${mime};base64,${b64}`;
+          } else {
+            snapshotUrl = j.imageUrl || j.url || j.snapshotUrl || j.image_url || null;
+          }
+        } else if (r.content_type.startsWith('image/')) {
+          snapshotUrl = `data:${r.content_type};base64,${r.body_base64}`;
+        }
+      }
+    } catch (_) {}
+  }
+
+  return {
+    dashUrl: String(dashUrl || '').trim(),
+    hlsUrl: String(hlsUrl || '').trim(),
+    snapshotUrl: String(snapshotUrl || '').trim(),
+    title: resolvedTitle,
+  };
+}
+
 function _normalizeYoutubeHost(hostname) {
   const host = String(hostname || '').trim().toLowerCase();
   return host.startsWith('www.') ? host.slice(4) : host;
@@ -20516,173 +21859,13 @@ async function openCamera(props) {
         const first = cameras[0];
         cameraActiveProps = first || props || null;
         if (titleEl) titleEl.textContent = _cameraDisplayTitle(first) || _cameraDisplayTitle(props);
-        const firstUrls = resolveUrls(first);
-        _setCameraShareUrl(firstUrls.dashUrl || firstUrls.hlsUrl || firstUrls.snapshotUrl || '');
-        await _playCameraEntry(first, content);
+        void _playCameraEntry(first, content, { titleEl });
         return;
       }
     } catch (_) {}
   }
   _showSingleCameraDirection(props);
-
-  let { dashUrl, hlsUrl, snapshotUrl } = resolveUrls(props);
-  if (isIndianaCameraFeature({ properties: props || {} })) {
-    console.info('[Camera][IN] resolved camera URLs', {
-      dashUrl: dashUrl || '',
-      hlsUrl: hlsUrl || '',
-      snapshotUrl: snapshotUrl || '',
-      title: _cameraDisplayTitle(props),
-    });
-  }
-
-  if (_isKansasTrafficCamera(props || {})) {
-    const resolved = await _resolveKansasSignedCameraUrls(props || {}, {
-      dashUrl,
-      hlsUrl,
-      snapshotUrl,
-    });
-    dashUrl = resolved.dashUrl || dashUrl;
-    hlsUrl = resolved.hlsUrl;
-    snapshotUrl = resolved.snapshotUrl || snapshotUrl;
-    if (resolved.title) titleEl.textContent = resolved.title;
-  }
-
-  // Georgia 511: bare navigator.dot.ga.gov URLs are unsigned and often 401/403/503.
-  // Always fetch a fresh signed playlist URL using imageId at click time.
-  const isGeorgia = isGeorgiaCameraFeature({ properties: props || {} });
-  if (isGeorgia) {
-    const imageUrl = String(props.image_url || props.imageUrl || '').trim();
-    let imageId = String(props.imageId || props.image_id || '').trim();
-    if (!imageId) {
-      const m = imageUrl.match(/\/map\/Cctv\/(\d+)/i);
-      if (m) imageId = String(m[1] || '').trim();
-    }
-    if (imageId) {
-      try {
-        const tokenUrl = `https://511ga.org/Camera/GetVideoUrl?imageId=${encodeURIComponent(imageId)}&_=${Date.now()}`;
-        const r = await invoke('fetch_url_base64', { url: tokenUrl });
-        if (r?.status >= 200 && r?.status < 400 && r?.body_base64) {
-          const raw = _decodeBase64Text(r.body_base64).trim();
-          let signed = raw;
-          try { signed = JSON.parse(raw); } catch (_) {}
-          const signedUrl = String(signed || '').trim();
-          if (/^https?:\/\//i.test(signedUrl)) {
-            hlsUrl = signedUrl;
-          }
-        }
-      } catch (_) {}
-    }
-    if (!snapshotUrl && imageUrl) snapshotUrl = imageUrl;
-  }
-
-  const wisconsinTooltipId = _cameraWisconsinTooltipId(props);
-  if (wisconsinTooltipId) {
-    snapshotUrl = snapshotUrl || _cameraWisconsinSnapshotUrl(props);
-    if (!hlsUrl) {
-      try {
-        const tooltipUrl = `https://511wi.gov/tooltip/Cameras/${encodeURIComponent(wisconsinTooltipId)}?lang=en-US`;
-        const r = await invoke('fetch_url_base64', { url: tooltipUrl });
-        if (r?.status >= 200 && r?.status < 400 && r?.body_base64) {
-          const html = _decodeBase64Text(r.body_base64);
-          const tooltipVideoUrl = _extractWisconsinTooltipVideoUrl(html, tooltipUrl);
-          if (tooltipVideoUrl) hlsUrl = tooltipVideoUrl;
-          if (!snapshotUrl) {
-            const imgMatch = html.match(/<img[^>]+src=["']([^"']+)["']/i);
-            if (imgMatch) snapshotUrl = _cameraAbsoluteUrl(imgMatch[1], tooltipUrl);
-          }
-        }
-      } catch (_) {}
-    }
-  }
-
-  // FL511 (Florida): imageUrl = https://www.fl511.com/map/Cctv/<imageId>
-  // Use the two-step divas.cloud token flow to get a live HLS URL.
-  if (props.imageUrl && props.imageUrl.includes('fl511.com/map/Cctv')) {
-    snapshotUrl = snapshotUrl || props.imageUrl; // snapshot fallback
-    const m = props.imageUrl.match(/\/map\/Cctv\/(\d+)/);
-    if (m && !hlsUrl) {
-      const imageId = parseInt(m[1]);
-      try {
-        const r = await invoke('fetch_fl511_stream', { imageId, channelUrl: '' });
-        if (r && r.stream_url) {
-          hlsUrl = r.stream_url;
-        } else if (r && r.stream_token) {
-          // No channel URL returned — discover it from the tooltip endpoint
-          try {
-            const tooltipUrl = `https://www.fl511.com/tooltip/Cameras/${imageId}?lang=en-US`;
-            const tr = await invoke('fetch_url_base64', { url: tooltipUrl });
-            if (tr.status === 200) {
-              const html = atob(tr.body_base64);
-              const chanMatch = html.match(/https:\/\/[^"']+divas\.cloud[^"']+index\.m3u8/);
-              if (chanMatch) {
-                const sep = chanMatch[0].includes('?') ? '&' : '?';
-                hlsUrl = `${chanMatch[0]}${sep}token=${r.stream_token}`;
-              }
-            }
-          } catch (_) {}
-        }
-      } catch (_) {}
-    }
-  }
-
-  // NY511 (New York): imageUrl = https://511ny.org/map/Cctv/<imageId>
-  // Same ASP.NET token portal pattern.  Show snapshot via proxy; HLS is skyvdn (direct).
-  if (props.imageUrl && props.imageUrl.includes('511ny.org/map/Cctv') && !snapshotUrl) {
-    snapshotUrl = props.imageUrl;
-  }
-
-  // Pennsylvania (PennDOT/511pa.com): arcadis-ivds HLS needs a short-lived token.
-  // view_id is the imageId for GetVideoUrl; m3u8_url is the channel base URL.
-  if (hlsUrl && hlsUrl.includes('arcadis-ivds.com') && props.view_id) {
-    try {
-      const streamUrl = await invoke('fetch_pendot_stream', {
-        imageId: String(props.view_id),
-        channelUrl: hlsUrl,
-      });
-      if (streamUrl) {
-        hlsUrl = streamUrl;
-      } else {
-        hlsUrl = null; // fall through to snapshot
-      }
-    } catch (e) {
-      hlsUrl = null; // fall through to snapshot
-    }
-  }
-
-  // Texas: workers.dev returns 404 ? fall back to TxDOT JSON endpoint
-  if (!snapshotUrl && props.snapshot_json_url) {
-    try {
-      const r = await invoke('fetch_url_base64', { url: props.snapshot_json_url });
-      if (r.status === 200) {
-        const raw = atob(r.body_base64);
-        if (r.content_type.includes('json')) {
-          const j = JSON.parse(raw);
-          // TxDOT returns {imageData: base64, contentType: "image/jpeg"} or similar
-          if (j.imageData || j.base64Image || j.image) {
-            const b64  = j.imageData || j.base64Image || j.image;
-            const mime = j.contentType || j.mimeType || 'image/jpeg';
-            snapshotUrl = `data:${mime};base64,${b64}`;
-          } else {
-            snapshotUrl = j.imageUrl || j.url || j.snapshotUrl || j.image_url || null;
-          }
-        } else if (r.content_type.startsWith('image/')) {
-          snapshotUrl = `data:${r.content_type};base64,${r.body_base64}`;
-        }
-      }
-    } catch (_) {}
-  }
-
-  _setCameraShareUrl(dashUrl || hlsUrl || snapshotUrl || '');
-
-  if (dashUrl) {
-    await _startCameraDashPlayback(content, dashUrl, snapshotUrl, props);
-  } else if (hlsUrl) {
-    await _startCameraHlsPlayback(content, hlsUrl, snapshotUrl, props);
-  } else if (snapshotUrl) {
-    showSnapshot(content, snapshotUrl);
-  } else {
-    content.innerHTML = noFeedEl();
-  }
+  void _playCameraEntry(props, content, { titleEl });
 }
 
 function noFeedEl() {
@@ -20703,7 +21886,11 @@ function noFeedEl() {
 
 function showSnapshot(container, url) {
   _clearCameraPlaybackStartupTimer();
-  if (!url) { container.innerHTML = noFeedEl(); return; }
+  if (!url) {
+    _cameraLogFailure('missing snapshot URL', cameraActiveProps || {}, {});
+    container.innerHTML = noFeedEl();
+    return;
+  }
   const img = document.createElement('img');
   img.style.cssText = 'width:100%;height:100%;object-fit:contain;background:#000;display:block;';
   container.appendChild(img);
@@ -20719,6 +21906,10 @@ function showSnapshot(container, url) {
     try {
       const result = await invoke('fetch_url_base64', { url });
       if (result.status < 200 || result.status >= 400) {
+        _cameraLogFailure('snapshot fetch failed', cameraActiveProps || {}, {
+          url,
+          status: Number(result?.status) || 0,
+        });
         img.style.opacity = '0.3';
         return;
       }
@@ -20726,6 +21917,10 @@ function showSnapshot(container, url) {
       img.src = `data:${mime};base64,${result.body_base64}`;
       img.style.opacity = '1';
     } catch (e) {
+      _cameraLogFailure('snapshot fetch threw', cameraActiveProps || {}, {
+        url,
+        error: String(e || ''),
+      });
       img.style.opacity = '0.3';
     }
   }
@@ -20774,60 +21969,41 @@ function _switchDir(idx) {
   cameraActiveProps = cam || null;
   const titleEl = document.getElementById('camera-title');
   if (titleEl) titleEl.textContent = _cameraDisplayTitle(cam);
-  const camUrls = resolveUrls(cam);
-  _setCameraShareUrl(camUrls.dashUrl || camUrls.hlsUrl || camUrls.snapshotUrl || '');
-  _destroyActiveCameraPlayback();
   const content = document.getElementById('camera-content');
-  if (content) { content.innerHTML = ''; void _playCameraEntry(cam, content); }
+  if (content) { void _playCameraEntry(cam, content, { titleEl }); }
 }
 
-async function _playCameraEntry(cam, content) {
-  let { dashUrl, hlsUrl, snapshotUrl } = resolveUrls(cam || {});
-  if (_isKansasTrafficCamera(cam || {})) {
-    const resolved = await _resolveKansasSignedCameraUrls(cam || {}, {
-      dashUrl,
-      hlsUrl,
-      snapshotUrl,
-    });
-    dashUrl = resolved.dashUrl || dashUrl;
-    hlsUrl = resolved.hlsUrl;
-    snapshotUrl = resolved.snapshotUrl || snapshotUrl;
-  }
-  const wisconsinTooltipId = _cameraWisconsinTooltipId(cam || {});
-  if (wisconsinTooltipId) {
-    snapshotUrl = snapshotUrl || _cameraWisconsinSnapshotUrl(cam || {});
-    if (!hlsUrl) {
-      try {
-        const tooltipUrl = `https://511wi.gov/tooltip/Cameras/${encodeURIComponent(wisconsinTooltipId)}?lang=en-US`;
-        const r = await invoke('fetch_url_base64', { url: tooltipUrl });
-        if (r?.status >= 200 && r?.status < 400 && r?.body_base64) {
-          const html = _decodeBase64Text(r.body_base64);
-          const tooltipVideoUrl = _extractWisconsinTooltipVideoUrl(html, tooltipUrl);
-          if (tooltipVideoUrl) hlsUrl = tooltipVideoUrl;
-          if (!snapshotUrl) {
-            const imgMatch = html.match(/<img[^>]+src=["']([^"']+)["']/i);
-            if (imgMatch) snapshotUrl = _cameraAbsoluteUrl(imgMatch[1], tooltipUrl);
-          }
-        }
-      } catch (_) {}
-    }
-  }
-  if (dashUrl) {
-    await _startCameraDashPlayback(content, dashUrl, snapshotUrl, cam || {});
+async function _playCameraEntry(cam, content, options = {}) {
+  const props = cam || {};
+  const titleEl = options?.titleEl || document.getElementById('camera-title');
+  const initialUrls = resolveUrls(props);
+  const playbackSeq = ++cameraPlaybackSeq;
+  const deferProtected = _cameraShouldDeferProtectedResolve(props, initialUrls);
+
+  if (deferProtected) {
+    _setCameraShareUrl(_cameraPendingSnapshotUrl(props, initialUrls));
+    _showCameraLoading(content, _cameraPendingSnapshotUrl(props, initialUrls));
+    void (async () => {
+      await _cameraWaitForPaint();
+      if (!_cameraPlaybackStillCurrent(playbackSeq, content, props)) return;
+      const resolved = await _resolveCameraPlaybackUrls(props);
+      if (!_cameraPlaybackStillCurrent(playbackSeq, content, props)) return;
+      if (resolved.title && titleEl) titleEl.textContent = resolved.title;
+      _setCameraShareUrl(resolved.dashUrl || resolved.hlsUrl || resolved.snapshotUrl || '');
+      await _renderCameraPlayback(content, resolved, props);
+    })();
     return;
   }
-  if (hlsUrl) {
-    await _startCameraHlsPlayback(content, hlsUrl, snapshotUrl, cam || {});
-    return;
-  }
-  if (snapshotUrl) {
-    showSnapshot(content, snapshotUrl);
-    return;
-  }
-  content.innerHTML = noFeedEl();
+
+  const resolved = await _resolveCameraPlaybackUrls(props);
+  if (!_cameraPlaybackStillCurrent(playbackSeq, content, props)) return;
+  if (resolved.title && titleEl) titleEl.textContent = resolved.title;
+  _setCameraShareUrl(resolved.dashUrl || resolved.hlsUrl || resolved.snapshotUrl || '');
+  await _renderCameraPlayback(content, resolved, props);
 }
 
 function closeCamera() {
+  cameraPlaybackSeq += 1;
   _clearCameraPlaybackStartupTimer();
   if (cameraHls)     { cameraHls.destroy(); cameraHls = null; }
   if (cameraShaka)   { cameraShaka.destroy().catch(() => {}); cameraShaka = null; }
@@ -20928,6 +22104,9 @@ function saveSettings() {
       mesoVisible,
       mesoFilterSelection,
       radarSitesVisible,
+      radarSitePillMode,
+      radarSitesWsrColor,
+      radarSitesTerminalColor,
       watchesVisible,
       lightningVisible,
       tvsVisible,
@@ -20945,6 +22124,8 @@ function saveSettings() {
       cameraStateFilter,
       youtubeEmbedDraft,
       warningPrefs,
+      nwsApiEnabled,
+      nwwsEnabled,
       nwwsUsername,
       nwwsPassword,
     }));
@@ -20988,6 +22169,12 @@ function loadSettings() {
       };
     }
     if (s.radarSitesVisible != null) radarSitesVisible = Boolean(s.radarSitesVisible);
+    if (s.radarSitePillMode != null) radarSitePillMode = Boolean(s.radarSitePillMode);
+    radarSitesWsrColor = _normalizeRadarSiteColor(s.radarSitesWsrColor, RADAR_SITE_DEFAULT_WSR_COLOR);
+    const savedTerminalColor = _normalizeSpcHex(s.radarSitesTerminalColor);
+    radarSitesTerminalColor = savedTerminalColor === RADAR_SITE_LEGACY_TERMINAL_COLOR
+      ? RADAR_SITE_DEFAULT_TERMINAL_COLOR
+      : _normalizeRadarSiteColor(savedTerminalColor, RADAR_SITE_DEFAULT_TERMINAL_COLOR);
     if (s.watchesVisible != null) watchesVisible = Boolean(s.watchesVisible);
     if (s.lightningVisible != null) lightningVisible = Boolean(s.lightningVisible);
     if (s.tvsVisible != null) tvsVisible = Boolean(s.tvsVisible);
@@ -21032,6 +22219,8 @@ function loadSettings() {
       youtubeEmbedDraft = s.youtubeEmbedDraft;
     }
     warningPrefs = _normalizeWarningPrefs(s.warningPrefs);
+    if (s.nwsApiEnabled != null) nwsApiEnabled = Boolean(s.nwsApiEnabled);
+    if (s.nwwsEnabled != null) nwwsEnabled = Boolean(s.nwwsEnabled);
     nwwsUsername = _normalizeNwwsCredential(s.nwwsUsername);
     nwwsPassword = _normalizeNwwsCredential(s.nwwsPassword);
     // Backward compatibility with the short-lived per-toggle build.
@@ -21047,6 +22236,7 @@ function loadSettings() {
     syncSpcFilterUi();
     syncMesoFilterUi();
     syncStormFilterUi();
+    syncRadarSiteSettingsUi();
     syncMapStyleUi();
     syncNwwsSettingsUi();
     syncAlertSourceUi();
@@ -21063,6 +22253,8 @@ function loadSettings() {
     if (mesoTog) mesoTog.checked = mesoVisible;
     const radarSitesTog = document.getElementById('toggle-radar-sites');
     if (radarSitesTog) radarSitesTog.checked = radarSitesVisible;
+    const radarSitesPillTog = document.getElementById('toggle-radar-sites-pill');
+    if (radarSitesPillTog) radarSitesPillTog.checked = radarSitePillMode;
     const watchTog = document.getElementById('toggle-watches');
     if (watchTog) watchTog.checked = watchesVisible;
     const lightningTog = document.getElementById('toggle-lightning');
@@ -21081,6 +22273,7 @@ function loadSettings() {
     if (mpingTog) mpingTog.checked = mpingVisible;
     const spotterLocTog = document.getElementById('toggle-spotter-locations');
     if (spotterLocTog) spotterLocTog.checked = spotterLocationsVisible;
+    _refreshStationSourceData();
     _setAlertLayersVisible(alertsVisible);
   } catch (_) {}
 }
@@ -21137,26 +22330,23 @@ const CT_DEFAULT_PALETTES = {
     ],
   },
   VEL: {
-    product: 'VEL',
-    units: 'kt',
-    scale: 1,
-    step: 8,
+    product: 'BV',
+    units: 'MPH',
+    scale: 2.237,
+    step: 20,
     stops: [
-      [-64.0,   4,  29, 122, 230],
-      [-50.0,  12,  68, 214, 230],
-      [-36.0,  42, 129, 240, 230],
-      [-26.0,  72, 181, 240, 230],
-      [-16.0, 132, 211, 240, 230],
-      [ -8.0, 176, 231, 246, 220],
-      [ -1.0, 200, 200, 200, 100],
-      [  0.0, 200, 200, 200, 100],
-      [  1.0, 200, 200, 200, 100],
-      [  8.0, 246, 200, 176, 220],
-      [ 16.0, 240, 175, 132, 230],
-      [ 26.0, 240, 129,  72, 230],
-      [ 36.0, 240,  68,  42, 230],
-      [ 50.0, 214,  24,  12, 230],
-      [ 64.0, 122,   0,   4, 230],
+      [-160.0,   0,   0,   0, 255],
+      [-120.0,   0,   0, 255, 255],
+      [ -58.0,  71, 240, 240, 255],
+      [ -50.0,  82, 247,  89, 255],
+      [ -10.0,   5,  33,   0, 255],
+      [   0.0, 110, 110, 110, 255],
+      [  10.0,  33,   0,   0, 255],
+      [  50.0, 255,  55,  26, 255],
+      [  58.0, 254, 154,  39, 255],
+      [  70.0, 255, 255,   0, 255],
+      [ 120.0, 164,  89,  68, 255],
+      [ 160.0,   0,   0,   0, 255],
     ],
   },
   SRV: {
@@ -21361,7 +22551,7 @@ const CT_DEFAULT_PALETTES = {
 // Default gradient CSS for preview bars
 const CT_DEFAULT_GRADIENTS = {
   REF: 'linear-gradient(to right, #04E9E7 0%, #019CF4 12%, #0300F4 18%, #02FD02 24%, #01C501 30%, #008E00 37%, #FDF802 43%, #E7BC00 50%, #FD9500 57%, #FD0000 64%, #D40000 72%, #BC0000 79%, #F800FD 86%, #9854C6 100%)',
-  VEL: 'linear-gradient(to right, #041D7A 0%, #0C44D6 8%, #2A81F0 17%, #48B5F0 25%, #84D3F0 34%, #B0E7F6 42%, #C8C8C8 45%, #C8C8C8 55%, #F6C8B0 58%, #F0AF84 67%, #F08148 75%, #F0442A 83%, #D6180C 92%, #7A0004 100%)',
+  VEL: 'linear-gradient(to right, rgb(0,0,0) 0%, rgb(0,0,255) 12.5%, rgb(71,240,240) 31.9%, rgb(82,247,89) 34.4%, rgb(5,33,0) 46.9%, rgb(110,110,110) 50%, rgb(33,0,0) 53.1%, rgb(255,55,26) 65.6%, rgb(254,154,39) 68.1%, rgb(255,255,0) 71.9%, rgb(164,89,68) 87.5%, rgb(0,0,0) 100%)',
   CC:  'linear-gradient(to right, rgb(20,0,50) 0%, rgb(22,0,55) 5%, rgb(23,0,59) 10%, rgb(25,0,64) 15%, rgb(20,0,69) 20%, rgb(28,0,73) 25%, rgb(30,0,79) 30%, rgb(22,0,88) 35%, rgb(9,0,101) 40%, rgb(0,0,113) 45%, rgb(0,0,130) 50%, rgb(0,0,146) 55%, rgb(0,0,163) 60%, rgb(0,0,203) 65%, rgb(30,30,255) 70%, rgb(120,120,255) 75%, rgb(93,229,119) 80%, rgb(121,235,17) 85%, rgb(255,187,0) 90%, rgb(255,11,0) 95%, rgb(25,25,25) 100%)',
   ZDR: 'linear-gradient(to right, rgba(0,0,0,0.78) 0%, rgba(142,121,181,0.84) 33%, rgba(10,10,155,0.86) 38%, rgba(68,248,212,0.88) 47%, rgba(90,221,98,0.88) 53%, rgba(255,255,100,0.90) 60%, rgba(220,10,5,0.92) 73%, rgba(175,0,0,0.92) 80%, rgba(240,120,180,0.92) 87%, rgba(255,255,255,0.94) 93%, rgba(145,45,150,0.96) 100%)',
   KDP: 'linear-gradient(to right, rgb(142,142,142) 0%, rgb(76,0,1) 12.5%, rgb(163,7,48) 18.8%, rgb(234,115,180) 25%, rgb(153,126,185) 29.2%, rgb(104,244,244) 33.3%, rgb(26,186,52) 37.5%, rgb(17,249,16) 41.7%, rgb(247,252,0) 50%, rgb(255,124,16) 58.3%, rgb(255,196,124) 75%, rgb(121,2,125) 100%)',
