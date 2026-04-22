@@ -29,7 +29,7 @@ const APP_UPDATE_GITHUB_OWNER: &str = "anony121221";
 const APP_UPDATE_GITHUB_REPO: &str = "app";
 const APP_UPDATE_GITHUB_TOKEN: &str = "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";
 const APP_UPDATE_USER_AGENT: &str = "RadarApp-Updater";
-const DECODE_CACHE_VERSION: u32 = 1;
+const DECODE_CACHE_VERSION: u32 = 3;
 const DECODE_CACHE_MAX_FILES: usize = 384;
 const DECODE_CACHE_MAX_BYTES: u64 = 768 * 1024 * 1024;
 const DECODE_CACHE_MAX_AGE_SECS: u64 = 3 * 24 * 60 * 60;
@@ -2637,6 +2637,25 @@ async fn fetch_url_base64(url: String, timeout_ms: Option<u64>) -> Result<FetchB
 //   Step 2: POST divas.cloud/.../GetSecureTokenUriBySourceId  → "?token=<hex>"
 //   Result: assemble final m3u8 URL from the divas.cloud channel URL + token
 
+#[tauri::command]
+async fn fetch_url_bytes(url: String, timeout_ms: Option<u64>) -> Result<tauri::ipc::Response, String> {
+    if !url.starts_with("http://") && !url.starts_with("https://") {
+        return Err("Only http/https URLs allowed".into());
+    }
+    tauri::async_runtime::spawn_blocking(move || {
+        let result = do_fetch(url, timeout_ms)?;
+        if result.status < 200 || result.status >= 400 {
+            return Err(format!("HTTP {}", result.status));
+        }
+        let bytes = B64
+            .decode(result.body_base64.as_bytes())
+            .map_err(|e| e.to_string())?;
+        Ok(tauri::ipc::Response::new(bytes))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 const FL511_TOKEN_TIMEOUT: Duration = Duration::from_secs(20);
 const FL511_CSRF_TTL: Duration = Duration::from_secs(300);
 
@@ -3919,6 +3938,7 @@ pub fn run() {
             get_app_version,
             install_app_update,
             fetch_url_base64,
+            fetch_url_bytes,
             fetch_fl511_stream,
             fetch_pendot_stream,
             fetch_kandrive_stream,

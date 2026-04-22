@@ -471,7 +471,12 @@ def parse_scan_time_ms(datetime_str: str, filename: str) -> float:
     """Return milliseconds since Unix epoch."""
     if datetime_str:
         try:
-            dt = datetime.fromisoformat(datetime_str.replace('Z', '+00:00'))
+            normalized = str(datetime_str).strip().replace(' ', 'T')
+            if normalized.endswith('Z'):
+                normalized = normalized[:-1] + '+00:00'
+            elif not re.search(r'(?:[+-]\d{2}:\d{2})$', normalized):
+                normalized = f'{normalized}+00:00'
+            dt = datetime.fromisoformat(normalized)
             return dt.timestamp() * 1000.0
         except Exception:
             pass
