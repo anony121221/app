@@ -406,6 +406,7 @@ function _cameraDirectionLabel(props) {
     || props?.Direction
     || props?.DIRECTION
     || props?.dir
+    || props?.directionLabel
     || ''
   );
   if (explicit) return explicit;
@@ -717,7 +718,7 @@ function _buildMississippiGroupedFeatures(rawFeatures) {
   return features;
 }
 
-function _buildOklahomaGroupedFeatures(raw) {
+function _buildOklahomaGroupedFeaturesLegacy(raw) {
   const okFeatures = Array.isArray(raw?.features) ? raw.features : [];
   const poleMap = new Map();
   for (const f of okFeatures) {
@@ -750,6 +751,90 @@ function _buildOklahomaGroupedFeatures(raw) {
     f.properties._has_video = (f.properties._cameras || []).some(cam => _cameraFeatureHasVideo(cam)) ? 1 : 0;
     delete f.properties._cameras;
     features.push(f);
+  }
+  return features;
+}
+
+function _oklahomaCameraStreamUrl(props = {}) {
+  return String(
+    props?.m3u8
+    || props?.m3u8Url
+    || props?.m3u8_url
+    || props?.stream_url
+    || props?.videoUrl
+    || props?.video_url
+    || props?.streamSrc
+    || props?.url
+    || ''
+  ).trim();
+}
+
+function _oklahomaCameraEntry(props = {}) {
+  const streamUrl = _oklahomaCameraStreamUrl(props);
+  const cameraId = String(props?.cameraId ?? props?.camera_id ?? props?.id ?? '').trim();
+  const direction = _normalizeCardinalDirection(props?.direction || props?.directionLabel || props?.dir || '') || String(props?.direction || props?.directionLabel || '').trim();
+  const name = String(props?.name || props?.cameraName || props?.title || props?.poleName || 'Oklahoma Camera').trim();
+  return {
+    ...props,
+    id: cameraId,
+    cameraId,
+    name,
+    title: name,
+    location: String(props?.location || props?.locationText || name).trim(),
+    direction,
+    directionLabel: direction,
+    m3u8: streamUrl,
+    m3u8Url: streamUrl,
+    m3u8_url: streamUrl,
+    stream_url: streamUrl,
+    videoUrl: streamUrl,
+    source: String(props?.source || props?.provider || 'OK').trim(),
+    provider: String(props?.provider || 'oktraffic').trim(),
+    state: 'Oklahoma',
+    _state: 'OK',
+  };
+}
+
+function _buildOklahomaGroupedFeatures(raw) {
+  const okFeatures = Array.isArray(raw?.features) ? raw.features : [];
+  const poleMap = new Map();
+  for (const f of okFeatures) {
+    const c = _cameraCoords(f);
+    if (!c) continue;
+    const p = f?.properties || {};
+    const streamUrl = _oklahomaCameraStreamUrl(p);
+    if (!streamUrl) continue;
+    const key = p.poleId != null ? String(p.poleId) : `${c[0].toFixed(5)},${c[1].toFixed(5)}`;
+    if (!poleMap.has(key)) {
+      poleMap.set(key, {
+        coords: c,
+        poleId: p.poleId ?? '',
+        name: String(p.poleName || p.roadway || p.name || 'Oklahoma Camera').trim(),
+        city: String(p.city || '').trim(),
+        cameras: [],
+      });
+    }
+    poleMap.get(key).cameras.push(_oklahomaCameraEntry(p));
+  }
+  const features = [];
+  for (const group of poleMap.values()) {
+    const cams = group.cameras
+      .filter(cam => _cameraFeatureHasVideo(cam))
+      .sort((a, b) => _cameraDirectionLabel(a).localeCompare(_cameraDirectionLabel(b)) || String(a.name || '').localeCompare(String(b.name || '')));
+    if (!cams.length) continue;
+    features.push(_cameraPointFeature(group.coords[0], group.coords[1], {
+      poleId: group.poleId,
+      name: group.name,
+      title: group.name,
+      location: group.name,
+      city: group.city,
+      source: 'OK',
+      provider: 'oktraffic',
+      state: 'Oklahoma',
+      _state: 'OK',
+      cameras: JSON.stringify(cams),
+      _has_video: 1,
+    }, group.poleId ? `OK:${group.poleId}` : `OK:${group.coords[0]},${group.coords[1]}`));
   }
   return features;
 }
@@ -788,6 +873,10 @@ function _inKansasBounds(lon, lat) {
 function _composeTrafficCameraFeatures(datasets = {}) {
   const features = [];
   for (const [stateCode, geojson] of Object.entries(datasets)) {
+    if (stateCode === 'OK') {
+      features.push(..._buildOklahomaGroupedFeatures(geojson));
+      continue;
+    }
     const srcFeatures = Array.isArray(geojson?.features) ? geojson.features : [];
     let count = 0;
     for (const f of srcFeatures) {

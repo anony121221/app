@@ -1071,6 +1071,7 @@ const WARNING_NOTIFY_STARTUP_QUIET_MS = 10_000;
 const WARNING_TOAST_LIFETIME_MS = 12_000;
 const WARNING_TOAST_LIMIT = 4;
 const WARNING_SOUND_COOLDOWN_MS = 2500;
+const WARNING_GLOBAL_VOLUME_DEFAULT = 100;
 const ALERT_SOURCE_NWS_API = 'NWS_API';
 const ALERT_SOURCE_NWS_BOOTSTRAP = 'NWS_BOOTSTRAP';
 const ALERT_SOURCE_NWWS = 'NWWS';
@@ -1105,6 +1106,12 @@ function _defaultWarningPrefs() {
 function _normalizeWarningSoundId(soundId) {
   const id = String(soundId || '').trim().toLowerCase();
   return WARNING_SOUND_ID_SET.has(id) ? id : 'silent';
+}
+
+function _normalizeWarningGlobalVolume(input) {
+  const value = Number(input);
+  if (!Number.isFinite(value)) return WARNING_GLOBAL_VOLUME_DEFAULT;
+  return Math.max(0, Math.min(100, Math.round(value)));
 }
 
 function _normalizeWarningPrefs(input) {
@@ -6067,17 +6074,34 @@ function _alertsHazardsText(props = {}) {
   return parts.slice(0, 2).join(' and ');
 }
 
+function _alertsIsTornadoPossibleSevere(props = {}) {
+  const event = String(props?.event || props?.eventRaw || '').trim().toUpperCase();
+  if (!event.includes('SEVERE THUNDERSTORM WARNING')) return false;
+  const tornadoDetection = _alertsParamText(props, 'tornadoDetection');
+  if (tornadoDetection.includes('POSSIBLE') || tornadoDetection.includes('RADAR INDICATED')) return true;
+  const headlineBlob = [
+    props?.headline,
+    props?.description,
+    props?.instruction,
+  ].map(v => String(v || '').trim().toUpperCase()).join(' ');
+  return headlineBlob.includes('TORNADO POSSIBLE');
+}
+
 function _alertsDashboardTitle(props = {}) {
   const event = String(props?.event || props?.eventRaw || 'Warning').trim() || 'Warning';
   const warnClass = String(props?._warnClass || '').trim().toUpperCase();
+  const tornadoPossibleSevere = _alertsIsTornadoPossibleSevere(props);
   if (warnClass === 'TORE') return 'Tornado Emergency';
   if (warnClass === 'TORP') return 'PDS Tornado Warning';
   if (warnClass === 'TORR') {
     const detect = _alertsParamText(props, 'tornadoDetection');
     return detect.includes('OBSERVED') ? 'Observed Tornado Warning' : 'Confirmed Tornado Warning';
   }
-  if (warnClass === 'SVRD') return 'Destructive Severe Thunderstorm Warning';
-  if (warnClass === 'SVRC') return 'Considerable Severe Thunderstorm Warning';
+  if (warnClass === 'SVRD') return tornadoPossibleSevere ? 'Tornado Possible Destructive Severe Thunderstorm Warning' : 'Destructive Severe Thunderstorm Warning';
+  if (warnClass === 'SVRC') return tornadoPossibleSevere ? 'Tornado Possible Considerable Severe Thunderstorm Warning' : 'Considerable Severe Thunderstorm Warning';
+  if (tornadoPossibleSevere && String(event || '').trim().toUpperCase() === 'SEVERE THUNDERSTORM WARNING') {
+    return 'Tornado Possible Severe Thunderstorm Warning';
+  }
   return event;
 }
 
@@ -6934,7 +6958,9 @@ async function _playWarningSound(soundId = 'silent', opts = {}) {
     }
     const audio = new Audio(src);
     audio.preload = 'auto';
-    audio.volume = Math.max(0, Math.min(1, Number(opts?.volume ?? soundMeta?.volume ?? 0.6)));
+    const baseVolume = Math.max(0, Math.min(1, Number(opts?.volume ?? soundMeta?.volume ?? 0.6)));
+    audio._warningBaseVolume = baseVolume;
+    audio.volume = Math.max(0, Math.min(1, baseVolume * (_normalizeWarningGlobalVolume(warningGlobalVolume) / 100)));
     audio.playsInline = true;
     const cleanup = () => {
       warningSoundActivePlayers.delete(audio);
@@ -12983,6 +13009,7 @@ let warningSoundLastPlayedAt = 0;
 let warningNotificationsPrimed = false;
 let warningNotificationsPrimeTimer = null;
 let warningPrefs = _normalizeWarningPrefs(null);
+let warningGlobalVolume = WARNING_GLOBAL_VOLUME_DEFAULT;
 const MAX_HISTORY_FRAMES = MAX_RECENT_WISE_FRAME_COUNT;
 const DEFAULT_L3_HISTORY_FRAMES = 1;
 const MAX_L2_CANDIDATE_SCANS = 3;
@@ -15541,6 +15568,23 @@ function setWarningPrefsOpen(open) {
   if (open) syncWarningPrefsUi();
 }
 
+function _syncActiveWarningPlayerVolumes() {
+  const scale = _normalizeWarningGlobalVolume(warningGlobalVolume) / 100;
+  for (const audio of warningSoundActivePlayers) {
+    if (!audio) continue;
+    const baseVolume = Math.max(0, Math.min(1, Number(audio._warningBaseVolume ?? 0.6)));
+    try {
+      audio.volume = Math.max(0, Math.min(1, baseVolume * scale));
+    } catch (_) {}
+  }
+}
+
+function _setWarningGlobalVolume(next, opts = {}) {
+  warningGlobalVolume = _normalizeWarningGlobalVolume(next);
+  _syncActiveWarningPlayerVolumes();
+  if (opts?.persist !== false) saveSettings();
+}
+
 function syncWarningPrefsUi() {
   if (!warningSettingsList) return;
   warningSettingsList.innerHTML = '';
@@ -15561,6 +15605,62 @@ function syncWarningPrefsUi() {
 
   const _PREF_CATEGORY_ORDER = ['tornado', 'severe', 'winter', 'special', 'flood', 'other'];
   const _PREF_CATEGORY_LABELS = { tornado: 'Tornado', severe: 'Severe', winter: 'Winter', special: 'Special Event', flood: 'Flood', other: 'Other' };
+
+  const volumeCard = document.createElement('div');
+  volumeCard.className = 'warning-setting-card warning-global-volume-card';
+
+  const volumeRow = document.createElement('div');
+  volumeRow.className = 'warning-global-volume-row';
+
+  const volumeTitleWrap = document.createElement('div');
+  volumeTitleWrap.className = 'warning-global-volume-title-wrap';
+
+  const volumeTitle = document.createElement('div');
+  volumeTitle.className = 'warning-global-volume-title';
+  volumeTitle.textContent = 'Global Alert Volume';
+
+  const volumeSubtitle = document.createElement('div');
+  volumeSubtitle.className = 'warning-global-volume-subtitle';
+  volumeSubtitle.textContent = 'Adjusts all warning sounds from 0 to 100 percent.';
+
+  volumeTitleWrap.appendChild(volumeTitle);
+  volumeTitleWrap.appendChild(volumeSubtitle);
+
+  const volumeControls = document.createElement('div');
+  volumeControls.className = 'warning-global-volume-controls';
+
+  const volumeTrackRow = document.createElement('div');
+  volumeTrackRow.className = 'warning-global-volume-track-row';
+
+  const volumeRange = document.createElement('input');
+  volumeRange.type = 'range';
+  volumeRange.min = '0';
+  volumeRange.max = '100';
+  volumeRange.step = '1';
+  volumeRange.className = 'warning-global-volume-range';
+  volumeRange.value = String(_normalizeWarningGlobalVolume(warningGlobalVolume));
+  volumeRange.setAttribute('aria-label', 'Global alert volume');
+
+  const volumeValue = document.createElement('div');
+  volumeValue.className = 'warning-setting-chip warning-global-volume-value';
+  volumeValue.textContent = `${_normalizeWarningGlobalVolume(warningGlobalVolume)}%`;
+
+  const updateVolumeUi = (persist) => {
+    const next = _normalizeWarningGlobalVolume(volumeRange.value);
+    volumeValue.textContent = `${next}%`;
+    _setWarningGlobalVolume(next, { persist });
+  };
+  volumeRange.addEventListener('input', () => updateVolumeUi(false));
+  volumeRange.addEventListener('change', () => updateVolumeUi(true));
+
+  volumeTrackRow.appendChild(volumeRange);
+  volumeTrackRow.appendChild(volumeValue);
+  volumeControls.appendChild(volumeTrackRow);
+
+  volumeRow.appendChild(volumeTitleWrap);
+  volumeRow.appendChild(volumeControls);
+  volumeCard.appendChild(volumeRow);
+  warningSettingsList.appendChild(volumeCard);
 
   // Group config items by category, preserving within-group order
   const _prefGroups = {};
@@ -18210,7 +18310,7 @@ const TRAFFIC_CAMERA_STATE_URLS = {
   NV: 'https://traffic-camera-worker.colewx.workers.dev/geojson/NV',
   NY: 'https://traffic-camera-worker.colewx.workers.dev/geojson/NY',
   OH: 'https://traffic-camera-worker.colewx.workers.dev/geojson/OH',
-  OK: 'https://traffic-camera-worker.colewx.workers.dev/geojson/OK',
+  OK: 'https://oklahomatraffic.colewx.workers.dev/',
   OR: 'https://traffic-camera-worker.colewx.workers.dev/geojson/OR',
   PA: 'https://traffic-camera-worker.colewx.workers.dev/geojson/PA',
   RI: 'https://traffic-camera-worker.colewx.workers.dev/geojson/RI',
@@ -19589,6 +19689,46 @@ function _buildMississippiGroupedFeatures(rawFeatures) {
   return features;
 }
 
+function _oklahomaCameraStreamUrl(props = {}) {
+  return String(
+    props?.m3u8
+    || props?.m3u8Url
+    || props?.m3u8_url
+    || props?.stream_url
+    || props?.videoUrl
+    || props?.video_url
+    || props?.streamSrc
+    || props?.url
+    || ''
+  ).trim();
+}
+
+function _oklahomaCameraEntry(props = {}) {
+  const streamUrl = _oklahomaCameraStreamUrl(props);
+  const cameraId = String(props?.cameraId ?? props?.camera_id ?? props?.id ?? '').trim();
+  const direction = _normalizeCardinalDirection(props?.direction || props?.directionLabel || props?.dir || '') || String(props?.direction || props?.directionLabel || '').trim();
+  const name = String(props?.name || props?.cameraName || props?.title || props?.poleName || 'Oklahoma Camera').trim();
+  return {
+    ...props,
+    id: cameraId,
+    cameraId,
+    name,
+    title: name,
+    location: String(props?.location || props?.locationText || name).trim(),
+    direction,
+    directionLabel: direction,
+    m3u8: streamUrl,
+    m3u8Url: streamUrl,
+    m3u8_url: streamUrl,
+    stream_url: streamUrl,
+    videoUrl: streamUrl,
+    source: String(props?.source || props?.provider || 'OK').trim(),
+    provider: String(props?.provider || 'oktraffic').trim(),
+    state: 'Oklahoma',
+    _state: 'OK',
+  };
+}
+
 function _buildOklahomaGroupedFeatures(raw) {
   const okFeatures = Array.isArray(raw?.features) ? raw.features : [];
   const poleMap = new Map();
@@ -19597,33 +19737,40 @@ function _buildOklahomaGroupedFeatures(raw) {
     const c = _cameraCoords(f);
     if (!c) continue;
     const p = f?.properties || {};
-    const key = p.poleId != null ? String(p.poleId) : `${c[0]},${c[1]}`;
+    const streamUrl = _oklahomaCameraStreamUrl(p);
+    if (!streamUrl) continue;
+    const key = p.poleId != null ? String(p.poleId) : `${c[0].toFixed(5)},${c[1].toFixed(5)}`;
     if (!poleMap.has(key)) {
       poleMap.set(key, {
-        type: 'Feature',
-        geometry: { type: 'Point', coordinates: c },
-        properties: {
-          name: p.poleName || p.name || 'Oklahoma Camera',
-          city: p.city || '',
-          state: 'Oklahoma',
-          _state: 'OK',
-          _cameras: [],
-        },
+        coords: c,
+        poleId: p.poleId ?? '',
+        name: String(p.poleName || p.roadway || p.name || 'Oklahoma Camera').trim(),
+        city: String(p.city || '').trim(),
+        cameras: [],
       });
     }
-    poleMap.get(key).properties._cameras.push({
-      direction: p.direction || '—',
-      name: p.name || p.poleName || 'Camera',
-      m3u8: p.m3u8 || null,
-    });
+    poleMap.get(key).cameras.push(_oklahomaCameraEntry(p));
   }
 
   const features = [];
-  for (const f of poleMap.values()) {
-    f.properties.cameras = JSON.stringify(f.properties._cameras);
-    f.properties._has_video = (f.properties._cameras || []).some(cam => _cameraFeatureHasVideo(cam)) ? 1 : 0;
-    delete f.properties._cameras;
-    features.push(f);
+  for (const group of poleMap.values()) {
+    const cams = group.cameras
+      .filter(cam => _cameraFeatureHasVideo(cam))
+      .sort((a, b) => _cameraDirectionLabel(a).localeCompare(_cameraDirectionLabel(b)) || String(a.name || '').localeCompare(String(b.name || '')));
+    if (!cams.length) continue;
+    features.push(_cameraPointFeature(group.coords[0], group.coords[1], {
+      poleId: group.poleId,
+      name: group.name,
+      title: group.name,
+      location: group.name,
+      city: group.city,
+      source: 'OK',
+      provider: 'oktraffic',
+      state: 'Oklahoma',
+      _state: 'OK',
+      cameras: JSON.stringify(cams),
+      _has_video: 1,
+    }, group.poleId ? `OK:${group.poleId}` : `OK:${group.coords[0]},${group.coords[1]}`));
   }
   return features;
 }
@@ -19631,6 +19778,12 @@ function _buildOklahomaGroupedFeatures(raw) {
 function _composeTrafficCameraFeatures(datasets = {}) {
   const features = [];
   for (const [stateCode, geojson] of Object.entries(datasets)) {
+    if (stateCode === 'OK') {
+      const okFeatures = _buildOklahomaGroupedFeatures(geojson);
+      features.push(...okFeatures);
+      if (okFeatures.length === 0) console.warn('[Camera][Traffic] OK: 0 valid grouped features');
+      continue;
+    }
     const srcFeatures = Array.isArray(geojson?.features) ? geojson.features : [];
     let count = 0;
     for (const f of srcFeatures) {
@@ -20320,7 +20473,39 @@ function _extractWisconsinTooltipVideoUrl(html, tooltipUrl) {
 }
 
 function _isKansasTrafficCamera(props = {}) {
-  return String(props?._state || props?.state || '').trim().toUpperCase() === 'KS';
+  const state = String(props?._state || props?.state || '').trim().toUpperCase();
+  if (state !== 'KS') return false;
+  const videoAuth = props?.videoauth;
+  if (videoAuth === true || String(videoAuth || '').trim().toLowerCase() === 'true') return true;
+  const sourceBlob = [
+    props?.source,
+    props?._provider,
+    props?.provider,
+    props?.agency,
+    props?.owner,
+    props?.system,
+  ].map(v => String(v || '').trim().toUpperCase()).join(' ');
+  if (sourceBlob.includes('KANDRIVE') || sourceBlob.includes('KDOT')) return true;
+  const urlBlob = [
+    props?.m3u8Url,
+    props?.m3u8_url,
+    props?.m3u8,
+    props?.hls_url,
+    props?.videoUrl,
+    props?.video_url,
+    props?.stream_url,
+    props?.imageUrl,
+    props?.image_url,
+  ].map(v => String(v || '').trim().toLowerCase()).join(' ');
+  return /kandrive|kdot-sfs3\.us-east-1\.skyvdn\.com/.test(urlBlob);
+}
+
+function _isPennsylvaniaTrafficCamera(props = {}, hlsUrl = '') {
+  const state = String(props?._state || props?.state || '').trim().toUpperCase();
+  if (state !== 'PA') return false;
+  const imageUrl = String(props?.imageUrl || props?.image_url || '').trim();
+  if (/511pa\.com\/map\/Cctv\/\d+/i.test(imageUrl)) return true;
+  return String(hlsUrl || '').trim().includes('arcadis-ivds.com');
 }
 
 async function _resolveKansasSignedCameraUrls(props = {}, current = {}) {
@@ -21431,17 +21616,15 @@ function _cameraShouldDeferProtectedResolve(props = {}, urls = {}) {
   const hlsUrl = String(urls?.hlsUrl || '').trim();
   if (_isKansasTrafficCamera(props) && _cameraResolvedHasVideo(props)) return true;
   if (String(props?.imageUrl || '').trim().includes('fl511.com/map/Cctv')) return true;
-  if (hlsUrl.includes('arcadis-ivds.com')) return true;
+  if (_isPennsylvaniaTrafficCamera(props, hlsUrl)) return true;
   return false;
 }
 
 function _isProtectedTrafficPlayback(props = {}, hlsUrl = '') {
-  const state = String(props?._state || props?.state || '').trim().toUpperCase();
   const playUrl = String(hlsUrl || '').trim();
-  if (state === 'KS' && _cameraResolvedHasVideo(props)) return true;
+  if (_isKansasTrafficCamera(props) && _cameraResolvedHasVideo(props)) return true;
   if (String(props?.imageUrl || '').trim().includes('fl511.com/map/Cctv')) return true;
-  if (playUrl.includes('arcadis-ivds.com')) return true;
-  if (state === 'PA' && (playUrl || props?.view_id || props?.cameraId || props?.camera_id)) return true;
+  if (_isPennsylvaniaTrafficCamera(props, playUrl)) return true;
   return false;
 }
 
@@ -22124,6 +22307,7 @@ function saveSettings() {
       cameraStateFilter,
       youtubeEmbedDraft,
       warningPrefs,
+      warningGlobalVolume,
       nwsApiEnabled,
       nwwsEnabled,
       nwwsUsername,
@@ -22219,6 +22403,8 @@ function loadSettings() {
       youtubeEmbedDraft = s.youtubeEmbedDraft;
     }
     warningPrefs = _normalizeWarningPrefs(s.warningPrefs);
+    warningGlobalVolume = _normalizeWarningGlobalVolume(s.warningGlobalVolume);
+    _syncActiveWarningPlayerVolumes();
     if (s.nwsApiEnabled != null) nwsApiEnabled = Boolean(s.nwsApiEnabled);
     if (s.nwwsEnabled != null) nwwsEnabled = Boolean(s.nwwsEnabled);
     nwwsUsername = _normalizeNwwsCredential(s.nwwsUsername);
