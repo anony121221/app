@@ -1,6 +1,6 @@
 [package]
 name = "radar-app"
-version = "0.3.4"
+version = "0.3.5"
 description = "NEXRAD Level III Radar Viewer"
 authors = []
 edition = "2021"

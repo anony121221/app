@@ -1460,6 +1460,20 @@
 
     }
 
+    .alert-popup-hazard-meta {
+
+      color: rgba(255, 255, 255, 0.5);
+
+      font-size: 9px;
+
+      font-weight: 500;
+
+      line-height: 1.3;
+
+      letter-spacing: 0.01em;
+
+    }
+
     .alert-popup-radars-list {
 
       display: flex;
@@ -2893,6 +2907,82 @@
       display: block;
     }
 
+    #family-dropdown-btn.island-product-dropdown-btn {
+      font-size: 10px;
+      font-weight: 500;
+      letter-spacing: 0;
+      text-transform: none;
+    }
+
+    #family-dropdown-menu.island-product-menu {
+      left: 0;
+      right: auto;
+      width: min(230px, calc(100vw - 22px));
+      max-height: min(308px, calc(100vh - 96px));
+      padding: 6px;
+      border-color: #202733;
+      border-radius: 6px;
+      background: #05080d;
+      box-shadow: 0 14px 34px rgba(0,0,0,0.62);
+    }
+
+    .product-dropdown-section + .product-dropdown-section {
+      margin-top: 6px;
+    }
+
+    .product-dropdown-heading {
+      margin: 0 0 4px;
+      font-size: 8px;
+      font-weight: 600;
+      letter-spacing: 0.09em;
+      text-transform: uppercase;
+      color: #758096;
+      line-height: 1;
+    }
+
+    .product-dropdown-grid {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 4px;
+    }
+
+    .product-dropdown-chip {
+      min-width: 0;
+      height: 24px;
+      padding: 0 6px;
+      border: 1px solid #1c232d;
+      border-radius: 4px;
+      background: #06090d;
+      color: #e5ebf5;
+      font-size: 9px;
+      font-weight: 500;
+      letter-spacing: 0;
+      text-transform: none;
+      cursor: pointer;
+      transition: background 0.12s ease, border-color 0.12s ease, color 0.12s ease, box-shadow 0.12s ease;
+      box-shadow: inset 0 0 0 1px rgba(255,255,255,0.02);
+    }
+
+    .product-dropdown-chip:hover {
+      border-color: #35578d;
+      background: #0a1526;
+      color: #fff;
+    }
+
+    .product-dropdown-chip.active {
+      border-color: #2f6ed8;
+      background: linear-gradient(180deg, #13294d 0%, #0d1c35 100%);
+      color: #fff;
+      box-shadow: inset 0 0 0 1px rgba(92,152,255,0.22);
+    }
+
+    .product-dropdown-empty {
+      padding: 8px 2px;
+      color: #6f7888;
+      font-size: 11px;
+      text-align: center;
+    }
+
     #tilt-picker .island-dropdown-menu {
       min-width: 84px;
       left: auto;
@@ -3407,7 +3497,8 @@
 
     #warning-prefs-overlay,
     #nwws-login-overlay,
-    #app-update-overlay {
+    #app-update-overlay,
+    #noaa-outlooks-overlay {
       position: fixed;
       inset: 0;
       z-index: 54;
@@ -3422,16 +3513,29 @@
       backdrop-filter: blur(2px);
     }
 
+    #noaa-outlooks-overlay {
+      display: block;
+      padding: 0;
+      background: transparent;
+      backdrop-filter: none;
+    }
+
     #warning-prefs-overlay.open,
     #nwws-login-overlay.open,
-    #app-update-overlay.open {
+    #app-update-overlay.open,
+    #noaa-outlooks-overlay.open {
       opacity: 1;
       pointer-events: auto;
     }
 
+    #noaa-outlooks-overlay.open {
+      pointer-events: none;
+    }
+
     #warning-prefs-modal,
     #nwws-login-modal,
-    #app-update-modal {
+    #app-update-modal,
+    #noaa-outlooks-modal {
       width: min(1040px, calc(100vw - 28px));
       max-height: min(86vh, calc(100vh - 36px));
       display: grid;
@@ -3459,15 +3563,40 @@
       border-radius: 10px;
     }
 
+    #warning-prefs-modal {
+      width: min(720px, calc(100vw - 28px));
+      max-height: min(78vh, calc(100vh - 32px));
+      border-radius: 9px;
+    }
+
     #warning-prefs-overlay.open #warning-prefs-modal,
     #nwws-login-overlay.open #nwws-login-modal,
-    #app-update-overlay.open #app-update-modal {
+    #app-update-overlay.open #app-update-modal,
+    #noaa-outlooks-overlay.open #noaa-outlooks-modal {
       transform: translateY(0) scale(1);
+    }
+
+    #noaa-outlooks-modal {
+      position: fixed;
+      left: calc(50% - 320px);
+      top: 76px;
+      width: min(640px, calc(100vw - 18px));
+      max-height: min(68vh, calc(100vh - 18px));
+      border-radius: 7px;
+      border-color: #212121;
+      background: #0b0b0b;
+      box-shadow: 0 18px 38px rgba(0,0,0,0.58);
+      pointer-events: none;
+    }
+
+    #noaa-outlooks-overlay.open #noaa-outlooks-modal {
+      pointer-events: auto;
     }
 
     #warning-prefs-header,
     #nwws-login-header,
-    #app-update-header {
+    #app-update-header,
+    #noaa-outlooks-header {
       display: flex;
       align-items: flex-start;
       justify-content: space-between;
@@ -3486,6 +3615,12 @@
       align-items: center;
       gap: 12px;
       padding: 16px 18px 14px;
+    }
+
+    #warning-prefs-header {
+      align-items: center;
+      gap: 12px;
+      padding: 14px 16px 12px;
     }
 
     .warning-prefs-title-wrap {
@@ -3507,6 +3642,11 @@
       font-weight: 800;
       line-height: 1.05;
       color: #f0f0f0;
+    }
+
+    #warning-prefs-title {
+      font-size: 18px;
+      letter-spacing: 0.01em;
     }
 
     #nwws-login-modal .warning-prefs-title-wrap {
@@ -3536,7 +3676,8 @@
 
     #warning-prefs-close,
     #nwws-login-close,
-    #app-update-close {
+    #app-update-close,
+    #noaa-outlooks-close {
       width: 28px;
       height: 28px;
       display: inline-flex;
@@ -3558,7 +3699,8 @@
 
     #warning-prefs-close:hover,
     #nwws-login-close:hover,
-    #app-update-close:hover {
+    #app-update-close:hover,
+    #noaa-outlooks-close:hover {
       border-color: #555;
       background: #151515;
       color: #eee;
@@ -3566,7 +3708,8 @@
 
     #warning-prefs-close svg,
     #nwws-login-close svg,
-    #app-update-close svg {
+    #app-update-close svg,
+    #noaa-outlooks-close svg {
       width: 16px;
       height: 16px;
       display: block;
@@ -3575,10 +3718,15 @@
 
     #warning-prefs-body,
     #nwws-login-body,
-    #app-update-body {
+    #app-update-body,
+    #noaa-outlooks-body {
       overflow: auto;
       padding: 12px;
       scrollbar-gutter: stable;
+    }
+
+    #warning-prefs-body {
+      padding: 10px 12px 12px;
     }
 
     #nwws-login-body {
@@ -3589,6 +3737,298 @@
       padding: 14px 18px 18px;
       display: grid;
       gap: 12px;
+    }
+
+    #noaa-outlooks-header {
+      align-items: center;
+      padding: 10px 12px 9px;
+      border-bottom-color: #1c1c1c;
+      background: #0f0f0f;
+      cursor: move;
+      user-select: none;
+    }
+
+    #noaa-outlooks-body {
+      padding: 0;
+      background: #0b0b0b;
+    }
+
+    .noaa-outlooks-brand {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 28px;
+      height: 28px;
+      border-radius: 50%;
+      border: 1px solid #363636;
+      background: #161616;
+      color: #f3f3f3;
+      font-size: 8px;
+      font-weight: 700;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      flex-shrink: 0;
+    }
+
+    .noaa-outlooks-header-left {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      min-width: 0;
+    }
+
+    .noaa-outlooks-title-wrap {
+      display: grid;
+      gap: 4px;
+      min-width: 0;
+    }
+
+    .noaa-outlooks-title {
+      font-size: 15px;
+      font-weight: 700;
+      color: #f2f2f2;
+      letter-spacing: 0.01em;
+      line-height: 1.1;
+    }
+
+    .noaa-outlooks-subtitle {
+      font-size: 11px;
+      color: #9b9b9b;
+      line-height: 1.35;
+    }
+
+    .noaa-outlooks-open-btn {
+      min-height: 28px;
+      padding: 0 12px;
+      border: 1px solid #2a2a2a;
+      border-radius: 4px;
+      background: #111;
+      color: #aaa;
+      font-size: 11px;
+      font-weight: 700;
+      letter-spacing: 0.05em;
+      cursor: pointer;
+      transition: border-color 0.14s ease, background 0.14s ease, color 0.14s ease;
+    }
+
+    .noaa-outlooks-open-btn:hover {
+      border-color: #555;
+      background: #151515;
+      color: #eee;
+    }
+
+    .noaa-outlooks-section {
+      border-bottom: 1px solid #1a1a1a;
+      background: #101010;
+    }
+
+    .noaa-outlooks-section:last-child {
+      border-bottom: none;
+    }
+
+    .noaa-outlooks-section-head {
+      width: 100%;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      padding: 11px 13px;
+      border: none;
+      background: transparent;
+      color: #f3f3f3;
+      cursor: pointer;
+      text-align: left;
+    }
+
+    .noaa-outlooks-section-head:hover {
+      background: rgba(255,255,255,0.025);
+    }
+
+    .noaa-outlooks-section-head-left {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      min-width: 0;
+    }
+
+    .noaa-outlooks-section-icon {
+      width: 24px;
+      height: 24px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      color: #f1f1f1;
+      flex-shrink: 0;
+    }
+
+    .noaa-outlooks-section-icon svg {
+      width: 20px;
+      height: 20px;
+    }
+
+    .noaa-outlooks-section-title {
+      font-size: 15px;
+      font-weight: 600;
+      color: #f2f2f2;
+    }
+
+    .noaa-outlooks-section-chevron {
+      width: 18px;
+      height: 18px;
+      color: #d2d2d2;
+      transition: transform 0.18s ease;
+      flex-shrink: 0;
+    }
+
+    .noaa-outlooks-section.open .noaa-outlooks-section-chevron {
+      transform: rotate(180deg);
+    }
+
+    .noaa-outlooks-section-body {
+      display: grid;
+      grid-template-rows: 0fr;
+      transition: grid-template-rows 0.18s ease;
+      background: #0b0b0b;
+      overflow: hidden;
+    }
+
+    .noaa-outlooks-section.open .noaa-outlooks-section-body {
+      grid-template-rows: 1fr;
+    }
+
+    .noaa-outlooks-section-inner {
+      min-height: 0;
+      padding: 10px 10px 8px;
+      display: grid;
+      gap: 8px;
+    }
+
+    .noaa-outlooks-tabs {
+      display: flex;
+      flex-wrap: nowrap;
+      border: 1px solid #232323;
+      border-radius: 8px;
+      overflow-x: auto;
+      overflow-y: hidden;
+      background: #111111;
+      scrollbar-width: none;
+    }
+
+    .noaa-outlooks-tabs::-webkit-scrollbar { display: none; }
+
+    .noaa-outlooks-tab {
+      min-height: 44px;
+      min-width: 80px;
+      padding: 8px 10px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 10px;
+      border: none;
+      border-right: 1px solid #232323;
+      background: transparent;
+      color: #d0d0d0;
+      cursor: pointer;
+      text-align: center;
+      font-size: 10px;
+      font-weight: 500;
+      line-height: 1.25;
+      flex: 1 1 auto;
+      white-space: normal;
+    }
+
+    .noaa-outlooks-tab:last-child {
+      border-right: none;
+    }
+
+    .noaa-outlooks-tab:hover {
+      background: rgba(255,255,255,0.04);
+      color: #f2f2f2;
+    }
+
+    .noaa-outlooks-tab.active {
+      background: #4e84dc;
+      color: #ffffff;
+    }
+
+    .noaa-outlooks-tab-icon {
+      width: 18px;
+      height: 18px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      flex-shrink: 0;
+    }
+
+    .noaa-outlooks-tab-label {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-width: 0;
+    }
+
+    .noaa-outlooks-table-scroll {
+      overflow-x: auto;
+      overflow-y: hidden;
+      border: 1px solid #242424;
+      border-radius: 8px;
+      background: #101010;
+    }
+
+    .noaa-outlooks-table {
+      width: 100%;
+      min-width: 580px;
+      border-collapse: collapse;
+      table-layout: fixed;
+    }
+
+    .noaa-outlooks-table th,
+    .noaa-outlooks-table td {
+      border-right: 1px solid #232323;
+      border-bottom: 1px solid #232323;
+      padding: 8px 6px;
+      text-align: center;
+      vertical-align: middle;
+    }
+
+    .noaa-outlooks-table th:last-child,
+    .noaa-outlooks-table td:last-child {
+      border-right: none;
+    }
+
+    .noaa-outlooks-table tbody tr:last-child td,
+    .noaa-outlooks-table tbody tr:last-child th {
+      border-bottom: none;
+    }
+
+    .noaa-outlooks-table thead th {
+      background: #151515;
+      color: #ffffff;
+      font-size: 11px;
+      font-weight: 700;
+    }
+
+    .noaa-outlooks-table tbody th {
+      background: #121212;
+      color: #ffffff;
+      text-align: left;
+      font-size: 11px;
+      font-weight: 600;
+    }
+
+    .noaa-outlooks-table td {
+      background: #0f0f0f;
+    }
+
+    .noaa-outlooks-empty-cell {
+      color: #555;
+      font-size: 12px;
+    }
+
+    .noaa-outlooks-cell-toggle {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
     }
 
     #warning-prefs-body::-webkit-scrollbar,
@@ -3968,6 +4408,339 @@
       padding-bottom: 6px;
     }
 
+    .warning-settings-list {
+      gap: 10px;
+    }
+
+    .warning-pref-category-header {
+      padding: 10px 2px 4px;
+      margin-bottom: 0;
+    }
+
+    .warning-pref-search {
+      display: grid;
+      gap: 8px;
+      padding: 2px 0 0;
+    }
+
+    .warning-pref-search-input {
+      width: 100%;
+      height: 32px;
+      padding: 7px 10px;
+      border-radius: 6px;
+      font-size: 12px;
+    }
+
+    .warning-pref-item {
+      position: relative;
+      border-radius: 6px;
+      border: 1px solid #1f1f1f;
+      background: linear-gradient(180deg, rgba(255,255,255,0.012), rgba(255,255,255,0)), #0f0f10;
+      overflow: hidden;
+    }
+
+    .warning-pref-entry::before {
+      content: "";
+      position: absolute;
+      left: 0;
+      top: 7px;
+      bottom: 7px;
+      width: 3px;
+      border-radius: 0 2px 2px 0;
+      background: var(--warning-pref-accent, #2f78ff);
+      opacity: 0.95;
+      pointer-events: none;
+    }
+
+    .warning-pref-item.is-disabled {
+      opacity: 0.82;
+    }
+
+    .warning-pref-item.is-expanded {
+      border-color: #2a2a2c;
+      box-shadow: inset 0 0 0 1px rgba(255,255,255,0.015);
+    }
+
+    .warning-pref-summary {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      min-height: 48px;
+      padding: 10px 12px;
+    }
+
+    .warning-pref-volume-summary {
+      min-height: 56px;
+    }
+
+    .warning-pref-summary-main {
+      min-width: 0;
+      display: grid;
+      gap: 3px;
+      flex: 1 1 auto;
+    }
+
+    .warning-pref-summary-title {
+      font-size: 13px;
+      font-weight: 700;
+      line-height: 1.3;
+      color: #f1f1f1;
+    }
+
+    .warning-pref-item.is-disabled .warning-pref-summary-title {
+      color: #b6b6b6;
+    }
+
+    .warning-pref-summary-code {
+      font-size: 9px;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+      color: #6f7783;
+    }
+
+    .warning-pref-summary-note {
+      font-size: 10px;
+      letter-spacing: 0.08em;
+      color: #838b96;
+    }
+
+    .warning-pref-summary-actions {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      flex-shrink: 0;
+    }
+
+    .warning-pref-toggle-wrap {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      min-height: 24px;
+    }
+
+    .warning-pref-toggle-text {
+      min-width: 22px;
+      font-size: 10px;
+      font-weight: 700;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+      color: #aab2bf;
+      text-align: right;
+    }
+
+    .warning-pref-toggle-wrap[data-state="on"] .warning-pref-toggle-text {
+      color: #e9f1ff;
+    }
+
+    .warning-pref-expand {
+      width: 28px;
+      height: 28px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      border-radius: 6px;
+      border: 1px solid #242528;
+      background: #101113;
+      color: #9ca4b1;
+      cursor: pointer;
+      transition: border-color 0.14s ease, background 0.14s ease, color 0.14s ease;
+    }
+
+    .warning-pref-expand:hover {
+      border-color: #4a4f58;
+      background: #14161a;
+      color: #eef2f8;
+    }
+
+    .warning-pref-expand svg {
+      width: 14px;
+      height: 14px;
+      transition: transform 0.16s ease;
+    }
+
+    .warning-pref-expand.open svg {
+      transform: rotate(180deg);
+    }
+
+    .warning-pref-details {
+      display: none;
+      gap: 8px;
+      padding: 0 12px 12px;
+      border-top: 1px solid #17181a;
+      background: rgba(255,255,255,0.01);
+    }
+
+    .warning-pref-details.open {
+      display: grid;
+    }
+
+    .warning-pref-control-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      min-height: 34px;
+      padding-top: 8px;
+    }
+
+    .warning-pref-control-label {
+      font-size: 11px;
+      font-weight: 600;
+      color: #a7afbb;
+      white-space: nowrap;
+    }
+
+    .warning-pref-color-control {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 46px;
+      height: 28px;
+      border-radius: 6px;
+      border: 1px solid #28292c;
+      background: #0b0c0e;
+      overflow: hidden;
+    }
+
+    .warning-pref-color-control input[type="color"] {
+      width: 100%;
+      height: 100%;
+      border: 0;
+      padding: 0;
+      background: transparent;
+      cursor: pointer;
+    }
+
+    .warning-pref-range-control {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      min-width: 220px;
+    }
+
+    .warning-pref-range {
+      -webkit-appearance: none;
+      appearance: none;
+      flex: 1 1 auto;
+      height: 4px;
+      margin: 0;
+      border: 0;
+      border-radius: 999px;
+      background: linear-gradient(90deg, #2f78ff 0%, #73a7ff 100%);
+      box-shadow: inset 0 0 0 1px #1b1b1b;
+      outline: none;
+      cursor: pointer;
+    }
+
+    .warning-pref-range::-webkit-slider-thumb {
+      -webkit-appearance: none;
+      appearance: none;
+      width: 14px;
+      height: 14px;
+      border-radius: 50%;
+      border: 1px solid #d6e3ff;
+      background: #f7faff;
+      box-shadow: 0 0 0 3px rgba(47,120,255,0.16);
+    }
+
+    .warning-pref-range::-moz-range-thumb {
+      width: 14px;
+      height: 14px;
+      border-radius: 50%;
+      border: 1px solid #d6e3ff;
+      background: #f7faff;
+      box-shadow: 0 0 0 3px rgba(47,120,255,0.16);
+    }
+
+    .warning-pref-range::-moz-range-track {
+      height: 4px;
+      border: 0;
+      border-radius: 999px;
+      background: linear-gradient(90deg, #2f78ff 0%, #73a7ff 100%);
+      box-shadow: inset 0 0 0 1px #1b1b1b;
+    }
+
+    .warning-pref-range-value {
+      min-width: 58px;
+      padding: 5px 8px;
+      border-radius: 6px;
+      border: 1px solid #28292c;
+      background: #0b0c0e;
+      color: #edf1f6;
+      font-size: 10px;
+      font-weight: 700;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      text-align: center;
+    }
+
+    .warning-pref-select-wrap {
+      min-width: 170px;
+      max-width: 220px;
+    }
+
+    .warning-pref-sound-control {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      min-width: 0;
+    }
+
+    .warning-pref-select {
+      width: 100%;
+      height: 28px;
+      border: 1px solid #2a2b2e;
+      border-radius: 6px;
+      background: #0b0c0e;
+      color: #f2f5f9;
+      padding: 4px 8px;
+      font-size: 12px;
+      color-scheme: dark;
+      outline: none;
+      box-shadow: none;
+    }
+
+    .warning-pref-select:focus {
+      border-color: #4e5967;
+    }
+
+    .warning-pref-sound-test {
+      width: 28px;
+      height: 28px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      flex: 0 0 28px;
+      border: 1px solid #2a2b2e;
+      border-radius: 6px;
+      background: #0b0c0e;
+      color: #d6dde7;
+      cursor: pointer;
+      transition: border-color 0.12s ease, color 0.12s ease, background 0.12s ease;
+    }
+
+    .warning-pref-sound-test:hover {
+      border-color: #4e5967;
+      color: #ffffff;
+      background: #101216;
+    }
+
+    .warning-pref-sound-test:disabled {
+      opacity: 0.42;
+      cursor: default;
+      color: #8d949d;
+      background: #0b0c0e;
+      border-color: #232427;
+    }
+
+    .warning-pref-sound-test svg {
+      width: 16px;
+      height: 16px;
+      display: block;
+      overflow: visible;
+    }
+
     @media (max-width: 760px) {
       #warning-prefs-overlay,
       #nwws-login-overlay {
@@ -3995,6 +4768,10 @@
         padding: 14px;
       }
 
+      #warning-prefs-body {
+        padding: 10px;
+      }
+
       .warning-setting-top-actions,
       .warning-setting-bottom-actions {
         justify-content: flex-start;
@@ -4008,6 +4785,20 @@
       .warning-setting-sound select {
         flex: 1 1 auto;
         min-width: 0;
+        max-width: none;
+      }
+
+      .warning-pref-summary,
+      .warning-pref-control-row,
+      .warning-pref-volume-summary {
+        align-items: flex-start;
+        flex-wrap: wrap;
+      }
+
+      .warning-pref-range-control,
+      .warning-pref-select-wrap {
+        min-width: 0;
+        width: 100%;
         max-width: none;
       }
     }
@@ -4373,128 +5164,237 @@
 
     #draw-toolbar,
     #measure-toolbar {
-
-      position: fixed; bottom: 10px; left: 50%; transform: translateX(-50%);
-
-      z-index: 30; display: none; align-items: center; gap: 6px;
-
-      padding: 5px 10px;
-
-      background: #000; border: 1px solid #2a2a2a; border-radius: 4px;
-
-      box-shadow: 0 4px 16px rgba(0,0,0,0.7); white-space: nowrap;
-
+      position: fixed;
+      bottom: 10px;
+      left: 50%;
+      transform: translateX(-50%);
+      z-index: 30;
+      display: none;
+      align-items: center;
+      gap: 7px;
+      padding: 7px 9px;
+      background: linear-gradient(180deg, rgba(18, 20, 24, 0.98) 0%, rgba(10, 12, 15, 0.98) 100%);
+      border: 1px solid #252a31;
+      border-radius: 10px;
+      box-shadow: 0 10px 30px rgba(0,0,0,0.42);
+      white-space: nowrap;
       pointer-events: auto;
+      backdrop-filter: blur(12px);
+    }
 
+    #draw-toolbar {
+      gap: 8px;
+      min-height: 44px;
+    }
+
+    #draw-toolbar.is-dragging {
+      cursor: grabbing;
+    }
+
+    #draw-toolbar.is-pan-locked {
+      border-color: #2f4f7d;
+      box-shadow: 0 10px 30px rgba(0,0,0,0.42), 0 0 0 1px rgba(38, 94, 182, 0.14);
+    }
+
+    .dt-group {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      min-width: 0;
+    }
+
+    .dt-group.dt-grow {
+      flex: 1 1 auto;
+      min-width: 118px;
+    }
+
+    .dt-stack {
+      display: grid;
+      gap: 4px;
+      min-width: 0;
     }
 
     .dt-label,
     .mt-label {
+      font-size: 10px;
+      font-weight: 700;
+      letter-spacing: 0.06em;
+      color: #aab3bf;
+      flex-shrink: 0;
+    }
 
-      font-size: 10px; font-weight: 700; letter-spacing: 0.08em;
-
-      text-transform: uppercase; color: #666; flex-shrink: 0;
-
+    .dt-value {
+      font-size: 10px;
+      font-weight: 700;
+      color: #8893a1;
+      min-width: 34px;
+      text-align: right;
+      font-variant-numeric: tabular-nums;
     }
 
     .dt-sep,
-    .mt-sep { width: 1px; height: 16px; background: #2a2a2a; flex-shrink: 0; margin: 0 2px; }
+    .mt-sep { width: 1px; height: 22px; background: #1f242b; flex-shrink: 0; }
 
-    #dt-colors { display: flex; gap: 4px; align-items: center; }
-
-    .dt-color {
-
-      width: 16px; height: 16px; border-radius: 50%;
-
-      border: 2px solid transparent; box-sizing: border-box;
-
-      background: var(--c); cursor: pointer; flex-shrink: 0;
-
-      padding: 0; margin: 0; appearance: none; -webkit-appearance: none;
-
-      outline: none; line-height: 1;
-
-      transition: border-color 0.1s, transform 0.1s;
-
+    #dt-drag-handle {
+      width: 22px;
+      height: 30px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      border: none;
+      background: transparent;
+      color: #727c89;
+      cursor: grab;
+      padding: 0;
+      flex-shrink: 0;
+      border-radius: 7px;
     }
 
-    .dt-color:hover { transform: scale(1.15); }
+    #dt-drag-handle:hover { color: #dde5ef; background: rgba(255,255,255,0.03); }
+    #dt-drag-handle:active { cursor: grabbing; }
+    #dt-drag-handle svg { width: 12px; height: 18px; display: block; }
 
-    .dt-color.active { border-color: #fff; }
+    .dt-color-chip {
+      position: relative;
+      width: 26px;
+      height: 26px;
+      border-radius: 6px;
+      border: 1px solid #313842;
+      background: #0e1116;
+      overflow: hidden;
+      flex-shrink: 0;
+      box-shadow: inset 0 0 0 1px rgba(255,255,255,0.035);
+    }
 
     #dt-custom-color {
-
-      width: 16px; height: 16px; border-radius: 50%;
-
-      border: 2px solid #2a2a2a; cursor: pointer; flex-shrink: 0;
-
-      padding: 0; appearance: none; -webkit-appearance: none;
-
-      background: none; overflow: hidden;
-
-      transition: border-color 0.1s;
-
+      position: absolute;
+      inset: 0;
+      width: 100%;
+      height: 100%;
+      padding: 0;
+      border: none;
+      background: none;
+      appearance: none;
+      -webkit-appearance: none;
+      cursor: pointer;
     }
 
     #dt-custom-color::-webkit-color-swatch-wrapper { padding: 0; }
+    #dt-custom-color::-webkit-color-swatch { border: none; border-radius: 5px; }
 
-    #dt-custom-color::-webkit-color-swatch { border: none; border-radius: 50%; }
-
-    #dt-custom-color.active { border-color: #fff; }
-
-    .dt-style {
-
-      background: none; border: 1px solid #2a2a2a; border-radius: 3px;
-
-      color: #888; font-size: 11px; padding: 2px 7px; cursor: pointer; flex-shrink: 0;
-
-      transition: border-color 0.1s, color 0.1s;
-
+    .dt-slider {
+      -webkit-appearance: none;
+      appearance: none;
+      width: 108px;
+      height: 4px;
+      background: #2a3038;
+      border-radius: 999px;
+      outline: none;
+      cursor: pointer;
     }
 
-    .dt-style:hover, .dt-style.active { border-color: #fff; color: #fff; }
-
-    #dt-width {
-
-      -webkit-appearance: none; appearance: none;
-
-      width: 70px; height: 3px; background: #2e2e2e; border-radius: 2px;
-
-      outline: none; cursor: pointer;
-
+    .dt-slider::-webkit-slider-thumb {
+      -webkit-appearance: none;
+      width: 14px;
+      height: 14px;
+      border-radius: 50%;
+      background: #1d6ef5;
+      border: 2px solid #dce8ff;
+      box-shadow: 0 0 0 1px rgba(14,18,25,0.5);
+      cursor: grab;
     }
 
-    #dt-width::-webkit-slider-thumb {
-
-      -webkit-appearance: none; width: 12px; height: 12px;
-
-      border-radius: 50%; background: #fff; cursor: grab;
-
+    .dt-slider::-moz-range-thumb {
+      width: 14px;
+      height: 14px;
+      border-radius: 50%;
+      background: #1d6ef5;
+      border: 2px solid #dce8ff;
+      box-shadow: 0 0 0 1px rgba(14,18,25,0.5);
+      cursor: grab;
     }
 
-    #dt-width-val { font-size: 10px; color: #888; min-width: 22px; font-variant-numeric: tabular-nums; }
+    .dt-select {
+      min-width: 112px;
+      height: 30px;
+      padding: 0 30px 0 10px;
+      border-radius: 7px;
+      border: 1px solid #313842;
+      background: #12161c;
+      color: #eef2f8;
+      font-size: 12px;
+      font-weight: 600;
+      outline: none;
+      appearance: none;
+      -webkit-appearance: none;
+    }
 
-    #dt-undo, #dt-clear, #dt-done,
+    .dt-select-wrap {
+      position: relative;
+      flex-shrink: 0;
+    }
+
+    .dt-select-wrap::after {
+      content: '';
+      position: absolute;
+      right: 10px;
+      top: 50%;
+      width: 7px;
+      height: 7px;
+      margin-top: -5px;
+      border-right: 2px solid #8f99a7;
+      border-bottom: 2px solid #8f99a7;
+      transform: rotate(45deg);
+      pointer-events: none;
+    }
+
+    .dt-icon-btn,
     #mt-done {
-
-      background: none; border: 1px solid #2a2a2a; border-radius: 3px;
-
-      color: #888; font-size: 10px; font-weight: 600;
-
-      padding: 2px 7px; cursor: pointer; flex-shrink: 0;
-
-      transition: border-color 0.1s, color 0.1s;
-
+      width: 30px;
+      height: 30px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      border: 1px solid #2d343d;
+      border-radius: 7px;
+      background: #101317;
+      color: #d0d7df;
+      cursor: pointer;
+      transition: border-color 0.12s ease, color 0.12s ease, background 0.12s ease;
+      padding: 0;
+      flex-shrink: 0;
     }
 
-    #dt-undo:hover, #dt-clear:hover { border-color: #555; color: #ccc; }
+    .dt-icon-btn svg,
+    #mt-done svg {
+      width: 15px;
+      height: 15px;
+      display: block;
+    }
 
-    #dt-done:hover,
-    #mt-done:hover { border-color: #ff5555; color: #ff5555; }
+    .dt-icon-btn:hover,
+    #mt-done:hover {
+      border-color: #3b4654;
+      background: #151a20;
+      color: #fff;
+    }
+
+    #dt-lock.is-active {
+      border-color: #355faa;
+      background: #11233d;
+      color: #e7f0ff;
+      box-shadow: inset 0 0 0 1px rgba(72, 128, 230, 0.12);
+    }
+
+    #dt-clear:hover,
+    #mt-done:hover {
+      border-color: #c94a4a;
+      color: #ff6b6b;
+    }
 
     #measure-toolbar {
       gap: 8px;
-      padding: 6px 11px;
+      padding: 8px 11px;
     }
 
     #mt-readout {
@@ -5133,31 +6033,11 @@
           <div class="settings-group-body">
             <div class="settings-group-inner">
               <div class="settings-section" id="settings-section-spc">
-                <div class="sp-row settings-section-head">
+                <div class="sp-row settings-section-head-static">
                   <div class="settings-row-left">
-                    <button class="sp-btn sp-filter-btn settings-expander-btn" id="spc-filter-btn" type="button" title="SPC Options" aria-expanded="false">
-                      <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
-                        <path d="m9 6 6 6-6 6-1.41-1.41L12.17 12 7.59 7.41 9 6Z"/>
-                      </svg>
-                    </button>
-                    <span class="sp-row-label">SPC Outlooks</span>
+                    <span class="sp-row-label">NOAA Outlooks</span>
                   </div>
-                  <label class="toggle">
-                    <input type="checkbox" id="toggle-spc">
-                    <span class="toggle-track"></span>
-                  </label>
-                </div>
-                <div class="settings-section-body">
-                  <div class="settings-section-inner">
-                    <div class="settings-subblock">
-                      <span class="spc-filter-label">Day</span>
-                      <div class="spc-chip-row" id="spc-day-buttons"></div>
-                    </div>
-                    <div class="settings-subblock">
-                      <span class="spc-filter-label">Outlook</span>
-                      <div class="spc-chip-row" id="spc-type-buttons"></div>
-                    </div>
-                  </div>
+                  <button class="sp-btn noaa-outlooks-open-btn" id="spc-filter-btn" type="button" title="Open NOAA outlooks">Open</button>
                 </div>
               </div>
 
@@ -5296,6 +6176,14 @@
               </div>
 
               <div class="sp-row">
+                <span class="sp-row-label">METARs</span>
+                <label class="toggle">
+                  <input type="checkbox" id="toggle-metars">
+                  <span class="toggle-track"></span>
+                </label>
+              </div>
+
+              <div class="sp-row">
                 <span class="sp-row-label">TVS Icons</span>
                 <label class="toggle">
                   <input type="checkbox" id="toggle-tvs">
@@ -5336,6 +6224,14 @@
                       </label>
                     </div>
 
+                    <div class="sp-row settings-sub-row">
+                      <span class="sp-row-label">mPING Reports</span>
+                      <label class="toggle">
+                        <input type="checkbox" id="toggle-mping">
+                        <span class="toggle-track"></span>
+                      </label>
+                    </div>
+
                     <div class="settings-subblock" id="storm-window-block">
                       <span class="spc-filter-label">Local Report Window</span>
                       <div class="spc-chip-row" id="storm-window-buttons"></div>
@@ -5343,14 +6239,6 @@
 
                   </div>
                 </div>
-              </div>
-
-              <div class="sp-row">
-                <span class="sp-row-label">mPING Reports</span>
-                <label class="toggle">
-                  <input type="checkbox" id="toggle-mping">
-                  <span class="toggle-track"></span>
-                </label>
               </div>
 
               <div class="sp-row">
@@ -5824,7 +6712,6 @@
             <button class="recent-frames-option" data-count="6" type="button">6 Frames</button>
             <button class="recent-frames-option" data-count="12" type="button">12 Frames</button>
             <button class="recent-frames-option" data-count="24" type="button">24 Frames</button>
-            <button class="recent-frames-option" data-count="36" type="button">36 Frames</button>
             <button class="recent-frames-option" data-count="50" type="button">50 Frames</button>
           </div>
           <div id="pane-menu">
@@ -5913,43 +6800,80 @@
   <!-- Drawing toolbar (shown when draw mode is active) -->
 
   <div id="draw-toolbar">
-
-    <span class="dt-label">Draw</span>
+    <button id="dt-drag-handle" type="button" title="Drag drawing toolbar" aria-label="Drag drawing toolbar">
+      <svg viewBox="0 0 12 18" fill="currentColor" aria-hidden="true">
+        <circle cx="3" cy="4" r="1.15"></circle>
+        <circle cx="9" cy="4" r="1.15"></circle>
+        <circle cx="3" cy="9" r="1.15"></circle>
+        <circle cx="9" cy="9" r="1.15"></circle>
+        <circle cx="3" cy="14" r="1.15"></circle>
+        <circle cx="9" cy="14" r="1.15"></circle>
+      </svg>
+    </button>
 
     <div class="dt-sep"></div>
 
-    <div id="dt-colors">
+    <div class="dt-group">
+      <div class="dt-color-chip">
+        <input type="color" id="dt-custom-color" value="#1d6ef5" title="Drawing color">
+      </div>
+    </div>
 
-      <button class="dt-color active" data-color="#ff3b3b" style="--c:#ff3b3b" title="Red"></button>
+    <div class="dt-group dt-grow">
+      <span class="dt-label">Width</span>
+      <input type="range" id="dt-width" class="dt-slider" min="1" max="30" value="4">
+      <span id="dt-width-val" class="dt-value">4px</span>
+    </div>
 
-      <button class="dt-color" data-color="#ffcc00" style="--c:#ffcc00" title="Yellow"></button>
+    <div class="dt-group">
+      <span class="dt-label">Style</span>
+      <div class="dt-select-wrap">
+        <select id="dt-style" class="dt-select" aria-label="Drawing style">
+          <option value="solid">Solid</option>
+          <option value="dashed">Dashed</option>
+          <option value="dotted">Dotted</option>
+        </select>
+      </div>
+    </div>
 
-      <button class="dt-color" data-color="#ffffff" style="--c:#ffffff" title="White"></button>
-
-      <input type="color" id="dt-custom-color" value="#4db8ff" title="Custom color">
-
+    <div class="dt-group dt-grow">
+      <span class="dt-label">Opacity</span>
+      <input type="range" id="dt-opacity" class="dt-slider" min="10" max="100" value="92">
+      <span id="dt-opacity-val" class="dt-value">92%</span>
     </div>
 
     <div class="dt-sep"></div>
 
-    <button class="dt-style active" data-style="solid">&mdash;</button>
+    <button id="dt-lock" class="dt-icon-btn" title="Lock drawing and pan map" aria-label="Lock drawing and pan map" aria-pressed="false">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <rect x="5" y="11" width="14" height="10" rx="2"></rect>
+        <path d="M8 11V8a4 4 0 1 1 8 0v3"></path>
+      </svg>
+    </button>
 
-    <button class="dt-style" data-style="dashed">&ndash; &ndash;</button>
+    <button id="dt-undo" class="dt-icon-btn" title="Undo last line" aria-label="Undo last line">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <path d="M10 7 6 11l4 4"></path>
+        <path d="M7 11h7a5 5 0 1 1 0 10h-2"></path>
+      </svg>
+    </button>
 
-    <div class="dt-sep"></div>
+    <button id="dt-clear" class="dt-icon-btn" title="Clear drawings" aria-label="Clear drawings">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <path d="M4 7h16"></path>
+        <path d="M9 7V5h6v2"></path>
+        <path d="M7 7l1 12h8l1-12"></path>
+        <path d="M10 11v5"></path>
+        <path d="M14 11v5"></path>
+      </svg>
+    </button>
 
-    <input type="range" id="dt-width" min="1" max="8" value="2">
-
-    <span id="dt-width-val">2px</span>
-
-    <div class="dt-sep"></div>
-
-    <button id="dt-undo">&larr; Undo</button>
-
-    <button id="dt-clear">CLR</button>
-
-    <button id="dt-done">&times; Done</button>
-
+    <button id="dt-done" class="dt-icon-btn" title="Close drawing mode" aria-label="Close drawing mode">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <path d="M6 6l12 12"></path>
+        <path d="M18 6 6 18"></path>
+      </svg>
+    </button>
   </div>
 
   <div id="measure-toolbar">
@@ -6078,6 +7002,85 @@
           <div id="spc-viewer-discussion-label">Discussion</div>
           <div id="spc-viewer-facts"></div>
           <div id="spc-viewer-discussion-text"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div id="noaa-outlooks-overlay" aria-hidden="true">
+    <div id="noaa-outlooks-modal">
+      <div id="noaa-outlooks-header">
+        <div class="noaa-outlooks-header-left">
+          <div class="noaa-outlooks-title-wrap">
+            <div class="noaa-outlooks-title">NOAA Outlooks</div>
+            <div class="noaa-outlooks-subtitle">Select forecast products to display</div>
+          </div>
+        </div>
+        <button id="noaa-outlooks-close" type="button" aria-label="Close NOAA outlooks">
+          <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+            <path d="M18.3 5.71 12 12.01l-6.29-6.3-1.42 1.42 6.3 6.29-6.3 6.29 1.42 1.42 6.29-6.3 6.3 6.3 1.42-1.42-6.3-6.29 6.3-6.29z"/>
+          </svg>
+        </button>
+      </div>
+      <div id="noaa-outlooks-body">
+        <div class="noaa-outlooks-section open" data-outlook-section="SPC">
+          <button class="noaa-outlooks-section-head" type="button" data-outlook-section-btn="SPC" aria-expanded="true">
+            <div class="noaa-outlooks-section-head-left">
+              <span class="noaa-outlooks-section-icon" aria-hidden="true">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M7 17a4 4 0 1 1 .74-7.93A5.5 5.5 0 0 1 18.3 11a3.7 3.7 0 0 1-.8 7.31H16"/>
+                  <path d="m13 12-3 5h3l-2 5 6-8h-4l2-4z"/>
+                </svg>
+              </span>
+              <span class="noaa-outlooks-section-title">SPC</span>
+            </div>
+            <svg class="noaa-outlooks-section-chevron" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+              <path d="m7 10 5 5 5-5z"/>
+            </svg>
+          </button>
+          <div class="noaa-outlooks-section-body">
+            <div class="noaa-outlooks-section-inner" id="noaa-outlooks-panel-spc"></div>
+          </div>
+        </div>
+        <div class="noaa-outlooks-section" data-outlook-section="WPC">
+          <button class="noaa-outlooks-section-head" type="button" data-outlook-section-btn="WPC" aria-expanded="false">
+            <div class="noaa-outlooks-section-head-left">
+              <span class="noaa-outlooks-section-icon" aria-hidden="true">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M7 17a4 4 0 1 1 .74-7.93A5.5 5.5 0 0 1 18.3 11a3.7 3.7 0 0 1-.8 7.31H16"/>
+                  <path d="M9 12v6"/>
+                  <path d="M13 10v8"/>
+                  <path d="M17 13v5"/>
+                </svg>
+              </span>
+              <span class="noaa-outlooks-section-title">WPC</span>
+            </div>
+            <svg class="noaa-outlooks-section-chevron" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+              <path d="m7 10 5 5 5-5z"/>
+            </svg>
+          </button>
+          <div class="noaa-outlooks-section-body">
+            <div class="noaa-outlooks-section-inner" id="noaa-outlooks-panel-wpc"></div>
+          </div>
+        </div>
+        <div class="noaa-outlooks-section" data-outlook-section="CPC">
+          <button class="noaa-outlooks-section-head" type="button" data-outlook-section-btn="CPC" aria-expanded="false">
+            <div class="noaa-outlooks-section-head-left">
+              <span class="noaa-outlooks-section-icon" aria-hidden="true">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round">
+                  <rect x="3" y="5" width="18" height="16" rx="2"></rect>
+                  <path d="M8 3v4M16 3v4M3 11h18"/>
+                </svg>
+              </span>
+              <span class="noaa-outlooks-section-title">CPC</span>
+            </div>
+            <svg class="noaa-outlooks-section-chevron" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+              <path d="m7 10 5 5 5-5z"/>
+            </svg>
+          </button>
+          <div class="noaa-outlooks-section-body">
+            <div class="noaa-outlooks-section-inner" id="noaa-outlooks-panel-cpc"></div>
+          </div>
         </div>
       </div>
     </div>
