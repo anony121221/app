@@ -198,6 +198,20 @@ function _writePreparedPaletteColor(palette, rawValue, target, offset) {
 function buildWiseFrameSync(container, payloadData, palette) {
   const isPrtMultiType = String(container.family || '').trim().toUpperCase() === 'PRT'
     && Number(container.multiTypeCount) > 0;
+  const smoothStrength = isPrtMultiType
+    ? 0
+    : Math.max(0, Math.min(1, Number(container.dataSmoothingStrength) || 0));
+  const smoothingAvailable = smoothStrength > 0;
+  const smoothClamp = Math.max(0, Math.min(0.62, smoothStrength));
+  const smoothX = smoothClamp * 0.38;
+  const smoothY = smoothClamp * 0.68;
+  const cleanupStrength = smoothingAvailable
+    ? Math.max(0, Math.min(0.75, Math.pow(smoothClamp, 1.8)))
+    : 0;
+  const productFamily = String(container.family || '').trim().toUpperCase();
+  const lowDbzCleanup = smoothingAvailable && productFamily === 'REF';
+  const lowDbzThreshold = 15;
+  const lowDbzDropBelow = 5;
   const decoded = isPrtMultiType
     ? decodeWiseRadarMultitype(container, payloadData)
     : decodeWiseRadar(container, payloadData);
@@ -235,17 +249,196 @@ function buildWiseFrameSync(container, payloadData, palette) {
   const stride          = validGateCount > WISE_MAX_RENDER_GATES
     ? Math.max(1, Math.ceil(validGateCount / WISE_MAX_RENDER_GATES))
     : 1;
-  const vertexCapacity  = Math.ceil(validGateCount / stride) * 6;
+  const geometry       = _getWiseGeometry(container);
+  const rangeEdgeCount = geometry.rangeEdgeCount;
+  const edgeXs         = geometry.edgeXs;
+  const edgeYs         = geometry.edgeYs;
+  const codeToValue = code => minValue + (((code - 1.0) / valueDenom) * (maxValue - minValue));
+  const buildHannKernel = radius => {
+    const r = Math.max(0, Math.floor(Number(radius) || 0));
+    const kernel = new Float32Array((r * 2) + 1);
+    for (let offset = -r; offset <= r; offset += 1) {
+      kernel[offset + r] = (Math.cos((offset / (r + 1)) * Math.PI) * 0.5 + 0.5) / (r + 1);
+    }
+    return { radius: r, kernel };
+  };
+  const smoothValueField = () => {
+    const rawValues = new Float32Array(total);
+    const rawWeights = new Float32Array(total);
+    for (let i = 0; i < total; i += 1) {
+      const raw = grid[i];
+      if (raw <= 0) continue;
+      rawValues[i] = codeToValue(raw);
+      rawWeights[i] = 1;
+    }
+    if (!smoothingAvailable) {
+      return {
+        values: rawValues,
+        weights: rawWeights,
+        radiusX: 0,
+        radiusY: 0,
+      };
+    }
+
+    const { radius: radiusX, kernel: kernelX } = buildHannKernel(7);
+    const { radius: radiusY, kernel: kernelY } = buildHannKernel(3);
+    const passValues = new Float32Array(total);
+    const passWeights = new Float32Array(total);
+    const outValues = new Float32Array(total);
+    const outWeights = new Float32Array(total);
+
+    for (let ray = 0; ray < azimuthCount; ray += 1) {
+      const rowBase = ray * gateCount;
+      for (let gate = 0; gate < gateCount; gate += 1) {
+        const idx = rowBase + gate;
+        let sum = 0;
+        let wsum = 0;
+        for (let o = -radiusX; o <= radiusX; o += 1) {
+          const gg = gate + o;
+          if (gg < 0 || gg >= gateCount) continue;
+          const src = rowBase + gg;
+          const weighted = kernelX[o + radiusX] * rawWeights[src];
+          if (weighted <= 0) continue;
+          sum += rawValues[src] * weighted;
+          wsum += weighted;
+        }
+        const xValue = wsum > 1e-6 ? (sum / wsum) : rawValues[idx];
+        passValues[idx] = rawValues[idx] + ((xValue - rawValues[idx]) * smoothX);
+        passWeights[idx] = rawWeights[idx] + ((Math.min(1, wsum) - rawWeights[idx]) * smoothX);
+      }
+    }
+
+    for (let ray = 0; ray < azimuthCount; ray += 1) {
+      const rowBase = ray * gateCount;
+      for (let gate = 0; gate < gateCount; gate += 1) {
+        const idx = rowBase + gate;
+        let sum = 0;
+        let wsum = 0;
+        let coverage = 0;
+        for (let o = -radiusY; o <= radiusY; o += 1) {
+          const rr = (ray + o + azimuthCount) % azimuthCount;
+          const src = (rr * gateCount) + gate;
+          const weighted = kernelY[o + radiusY] * passWeights[src];
+          if (weighted <= 0) continue;
+          sum += passValues[src] * weighted;
+          wsum += weighted;
+          coverage += weighted;
+        }
+        const yValue = wsum > 1e-6 ? (sum / wsum) : passValues[idx];
+        outValues[idx] = passValues[idx] + ((yValue - passValues[idx]) * smoothY);
+        outWeights[idx] = passWeights[idx] + ((Math.min(1, coverage) - passWeights[idx]) * smoothY);
+      }
+    }
+
+    return {
+      values: outValues,
+      weights: outWeights,
+      radiusX,
+      radiusY,
+    };
+  };
+  const smoothedField = smoothingAvailable ? smoothValueField() : null;
+  const renderCoverageThreshold = smoothingAvailable
+    ? Math.max(0.055, 0.12 - (smoothY * 0.07))
+    : 1;
+  let renderableGateCount = 0;
+  for (let i = 0; i < total; i += 1) {
+    if (grid[i] > 0) {
+      renderableGateCount += 1;
+      continue;
+    }
+    if (
+      smoothingAvailable &&
+      smoothedField &&
+      smoothedField.weights[i] >= renderCoverageThreshold &&
+      smoothedField.values[i] > lowDbzDropBelow
+    ) {
+      renderableGateCount += 1;
+    }
+  }
+  const renderGateCapacity = Math.ceil(renderableGateCount / stride);
+  const vertexCapacity  = Math.max(0, renderGateCapacity * 6);
   const xy     = new Float32Array(vertexCapacity * 2);
   const rgba   = new Uint8Array(vertexCapacity * 4);
   const vals   = new Float32Array(vertexCapacity);
   const types  = isPrtMultiType ? new Uint8Array(vertexCapacity) : null;
   const colorTmp = new Uint8Array(4);
+  const lowDbzAlphaScale = value => {
+    if (!lowDbzCleanup || value >= lowDbzThreshold) return 1;
+    if (cleanupStrength <= 0) return 1;
+    const t = Math.max(0, Math.min(1, (value - lowDbzDropBelow) / (lowDbzThreshold - lowDbzDropBelow)));
+    const cleanedAlpha = value <= lowDbzDropBelow ? 0 : (0.08 + (0.42 * t * t));
+    return 1 + ((cleanedAlpha - 1) * cleanupStrength);
+  };
+  const lowDbzNeighborSupport = (ray, gate) => {
+    let valid = 0;
+    let strong = 0;
+    for (let dr = -1; dr <= 1; dr += 1) {
+      const rr = (ray + dr + azimuthCount) % azimuthCount;
+      const row = rr * gateCount;
+      for (let dg = -1; dg <= 1; dg += 1) {
+        if (dr === 0 && dg === 0) continue;
+        const gg = gate + dg;
+        if (gg < 0 || gg >= gateCount) continue;
+        const raw = grid[row + gg];
+        if (raw <= 0) continue;
+        valid += 1;
+        if (codeToValue(raw) >= lowDbzThreshold) strong += 1;
+      }
+    }
+    return { valid, strong };
+  };
+  const sampleValueField = (rayCoord, gateCoord, fallbackValue) => {
+    if (!smoothingAvailable || !smoothedField) {
+      return { value: fallbackValue, alpha: 1 };
+    }
+    const ray0Raw = Math.floor(rayCoord);
+    const rayFrac = rayCoord - ray0Raw;
+    const gate0 = Math.floor(gateCoord);
+    const gateFrac = gateCoord - gate0;
 
-  const geometry       = _getWiseGeometry(container);
-  const rangeEdgeCount = geometry.rangeEdgeCount;
-  const edgeXs         = geometry.edgeXs;
-  const edgeYs         = geometry.edgeYs;
+    const samples = [
+      { ray: ray0Raw,     gate: gate0,     weight: (1 - rayFrac) * (1 - gateFrac) },
+      { ray: ray0Raw + 1, gate: gate0,     weight: rayFrac * (1 - gateFrac) },
+      { ray: ray0Raw,     gate: gate0 + 1, weight: (1 - rayFrac) * gateFrac },
+      { ray: ray0Raw + 1, gate: gate0 + 1, weight: rayFrac * gateFrac },
+    ];
+
+    let sum = 0;
+    let weightSum = 0;
+    let alphaSum = 0;
+    let alphaWeightSum = 0;
+    for (const sample of samples) {
+      if (sample.weight <= 0) continue;
+      if (sample.gate < 0 || sample.gate >= gateCount) continue;
+      const rr = ((sample.ray % azimuthCount) + azimuthCount) % azimuthCount;
+      const src = (rr * gateCount) + sample.gate;
+      const coverage = smoothedField.weights[src];
+      alphaSum += coverage * sample.weight;
+      alphaWeightSum += sample.weight;
+      if (coverage <= 1e-4) continue;
+      sum += smoothedField.values[src] * coverage * sample.weight;
+      weightSum += coverage * sample.weight;
+    }
+    return {
+      value: weightSum > 1e-6 ? (sum / weightSum) : fallbackValue,
+      alpha: alphaWeightSum > 1e-6 ? Math.max(0, Math.min(1, alphaSum / alphaWeightSum)) : 1,
+    };
+  };
+  const writeVertexPosition = (vertex, x, y) => {
+    const pos = vertex * 2;
+    xy[pos + 0] = x;
+    xy[pos + 1] = y;
+  };
+  const writeVertexValueColor = (vertex, value, alpha = 1) => {
+    vals[vertex] = value;
+    _writePreparedPaletteColor(palette, value, colorTmp, 0);
+    const off = vertex * 4;
+    rgba[off + 0] = colorTmp[0];
+    rgba[off + 1] = colorTmp[1];
+    rgba[off + 2] = colorTmp[2];
+    rgba[off + 3] = Math.round(colorTmp[3] * lowDbzAlphaScale(value) * Math.max(0, Math.min(1, alpha)));
+  };
 
   let seenValid = 0, outGateCount = 0, vertexIndex = 0;
   for (let ray = 0; ray < azimuthCount; ray += 1) {
@@ -253,12 +446,24 @@ function buildWiseFrameSync(container, payloadData, palette) {
     const edgeBase0 = ray * rangeEdgeCount;
     const edgeBase1 = (ray + 1) * rangeEdgeCount;
     for (let gate = 0; gate < gateCount; gate += 1) {
+      const fieldIdx = rowBase + gate;
       const code = grid[rowBase + gate];
-      if (code <= 0) continue;
+      const rawValid = code > 0;
+      const fieldValue = smoothingAvailable && smoothedField ? smoothedField.values[fieldIdx] : 0;
+      const fieldWeight = smoothingAvailable && smoothedField ? smoothedField.weights[fieldIdx] : 0;
+      const fringeValid = smoothingAvailable &&
+        smoothedField &&
+        fieldWeight >= renderCoverageThreshold &&
+        fieldValue > lowDbzDropBelow;
+      if (!rawValid && !fringeValid) continue;
       if ((seenValid % stride) !== 0) { seenValid += 1; continue; }
       seenValid += 1;
 
-      const value = minValue + (((code - 1.0) / valueDenom) * (maxValue - minValue));
+      const value = rawValid ? codeToValue(code) : fieldValue;
+      if (rawValid && lowDbzCleanup && cleanupStrength > 0.45 && value < lowDbzThreshold) {
+        const support = lowDbzNeighborSupport(ray, gate);
+        if (support.valid <= 1 && support.strong === 0) continue;
+      }
       let colorValue = value, typeCode = 0;
       if (isPrtMultiType) {
         const typeMask    = typeGrid?.[rowBase + gate] || 1;
@@ -275,29 +480,36 @@ function buildWiseFrameSync(container, payloadData, palette) {
       const x11 = edgeXs[p11], y11 = edgeYs[p11];
       const x01 = edgeXs[p01], y01 = edgeYs[p01];
 
-      const posBase = vertexIndex * 2;
-      xy[posBase+0]=x00; xy[posBase+1]=y00;
-      xy[posBase+2]=x10; xy[posBase+3]=y10;
-      xy[posBase+4]=x11; xy[posBase+5]=y11;
-      xy[posBase+6]=x00; xy[posBase+7]=y00;
-      xy[posBase+8]=x11; xy[posBase+9]=y11;
-      xy[posBase+10]=x01; xy[posBase+11]=y01;
+      const emitRawVertex = (x, y) => {
+        writeVertexPosition(vertexIndex, x, y);
+        writeVertexValueColor(vertexIndex, value, 1);
+        if (types) types[vertexIndex] = typeCode;
+        vertexIndex += 1;
+      };
 
-      vals[vertexIndex]=vals[vertexIndex+1]=vals[vertexIndex+2]=
-      vals[vertexIndex+3]=vals[vertexIndex+4]=vals[vertexIndex+5]=value;
+      const emitSmoothedVertex = (x, y, rayEdgeOffset, gateEdgeOffset) => {
+        const sampled = sampleValueField(ray + rayEdgeOffset - 0.5, gate + gateEdgeOffset - 0.5, value);
+        writeVertexPosition(vertexIndex, x, y);
+        writeVertexValueColor(vertexIndex, sampled.value, sampled.alpha);
+        if (types) types[vertexIndex] = typeCode;
+        vertexIndex += 1;
+      };
 
-      if (types) {
-        types[vertexIndex]=types[vertexIndex+1]=types[vertexIndex+2]=
-        types[vertexIndex+3]=types[vertexIndex+4]=types[vertexIndex+5]=typeCode;
+      if (smoothingAvailable) {
+        emitSmoothedVertex(x00, y00, 0, 0);
+        emitSmoothedVertex(x10, y10, 0, 1);
+        emitSmoothedVertex(x11, y11, 1, 1);
+        emitSmoothedVertex(x00, y00, 0, 0);
+        emitSmoothedVertex(x11, y11, 1, 1);
+        emitSmoothedVertex(x01, y01, 1, 0);
+      } else {
+        emitRawVertex(x00, y00);
+        emitRawVertex(x10, y10);
+        emitRawVertex(x11, y11);
+        emitRawVertex(x00, y00);
+        emitRawVertex(x11, y11);
+        emitRawVertex(x01, y01);
       }
-
-      const colorBase = vertexIndex * 4;
-      for (let i = 0; i < 6; i += 1) {
-        const off = colorBase + (i * 4);
-        rgba[off]=colorTmp[0]; rgba[off+1]=colorTmp[1];
-        rgba[off+2]=colorTmp[2]; rgba[off+3]=colorTmp[3];
-      }
-      vertexIndex += 6;
       outGateCount += 1;
     }
   }
@@ -314,6 +526,16 @@ function buildWiseFrameSync(container, payloadData, palette) {
     product_code: container.productCode || '--',
     decimated:    stride > 1,
     field:        container.field,
+    data_smoothing: smoothingAvailable,
+    data_smoothing_method: smoothingAvailable ? 'separable-hann-value-field' : 'off',
+    data_smoothing_strength: smoothStrength,
+    data_smoothing_x: smoothX,
+    data_smoothing_y: smoothY,
+    data_smoothing_radius_x: smoothedField?.radiusX || 0,
+    data_smoothing_radius_y: smoothedField?.radiusY || 0,
+    data_smoothing_cleanup_strength: cleanupStrength,
+    data_smoothing_low_dbz_cleanup: lowDbzCleanup,
+    data_smoothing_low_dbz_threshold: lowDbzThreshold,
     _bufXy:    n === vertexCapacity ? xy    : xy.slice(0, n * 2),
     _bufColor: n === vertexCapacity ? rgba  : rgba.slice(0, n * 4),
     _bufVals:  n === vertexCapacity ? vals  : vals.slice(0, n),

@@ -3,7 +3,14 @@
 const fs = require('fs');
 const path = require('path');
 const https = require('https');
+const crypto = require('crypto');
 const EventProductParser = require('@atmosx/event-product-parser');
+
+function makeNwwsNickname(username = '') {
+  const cleanUser = String(username).replace(/[^a-zA-Z0-9]/g, '').slice(-6);
+  const random = crypto.randomBytes(3).toString('hex');
+  return `RadarApp-${cleanUser || 'user'}-${random}`;
+}
 
 const Manager = EventProductParser.Manager || EventProductParser.default;
 
@@ -66,6 +73,12 @@ let nwwsMessageCount = 0;
 let nwwsOccupantEventCount = 0;
 let nwwsExpiredCount = 0;
 let lastTrafficDiagnosticAt = 0;
+let lastPublishedAlertSignature = '';
+const NWWS_DEBUG = process.env.NWWS_DEBUG === '1';
+const droppedGeometryLogKeys = new Set();
+let lastLoggedActiveCount = -1;
+const BRIDGE_STARTED_MS = Date.now();
+const NWWS_REPLAY_GRACE_MS = 60_000;
 
 function emit(type, payload) {
   process.stdout.write(`${JSON.stringify({ type, payload })}\n`);
@@ -78,6 +91,19 @@ function emitLog(level, message, extra = {}) {
     timestamp: new Date().toISOString(),
     ...extra,
   });
+}
+
+function nwwsLog(message) {
+  emitLog('info', `[NWWS] ${String(message || '').trim()}`);
+}
+
+function nwwsWarn(message) {
+  emitLog('warn', `[NWWS] ${String(message || '').trim()}`);
+}
+
+function nwwsDebug(message) {
+  if (!NWWS_DEBUG) return;
+  emitLog('info', `[NWWS DEBUG] ${String(message || '').trim()}`);
 }
 
 function updateStatus(partial) {
@@ -102,6 +128,7 @@ function isFatalNwwsError(message) {
     || text.includes('cannot read properties of null')
     || text.includes('maxlistenersexceededwarning')
     || text.includes('error-reconnecting-too-fast')
+    || text.includes('attempting to reconnect too fast')
     || text.includes('write after end')
   );
 }
@@ -144,16 +171,17 @@ function sourceCounts() {
 function maybeEmitTrafficDiagnostic() {
   if (lastStatus.phase !== 'connected') return;
   const now = Date.now();
-  if (now - lastTrafficDiagnosticAt < 15_000) return;
+  if (now - lastTrafficDiagnosticAt < 60_000) return;
   lastTrafficDiagnosticAt = now;
   const counts = sourceCounts();
   if (!hasSeenNwwsTraffic) {
-    emitLog('warn', `[NWWS] No live NWWS traffic received yet; showing ${counts.bootstrap} bootstrapped / ${counts.nwws} live warning polygons`);
+    nwwsDebug(`No live traffic yet; bootstrap=${counts.bootstrap} live=${counts.nwws}`);
     return;
   }
   const ageSec = lastNwwsTrafficAt > 0 ? Math.max(0, Math.round((now - lastNwwsTrafficAt) / 1000)) : -1;
-  if (ageSec >= 30) {
-    emitLog('warn', `[NWWS] Live traffic idle for ${ageSec}s (live=${counts.nwws}, bootstrap=${counts.bootstrap})`);
+  if (ageSec >= 120) {
+    const roomOk = nwwsOccupantEventCount > 0 ? `room-joined` : `room-NOT-confirmed`;
+    nwwsDebug(`Live traffic idle ${ageSec}s; live=${counts.nwws} bootstrap=${counts.bootstrap} rawMsg=${nwwsMessageCount} room=${roomOk}`);
   }
 }
 
@@ -210,42 +238,168 @@ function normalizeParameters(rawProps) {
   const rawParams = rawProps?.parameters && typeof rawProps.parameters === 'object'
     ? { ...rawProps.parameters }
     : {};
-  const vtec = normalizeValueArray(rawParams.VTEC ?? rawParams.vtec ?? rawProps?.pvtec);
+  const vtec = normalizeValueArray(rawParams.VTEC ?? rawParams.vtec ?? rawProps?.pvtec ?? rawProps?.details?.pvtec);
   const ugc = normalizeValueArray(rawParams.UGC ?? rawParams.ugc);
   const geocodeUgc = Array.isArray(rawProps?.geocode?.UGC) ? rawProps.geocode.UGC.map(String) : [];
   return {
     ...rawParams,
     VTEC: vtec,
     UGC: ugc.length ? ugc : geocodeUgc,
+    // Expose snake_case NWWS library keys under the camelCase NWS API keys that radar.js expects
+    ...(rawParams.damage_threat != null ? {
+      thunderstormDamageThreat: rawParams.damage_threat,
+      tornadoDamageThreat: rawParams.damage_threat,
+    } : {}),
+    ...(rawParams.tornado_detection != null ? { tornadoDetection: rawParams.tornado_detection } : {}),
+    ...(rawParams.max_hail_size != null ? { maxHailSize: rawParams.max_hail_size } : {}),
+    ...(rawParams.max_wind_gust != null ? { maxWindGust: rawParams.max_wind_gust } : {}),
+    ...(rawParams.flood_detection != null ? { flashFloodDamageThreat: rawParams.flood_detection } : {}),
   };
 }
 
-function featureIdForParsedEvent(event) {
+function rawFeatureIdForParsedEvent(event) {
   const rawProps = event?.properties && typeof event.properties === 'object' ? event.properties : {};
   return String(
     event?.id
     || rawProps.id
     || event?.tracking
     || rawProps.tracking
+    || rawProps.details?.tracking
     || rawProps.hash
     || ''
   ).trim();
 }
 
-function featureFromParsedEvent(event) {
+function eventTimeMs(event) {
+  const props = event?.properties || {};
+  const history = Array.isArray(event?.history)
+    ? event.history
+    : (Array.isArray(props.history) ? props.history : []);
+  const raw =
+    props.sent
+    || props.issued
+    || props.effective
+    || props.onset
+    || history[0]?.issued
+    || history[0]?.sent
+    || '';
+  const ms = raw ? new Date(raw).getTime() : NaN;
+  return Number.isFinite(ms) ? ms : 0;
+}
+
+function isOldNwwsReplay(event) {
+  const ms = eventTimeMs(event);
+  if (!ms) return false;
+  return ms < (BRIDGE_STARTED_MS - NWWS_REPLAY_GRACE_MS);
+}
+
+function vtecTextFromEvent(event) {
+  const props = event?.properties || {};
+  const raw =
+    props.vtec ||
+    props.VTEC ||
+    props.pvtec ||
+    props.rawVtec ||
+    props.parameters?.VTEC ||
+    props.parameters?.vtec ||
+    props.details?.pvtec ||
+    props.details?.vtec ||
+    '';
+  return Array.isArray(raw) ? String(raw[0] || '') : String(raw || '');
+}
+
+function getVtecAction(event) {
+  const text = vtecTextFromEvent(event).toUpperCase();
+  const match = text.toUpperCase().match(/\/?[OTEX]\.([A-Z]{3})\./);
+  return match ? match[1] : '';
+}
+
+function warningChangeKindFromVtec(action) {
+  const code = String(action || '').toUpperCase();
+  if (!code) return '';
+
+  if (code === 'NEW') return 'new';
+  if (code === 'UPG') return 'upgraded';
+  if (code === 'CAN' || code === 'EXP') return 'cancelled';
+  if (code === 'CON' || code === 'EXT' || code === 'EXA' || code === 'EXB') return 'continued';
+  if (code === 'COR') return 'updated';
+
+  return 'updated';
+}
+
+function getStableWarningId(event) {
+  const text = vtecTextFromEvent(event).toUpperCase();
+  const match = text.match(/\/?[OTEX]\.[A-Z]{3}\.([A-Z]{4})\.([A-Z]{2})\.([A-Z])\.(\d{4})/);
+  if (match) {
+    const [, office, phen, sig, etn] = match;
+    return `${office}-${phen}-${sig}-${etn}`;
+  }
+
+  const raw = rawFeatureIdForParsedEvent(event);
+  if (raw) return String(raw).trim().toUpperCase();
+  return '';
+}
+
+function featureIdForParsedEvent(event) {
+  return getStableWarningId(event);
+}
+
+function vtecActionFromProps(props = {}) {
+  const first = vtecTextFromProps(props);
+  const text = String(first || '').toUpperCase();
+  const match = text.match(/\/?[A-Z]\.([A-Z]{3})\./);
+  return match ? match[1] : '';
+}
+
+function parsedEventActionText(event) {
+  const props = event?.properties && typeof event.properties === 'object' ? event.properties : {};
+  const history = Array.isArray(event?.history)
+    ? event.history
+    : (Array.isArray(props.history) ? props.history : []);
+
+  return [
+    props.messageType,
+    props.action,
+    props.is_cancelled ? 'cancelled' : '',
+    history[0]?.type,
+    getVtecAction(event),
+  ]
+    .map(value => String(value || '').trim().toLowerCase())
+    .filter(Boolean)
+    .join(' ');
+}
+
+function isCancelledParsedEvent(event) {
+  const kind = warningChangeKindFromVtec(getVtecAction(event));
+  if (kind) return kind === 'cancelled';
+  const text = parsedEventActionText(event);
+  return (
+    text.includes('cancel')
+    || text.includes('cancelled')
+    || text.includes('expire')
+    || /\bcan\b/.test(text)
+    || /\bexp\b/.test(text)
+  );
+}
+
+function featureFromParsedEvent(event, fallbackGeometry = null) {
   if (!event || event.type !== 'Feature') return null;
-  const geometry = normalizeGeometry(event.geometry);
+  let geometry = normalizeGeometry(event.geometry);
+  if (!geometry && fallbackGeometry) geometry = normalizeGeometry(fallbackGeometry);
   if (!geometry) return null;
   const rawProps = event.properties && typeof event.properties === 'object' ? { ...event.properties } : {};
   const history = Array.isArray(event.history)
     ? event.history
     : (Array.isArray(rawProps.history) ? rawProps.history : []);
   const id = featureIdForParsedEvent(event);
+  const rawTracking = rawFeatureIdForParsedEvent(event);
   if (!id) return null;
   const issuedRaw = rawProps.issued || rawProps.sent || history[0]?.issued || null;
   const expiresRaw = rawProps.expires || null;
   const parameters = normalizeParameters(rawProps);
   const eventText = String(rawProps.event || rawProps.parent || 'Unknown Warning');
+  const vtecAction = getVtecAction(event);
+  const changeKind = warningChangeKindFromVtec(vtecAction);
   return {
     type: 'Feature',
     id,
@@ -253,7 +407,8 @@ function featureFromParsedEvent(event) {
     properties: {
       ...rawProps,
       id,
-      tracking: id,
+      tracking: rawTracking || id,
+      _stableId: id,
       event: eventText,
       eventRaw: eventText,
       eventClass: classifyEvent(eventText),
@@ -276,6 +431,8 @@ function featureFromParsedEvent(event) {
       response: String(rawProps.response || ''),
       parameters,
       tags: Array.isArray(rawProps.tags) ? rawProps.tags.join(', ') : String(rawProps.tags || ''),
+      _nwwsAction: vtecAction,
+      _changeKind: changeKind,
       _source: 'nwws',
     },
   };
@@ -351,13 +508,30 @@ function isSuppressedFloodFeature(feature) {
   return eventText.includes('flood warning') && !eventText.includes('flash flood');
 }
 
-function vtecSignatureFromFeature(feature) {
-  const vtec = normalizeValueArray(feature?.properties?.parameters?.VTEC ?? feature?.properties?.parameters?.vtec)[0] || '';
+function vtecTextFromProps(props = {}) {
+  return normalizeValueArray(
+    props?.parameters?.VTEC
+    ?? props?.parameters?.vtec
+    ?? props?.pvtec
+    ?? props?.details?.pvtec
+  )[0] || '';
+}
+
+function vtecSignatureFromText(vtecText = '') {
+  const vtec = String(vtecText || '');
   if (!vtec) return '';
   const parts = vtec.replace(/^\//, '').split('.');
   // VTEC: O.NEW.KTLX.TO.W.0001.dates — stable key ignores action (index 1) and time range (index 6+)
   if (parts.length < 6) return parts.slice(0, 5).join('.');
   return [parts[0], parts[2], parts[3], parts[4], parts[5]].join('.');
+}
+
+function vtecSignatureFromProps(props = {}) {
+  return vtecSignatureFromText(vtecTextFromProps(props));
+}
+
+function vtecSignatureFromFeature(feature) {
+  return vtecSignatureFromProps(feature?.properties || {});
 }
 
 function replaceBootstrapDuplicates(feature, liveKey) {
@@ -372,7 +546,7 @@ function replaceBootstrapDuplicates(feature, liveKey) {
     if (entrySig === liveSig) {
       activeAlerts.delete(entryKey);
       removed += 1;
-      emitLog('info', `[NWWS] Replaced NWS API bootstrap entry ${entryKey} with live NWWS alert ${liveKey}`);
+      nwwsDebug(`Replaced bootstrap alert with live NWWS alert ${liveKey}`);
     }
   }
   return removed;
@@ -392,7 +566,7 @@ function replaceNwwsDuplicates(feature, liveKey) {
     if (entrySig === liveSig) {
       activeAlerts.delete(entryKey);
       removed += 1;
-      emitLog('info', `[NWWS] Replaced stale NWWS entry ${entryKey} with upgraded entry ${liveKey}`);
+      nwwsDebug(`Replaced stale NWWS entry with upgraded entry ${liveKey}`);
     }
   }
   return removed;
@@ -412,12 +586,21 @@ function summarizeSkippedEvent(event) {
   };
 }
 
+function logDroppedGeometryOnce(event) {
+  const skipped = summarizeSkippedEvent(event);
+  const key = `${skipped.event}|${skipped.sender}|${skipped.tracking}`;
+  if (droppedGeometryLogKeys.has(key)) return;
+  droppedGeometryLogKeys.add(key);
+  nwwsDebug(`Dropped no-geometry event: ${skipped.event} ${skipped.tracking || ''} ugcZones=${skipped.ugcCount}`);
+}
+
 function removeAlertByIdentity(event) {
   const keys = new Set();
   const id = featureIdForParsedEvent(event);
   if (id) keys.add(id);
+  const rawProps = event?.properties && typeof event.properties === 'object' ? event.properties : {};
   const feature = featureFromParsedEvent(event);
-  const sig = feature ? vtecSignatureFromFeature(feature) : '';
+  const sig = feature ? vtecSignatureFromFeature(feature) : vtecSignatureFromProps(rawProps);
   if (sig) {
     for (const [entryKey, entry] of activeAlerts.entries()) {
       const entryFeature = getFeatureForEntry(entry);
@@ -435,22 +618,24 @@ function removeAlertByIdentity(event) {
 
 function pruneExpiredAlerts() {
   const now = Date.now();
+  let removed = 0;
   for (const [key, entry] of activeAlerts.entries()) {
     const feature = getFeatureForEntry(entry);
     if (isSuppressedFloodFeature(feature)) {
       activeAlerts.delete(key);
+      removed += 1;
       continue;
     }
     const expires = getExpiresMs(entry);
     if (expires && Number.isFinite(expires) && expires <= now) {
       activeAlerts.delete(key);
+      removed += 1;
     }
   }
+  return removed;
 }
 
-function publishAlerts() {
-  pruneExpiredAlerts();
-
+function buildPublishedFeatures() {
   const features = [];
   for (const entry of activeAlerts.values()) {
     const feature = getFeatureForEntry(entry);
@@ -462,24 +647,64 @@ function publishAlerts() {
     const bTime = Date.parse(b.properties.issued || '') || 0;
     return bTime - aTime;
   });
-  emit('alerts', {
-    type: 'FeatureCollection',
-    features,
-    generatedAt: new Date().toISOString(),
-  });
+
+  return features;
+}
+
+function buildAlertSignature(features) {
+  return features
+    .map(feature => {
+      const props = feature?.properties || {};
+      return [
+        String(feature?.id || ''),
+        String(props._source || ''),
+        String(props.action || props.messageType || ''),
+        String(props.expires || ''),
+      ].join('|');
+    })
+    .join('\n');
+}
+
+function publishStatusOnly(featuresCount = activeAlerts.size) {
   const counts = sourceCounts();
   if (lastStatus.phase !== 'starting') {
     updateStatus({
       phase: lastStatus.phase,
       message: !hasSeenNwwsTraffic
         ? `Connected to NWWS, awaiting live traffic (${counts.bootstrap} bootstrapped warning polygon${counts.bootstrap === 1 ? '' : 's'})`
-        : features.length
-          ? `${features.length} active warning polygon${features.length === 1 ? '' : 's'}`
+        : featuresCount
+          ? `${featuresCount} active warning polygon${featuresCount === 1 ? '' : 's'}`
           : 'Connected, no active warning polygons',
-      alertCount: features.length,
+      alertCount: featuresCount,
     });
   }
   maybeEmitTrafficDiagnostic();
+}
+
+function maybeLogActiveCount(featuresCount = activeAlerts.size) {
+  if (!Number.isFinite(featuresCount)) return;
+  if (featuresCount === lastLoggedActiveCount) return;
+  lastLoggedActiveCount = featuresCount;
+  nwwsLog(`${featuresCount} active warning polygon${featuresCount === 1 ? '' : 's'}`);
+}
+
+function publishAlerts(force = false) {
+  pruneExpiredAlerts();
+  const features = buildPublishedFeatures();
+  const signature = buildAlertSignature(features);
+  if (!force && signature === lastPublishedAlertSignature) {
+    publishStatusOnly(features.length);
+    return;
+  }
+
+  lastPublishedAlertSignature = signature;
+  emit('alerts', {
+    type: 'FeatureCollection',
+    features,
+    generatedAt: new Date().toISOString(),
+  });
+  publishStatusOnly(features.length);
+  maybeLogActiveCount(features.length);
 }
 
 function httpsGet(url) {
@@ -521,7 +746,7 @@ async function bootstrapFromNwsApi() {
   if (nwsApiBootstrapDone || nwsApiFetchActive) return;
   nwsApiFetchActive = true;
   try {
-    emitLog('info', '[NWS API] Fetching current warnings for one-time bootstrap...');
+    nwwsDebug('Fetching NWS API bootstrap alerts...');
     const data = await httpsGet(NWS_API_URL);
     const features = Array.isArray(data?.features) ? data.features : [];
     let added = 0;
@@ -538,7 +763,7 @@ async function bootstrapFromNwsApi() {
       added += 1;
     }
     nwsApiBootstrapDone = true;
-    emitLog('info', `[NWS API] Bootstrap complete: loaded ${added} polygon warning(s) — switching to NWWS`);
+    nwwsLog(`Bootstrapped ${added} active warning polygon${added === 1 ? '' : 's'} from NWS API`);
     updateStatus({
       phase: lastStatus.phase,
       message: `Bootstrapped ${added} warning(s) from NWS API, awaiting NWWS XMPP`,
@@ -546,7 +771,7 @@ async function bootstrapFromNwsApi() {
     publishAlerts();
   } catch (error) {
     nwsApiBootstrapDone = true;
-    emitLog('warn', `[NWS API] Bootstrap failed: ${error?.message || String(error)} — continuing with NWWS only`);
+    nwwsWarn(`NWS API bootstrap failed: ${error?.message || String(error)} - continuing with NWWS only`);
   } finally {
     nwsApiFetchActive = false;
   }
@@ -559,18 +784,18 @@ function createParser() {
     journal: true,
     noaa_weather_wire_service_settings: {
       reconnection_settings: {
-        enabled: false,
-        interval: 60,
+        enabled: true,
+        interval: 900,
       },
       credentials: {
         username: NWWS_USERNAME,
         password: NWWS_PASSWORD,
-        nickname: 'RadarApp',
+        nickname: makeNwwsNickname(NWWS_USERNAME),
       },
       cache: {
         enabled: false,
-        max_db_history: 5000,
-        max_db_cache_size: 1000,
+        max_db_history: 0,
+        max_db_cache_size: 0,
       },
       preferences: {
         disable_ugc: false,
@@ -586,7 +811,7 @@ function createParser() {
     global_settings: {
       parent_events_only: true,
       better_event_parsing: true,
-      shapefile_coordinates: true,
+      shapefile_coordinates: false,
       shapefile_skip: 10,
       filtering: {
         events: NWWS_ALLOWED_EVENT_NAMES,
@@ -609,26 +834,34 @@ function createParser() {
 function attachParserHandlers(instance) {
   instance.on('log', message => {
     const text = String(message || '');
-    emitLog('info', text);
     if (isFatalNwwsError(text)) {
+      nwwsWarn(text);
       scheduleFatalShutdown(text);
+      return;
     }
+    nwwsDebug(text);
   });
 
   instance.on('onConnection', nickname => {
-    emitLog('info', `NWWS XMPP connection established${nickname ? ` (${nickname})` : ''}`);
+    nwwsLog(`Connected${nickname ? ` as ${nickname}` : ''}`);
     updateStatus({ phase: 'connected', message: 'Connected to NWWS, awaiting traffic' });
     publishAlerts();
   });
 
   instance.on('onReconnection', data => {
     if (fatalShutdownScheduled) return;
-    emitLog('warn', `[NWWS] Reconnection attempt #${data?.reconnects ?? '?'} after ${data?.lastStanza ?? '?'} ms since last stanza`);
+    nwwsWarn(`Reconnecting to live feed... attempt ${data?.reconnects ?? '?'}`);
+    nwwsDebug(`Reconnect detail: lastStanza=${data?.lastStanza ?? '?'} ms`);
     updateStatus({ phase: 'reconnecting', message: 'Reconnecting to NWWS' });
   });
 
   instance.on('onOccupant', data => {
+    const wasFirst = nwwsOccupantEventCount === 0;
     nwwsOccupantEventCount += 1;
+    if (wasFirst) {
+      nwwsLog('Live feed ready');
+      nwwsDebug(`Room join confirmed: occupant=${data?.occupant ?? 'unknown'} type=${data?.type ?? 'available'}`);
+    }
     void data;
   });
 
@@ -641,9 +874,13 @@ function attachParserHandlers(instance) {
   instance.on('onExpired', event => {
     nwwsExpiredCount += 1;
     markNwwsTraffic();
+    if (isOldNwwsReplay(event)) {
+      nwwsDebug('Ignored old cached expired/cancel product');
+      return;
+    }
     const removed = removeAlertByIdentity(event);
     if (removed > 0) {
-      emitLog('info', `[NWWS] Expired/cancelled alert removed (${removed} entr${removed === 1 ? 'y' : 'ies'})`);
+      nwwsDebug(`Expired/cancelled alert removed (${removed} entr${removed === 1 ? 'y' : 'ies'})`);
       publishAlerts();
     }
   });
@@ -656,17 +893,32 @@ function attachParserHandlers(instance) {
       received: list.length,
       added: 0,
       updated: 0,
+      cancelled: 0,
       removedBootstrap: 0,
+      skippedCached: 0,
       skippedNonWarning: 0,
       skippedFlood: 0,
       skippedGeometry: 0,
     };
     for (const event of list) {
-      const feature = featureFromParsedEvent(event);
+      if (isOldNwwsReplay(event)) {
+        summary.skippedCached += 1;
+        continue;
+      }
       const key = featureIdForParsedEvent(event);
+      const vtecAction = getVtecAction(event);
+      const changeKind = warningChangeKindFromVtec(vtecAction);
+      if (changeKind === 'cancelled' || isCancelledParsedEvent(event)) {
+        const removed = removeAlertByIdentity(event);
+        if (removed > 0) summary.cancelled += removed;
+        continue;
+      }
+      const existingEntry = key ? activeAlerts.get(key) : null;
+      const fallbackGeometry = existingEntry?._prebuiltFeature?.geometry ?? null;
+      const feature = featureFromParsedEvent(event, fallbackGeometry);
       if (!feature) {
         summary.skippedGeometry += 1;
-        if (key) activeAlerts.delete(key);
+        logDroppedGeometryOnce(event);
         continue;
       }
       if (!isWarningFeature(feature)) {
@@ -687,16 +939,32 @@ function attachParserHandlers(instance) {
         _source: 'nwws',
       });
       if (wasPresent) summary.updated += 1;
-      else summary.added += 1;
+      else {
+        summary.added += 1;
+        const eventTitle = String(feature?.properties?.event || feature?.properties?.eventRaw || 'Warning').trim() || 'Warning';
+        if (changeKind === 'continued') {
+          nwwsLog(`${eventTitle} has been continued.`);
+        } else if (changeKind === 'updated') {
+          nwwsDebug(`${eventTitle} has been updated.`);
+        } else if (/warning/i.test(eventTitle)) {
+          nwwsLog(`A new ${eventTitle} has been issued.`);
+        } else {
+          nwwsDebug(`A new ${eventTitle} has been issued.`);
+        }
+      }
       summary.removedBootstrap += replaceBootstrapDuplicates(feature, feature.id);
       summary.removedBootstrap += replaceNwwsDuplicates(feature, feature.id);
     }
     const counts = sourceCounts();
-    if (summary.added > 0 || summary.updated > 0 || summary.removedBootstrap > 0 || summary.skippedFlood > 0) {
-      emitLog(
-        'info',
-        `[NWWS] Alert batch #${nwwsAlertBatchCount}: received=${summary.received} added=${summary.added} updated=${summary.updated} removedBootstrap=${summary.removedBootstrap} skipped(nonWarning=${summary.skippedNonWarning}, flood=${summary.skippedFlood}, geometry=${summary.skippedGeometry}) live=${counts.nwws} bootstrap=${counts.bootstrap}`
-      );
+    if (
+      summary.added > 0
+      || summary.updated > 0
+      || summary.cancelled > 0
+      || summary.removedBootstrap > 0
+      || summary.skippedCached > 0
+      || summary.skippedFlood > 0
+    ) {
+      nwwsDebug(`Batch #${nwwsAlertBatchCount}: received=${summary.received} added=${summary.added} updated=${summary.updated} cancelled=${summary.cancelled} removedBootstrap=${summary.removedBootstrap} skippedCached=${summary.skippedCached} skippedGeometry=${summary.skippedGeometry} live=${counts.nwws} bootstrap=${counts.bootstrap}`);
     }
     publishAlerts();
   });
@@ -724,11 +992,11 @@ async function shutdownCleanly() {
 process.on('SIGINT', () => { void shutdownCleanly(); });
 process.on('SIGTERM', () => { void shutdownCleanly(); });
 
-emitLog('info', 'NWWS bridge booting');
-updateStatus({ phase: 'starting', message: 'Loading NWWS parser package' });
-emitLog('info', `Bridge data dir: ${APP_DIR}`);
-emitLog('info', `Bridge cache dir: ${CACHE_DIR}`);
-emitLog('info', `Bridge database path: ${DB_PATH}`);
+nwwsLog('Starting...');
+updateStatus({ phase: 'starting', message: 'Starting NWWS' });
+nwwsDebug(`Bridge data dir: ${APP_DIR}`);
+nwwsDebug(`Bridge cache dir: ${CACHE_DIR}`);
+nwwsDebug(`Bridge database path: ${DB_PATH}`);
 
 if (!NWWS_USERNAME || !NWWS_PASSWORD) {
   emitLog('error', 'NWWS credentials were not provided');
@@ -736,15 +1004,29 @@ if (!NWWS_USERNAME || !NWWS_PASSWORD) {
   process.exit(1);
 }
 
-void bootstrapFromNwsApi();
+async function startBridge() {
+  await bootstrapFromNwsApi();
 
-emitLog('info', 'Constructing NWWS parser client');
-parser = createParser();
-emitLog('info', 'NWWS parser client constructed (@atmosx/event-product-parser)');
-emitLog('info', 'NWWS parser reconnect loop disabled via Manager settings');
-attachParserHandlers(parser);
-updateStatus({ phase: 'starting', message: 'NWWS parser initialized, waiting for XMPP connection' });
+  nwwsLog('Connecting live feed...');
+  nwwsDebug('Constructing NWWS parser client');
+  parser = createParser();
+  nwwsDebug('NWWS parser client constructed (@atmosx/event-product-parser)');
+
+  attachParserHandlers(parser);
+
+  updateStatus({
+    phase: 'starting',
+    message: 'NWS API bootstrap complete; NWWS parser initialized, waiting for XMPP connection',
+  });
+}
+
+void startBridge();
 
 setInterval(() => {
-  publishAlerts();
-}, 250);
+  const removed = pruneExpiredAlerts();
+  if (removed > 0) {
+    publishAlerts(true);
+  } else {
+    publishStatusOnly();
+  }
+}, 1000);

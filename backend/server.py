@@ -23,6 +23,7 @@ import urllib.request
 import urllib.parse
 import gzip
 import zlib
+from collections import OrderedDict
 from datetime import datetime, timezone
 
 import numpy as np
@@ -39,6 +40,7 @@ WISE_MAX_GATES       = int(
 )
 WISE_PRT_RANGE_SPAN  = 120.0
 WISE_BASE            = 'https://data2.weatherwise.app/radar/processed'
+WISE_GEOM_CACHE_MAX  = max(1, int(os.environ.get('RADAR_WISE_GEOM_CACHE_MAX', '6')))
 
 TDWR_FOLDER = {
     'REF': 'TZ0', 'VEL': 'TV0', 'PRT': 'PRT0', 'REF-LR': 'TZL',
@@ -239,6 +241,37 @@ def build_gate_geometry(
     edge_x = ((lon_deg + 180.0) / 360.0).astype(np.float32)
     edge_y = ((1.0 - np.log(np.tan(math.pi * 0.25 + lat_rad * 0.5)) / math.pi) * 0.5).astype(np.float32)
     return edge_x, edge_y
+
+
+_GEOM_CACHE = OrderedDict()
+
+def get_gate_geometry_cached(
+    station_lat: float, station_lon: float,
+    az_count: int, gate_count: int,
+    gate_spacing_m: float, first_center_m: float,
+) -> tuple:
+    key = (
+        round(float(station_lat), 5),
+        round(float(station_lon), 5),
+        int(az_count),
+        int(gate_count),
+        round(float(gate_spacing_m), 3),
+        round(float(first_center_m), 3),
+    )
+    cached = _GEOM_CACHE.get(key)
+    if cached is not None:
+        _GEOM_CACHE.move_to_end(key)
+        return cached
+
+    geom = build_gate_geometry(
+        station_lat, station_lon,
+        az_count, gate_count,
+        gate_spacing_m, first_center_m,
+    )
+    _GEOM_CACHE[key] = geom
+    while len(_GEOM_CACHE) > WISE_GEOM_CACHE_MAX:
+        _GEOM_CACHE.popitem(last=False)
+    return geom
 
 
 # ---------------------------------------------------------------------------
@@ -451,13 +484,21 @@ def build_wdar_blob(
         0, 0,                       # padding (h, H)
     ) + field_bytes + b'\x00\x00'   # 46 + 16 + 2 = 64 bytes
     assert len(hdr) == 64
-    blob  = hdr
-    blob += xy.astype(np.float32).tobytes()
-    blob += rgba.astype(np.uint8).tobytes()
-    blob += vals.astype(np.float32).tobytes()
+    parts = [
+        hdr,
+        _bytes_view(xy, np.float32),
+        _bytes_view(rgba, np.uint8),
+        _bytes_view(vals, np.float32),
+    ]
     if has_types and types is not None:
-        blob += types.astype(np.uint8).tobytes()
-    return blob
+        parts.append(_bytes_view(types, np.uint8))
+    return b''.join(parts)
+
+
+def _bytes_view(arr: np.ndarray, dtype) -> bytes:
+    if arr.dtype == dtype and arr.flags['C_CONTIGUOUS']:
+        return arr.tobytes()
+    return np.ascontiguousarray(arr, dtype=dtype).tobytes()
 
 
 # ---------------------------------------------------------------------------
@@ -551,7 +592,7 @@ def handle_decode_wise(req: dict) -> bytes:
     max_val   = parsed['max_value']
     scan_time = parsed['scan_time']
 
-    edge_x, edge_y = build_gate_geometry(
+    edge_x, edge_y = get_gate_geometry_cached(
         sta_lat, sta_lon, az, gc_,
         parsed['gate_spacing_m'], parsed['first_center_m'],
     )

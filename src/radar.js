@@ -5,7 +5,7 @@ const MAPBOX_TOKEN_MAX_VELOCITY = 'pk.eyJ1IjoibWF4dmVsb2NpdHkiLCJhIjoiY204bjdmMX
 const S3           = 'https://unidata-nexrad-level3.s3.amazonaws.com';
 const POLL_MS      = 5000;
 const L2_POLL_MS   = 10000;
-const PROCESSED_WISE_POLL_MS = 2000;
+const PROCESSED_WISE_POLL_MS = 1000;
 const L3_FAMILIES  = ['REF', 'VEL', 'SRV', 'CC', 'ZDR', 'SW', 'EET', 'PRT', 'DTA'];
 const L3_TILTS     = ['0.5', '1.5', '2.4', '3.1'];
 const REMOTE_HYBRID_L2_PRODUCTS = ['CC', 'ZDR'];
@@ -62,9 +62,10 @@ const WISE_CACHE_TTL_MS = 1000;
 const WISE_MAX_RENDER_GATES = 750000;
 const WISE_PROBE_LOOKBACK_MINUTES = 12;
 const WISE_PROBE_AHEAD_MINUTES = 1;
-const WISE_PROBE_TIMEOUT_MS = 2500;
+const WISE_PROBE_TIMEOUT_MS = 100;
 const WISE_NOT_FOUND_COOLDOWN_MS = 5000;
 const WISE_MAX_PROBE_CANDIDATES = 3;
+const ACTIVE_WISE_PROBE_MS = 100;
 const WISE_PREFETCH_CACHE_MAX = 24;
 const WISE_GEOMETRY_CACHE_MAX = 6;
 const RECENT_WISE_FRAME_COUNT = 12;
@@ -86,6 +87,10 @@ const WISE_PRT_SECTION_LABELS = Object.freeze({
   SLEET: 'Sleet',
   FRZR: 'Freezing Rain',
 });
+const RADAR_SITE_OFFLINE_COLOR = '#ff3030';
+const RADAR_SITE_STATUS_URL = 'https://api.weather.gov/radar/stations';
+const RADAR_SITE_STATUS_REFRESH_MS = 5 * 60 * 1000;
+const RADAR_SITE_STALE_MS = 20 * 60 * 1000;
 const WEATHERWISE_RELAY_PRECONNECT_URL = 'https://relay2.weatherwise.app/preconnect';
 const WEATHERWISE_RELAY_SOCKET_HTTP_URL = 'https://relay2.weatherwise.app/ws/socket.io/';
 const WEATHERWISE_RELAY_SOCKET_WS_URL = 'wss://relay2.weatherwise.app/ws/socket.io/';
@@ -120,11 +125,13 @@ var activeFamily = 'REF';
 var activeTilt = '0.5';
 var pollTimer = null;
 var dbzFilter = -30;
+var radarDataSmoothing = false;
+var radarDataSmoothingStrength = 0.45;
 var levelII = false;
 
 // Tauri IPC, no HTTP port needed
 const { invoke } = window.__TAURI__.core;
-const { listen, emit } = window.__TAURI__.event;
+const { listen } = window.__TAURI__.event;
 let _l3TransportWarmed = false;
 const APP_UPDATE_AUTO_CHECK_DELAY_MS = 4500;
 const APP_UPDATE_RETRY_DELAY_MS = 20000;
@@ -221,6 +228,7 @@ function _shutdownFrontendResources() {
     clearInterval(pollTimer);
     pollTimer = null;
   }
+  stopRadarSiteStatusPolling();
   if (panePollTimer != null) {
     clearInterval(panePollTimer);
     panePollTimer = null;
@@ -458,9 +466,27 @@ const VIEWABLE_STATIONS = Object.freeze(
 const RADAR_SITE_DEFAULT_WSR_COLOR = '#FFFFFF';
 const RADAR_SITE_DEFAULT_TERMINAL_COLOR = '#FFFFFF';
 const RADAR_SITE_LEGACY_TERMINAL_COLOR = '#6FD2FF';
+const LIVE_SWEEP_DEFAULT_COLOR = '#FFFFFF';
+const LIVE_SWEEP_DEFAULT_REV_MS = 18000;
+const LIVE_SWEEP_MIN_REV_MS = 6000;
+const LIVE_SWEEP_MAX_REV_MS = 45000;
+const radarSiteStatusById = new Map();
+let radarSiteStatusTimer = null;
+let radarSiteStatusLoading = false;
+let radarSiteStatusLastFetchMs = 0;
 
 function _normalizeRadarSiteColor(color, fallback) {
   return _normalizeSpcHex(color) || fallback;
+}
+
+function _normalizeLiveSweepColor(color) {
+  return _normalizeSpcHex(color) || LIVE_SWEEP_DEFAULT_COLOR;
+}
+
+function _normalizeLiveSweepRevMs(value) {
+  const numeric = Number(value);
+  const ms = Number.isFinite(numeric) ? numeric : LIVE_SWEEP_DEFAULT_REV_MS;
+  return Math.max(LIVE_SWEEP_MIN_REV_MS, Math.min(LIVE_SWEEP_MAX_REV_MS, Math.round(ms)));
 }
 
 function _parseHexColorRgb(color, fallback = '#FFFFFF') {
@@ -498,6 +524,96 @@ function _radarSiteConfiguredColorForKind(kind) {
 
 function stationDotColor(id) {
   return _radarSiteConfiguredColorForKind(stationKind(id));
+}
+
+function _radarSiteStatusId(rawId) {
+  const raw = String(rawId || '').trim().toUpperCase();
+  if (!raw) return '';
+  const canonical = canonicalStationId(raw);
+  if (VIEWABLE_STATIONS[canonical]) return canonical;
+  const withK = raw.length === 3 ? `K${raw}` : raw;
+  return VIEWABLE_STATIONS[withK] ? withK : canonical;
+}
+
+function _radarSiteStatusText(props) {
+  const rdaProps = props?.rda?.properties || {};
+  return [
+    rdaProps.operabilityStatus,
+    rdaProps.status,
+    rdaProps.mode,
+    rdaProps.alarmSummary,
+  ].map(v => String(v || '').trim()).filter(Boolean).join(' | ');
+}
+
+function _radarSiteStatusIsOffline(props) {
+  const rdaProps = props?.rda?.properties || {};
+  const status = String(rdaProps.status || '').trim();
+  const mode = String(rdaProps.mode || '').trim();
+  const statusText = _radarSiteStatusText(props);
+  if (/offline|off-line|down|unavailable|inoperable|failed|not reporting|no data/i.test(statusText)) return true;
+  // NWS reports many healthy radars as "Maintenance Action Required/Mandatory".
+  // Those are still usable when status/mode are good and latency is current.
+  if (status && !/^operate$/i.test(status)) return true;
+  if (mode && !/^operational$/i.test(mode)) return true;
+  const lastTime = Date.parse(props?.latency?.levelTwoLastReceivedTime || props?.rda?.timestamp || '');
+  return Number.isFinite(lastTime)
+    && Date.now() >= lastTime
+    && (Date.now() - lastTime) > RADAR_SITE_STALE_MS;
+}
+
+function _isRadarSiteOffline(id) {
+  return radarSiteStatusById.get(canonicalStationId(id))?.offline === true;
+}
+
+function _stationDotColorForStatus(id) {
+  return _isRadarSiteOffline(id) ? RADAR_SITE_OFFLINE_COLOR : stationDotColor(id);
+}
+
+async function refreshRadarSiteStatuses(force = false) {
+  const now = Date.now();
+  if (radarSiteStatusLoading) return;
+  if (!force && radarSiteStatusLastFetchMs && (now - radarSiteStatusLastFetchMs) < RADAR_SITE_STATUS_REFRESH_MS) return;
+  radarSiteStatusLoading = true;
+  try {
+    const data = await _fetchGeoJsonViaTauri(RADAR_SITE_STATUS_URL, {
+      timeoutMs: 10000,
+      preferDirect: false,
+    });
+    const next = new Map();
+    const features = Array.isArray(data?.features) ? data.features : [];
+    for (const feature of features) {
+      const props = feature?.properties || {};
+      const id = _radarSiteStatusId(props.id || props.stationId || props.siteId);
+      if (!id || !VIEWABLE_STATIONS[id]) continue;
+      next.set(id, {
+        offline: _radarSiteStatusIsOffline(props),
+        label: _radarSiteStatusText(props),
+        fetchedAt: now,
+      });
+    }
+    radarSiteStatusById.clear();
+    next.forEach((value, key) => radarSiteStatusById.set(key, value));
+    radarSiteStatusLastFetchMs = now;
+    window.__radarSiteStatus = () => Object.fromEntries(radarSiteStatusById.entries());
+    _refreshStationSourceData();
+  } catch (err) {
+    console.warn('[Radar sites] status refresh failed', err?.message || err);
+  } finally {
+    radarSiteStatusLoading = false;
+  }
+}
+
+function startRadarSiteStatusPolling() {
+  if (radarSiteStatusTimer != null) return;
+  void refreshRadarSiteStatuses(true);
+  radarSiteStatusTimer = setInterval(() => {
+    void refreshRadarSiteStatuses(false);
+  }, RADAR_SITE_STATUS_REFRESH_MS);
+}
+
+function stopRadarSiteStatusPolling() {
+  if (radarSiteStatusTimer != null) clearInterval(radarSiteStatusTimer);
+  radarSiteStatusTimer = null;
 }
 
 function supportedL3FamiliesForStation(id) {
@@ -730,10 +846,13 @@ const STATION_LAYER_IDS = [...STATION_DOT_LAYER_IDS, ...STATION_PILL_LAYER_IDS];
 const STATION_INTERACTIVE_LAYER_IDS = ['stations-dot', 'stations-pill'];
 const STATION_PILL_IMAGE_WSR = 'station-pill-wsr';
 const STATION_PILL_IMAGE_TDWR = 'station-pill-tdwr';
+const STATION_PILL_IMAGE_OFFLINE = 'station-pill-offline';
 const STATION_PILL_HOVER_IMAGE_WSR = 'station-pill-hover-wsr';
 const STATION_PILL_HOVER_IMAGE_TDWR = 'station-pill-hover-tdwr';
+const STATION_PILL_HOVER_IMAGE_OFFLINE = 'station-pill-hover-offline';
 const STATION_PILL_ACTIVE_IMAGE_WSR = 'station-pill-active-wsr';
 const STATION_PILL_ACTIVE_IMAGE_TDWR = 'station-pill-active-tdwr';
+const STATION_PILL_ACTIVE_IMAGE_OFFLINE = 'station-pill-active-offline';
 
 const SPC_OUTLOOK_SOURCES = {
   DAY1: {
@@ -1223,6 +1342,7 @@ const ALERT_EVENT_COLOR_MAP = {
   SVR: '#FFE600',
   SVRC: '#FFE600',
   SVRD: '#FFE600',
+  SVRE: '#FF8000',
   TOR: '#FF2D2D',
   TORR: '#FF46FF',
   TORP: '#C010FF',
@@ -1288,6 +1408,7 @@ const WARNING_PREF_CONFIG = Object.freeze([
   { id: 'TORP', label: 'PDS Tornado Warning' },
   { id: 'TORR', label: 'Confirmed Tornado Warning' },
   { id: 'TOR', label: 'Tornado Warning' },
+  { id: 'SVRE', label: 'EDS Severe Thunderstorm Warning' },
   { id: 'SVRD', label: 'Destructive Severe Thunderstorm Warning' },
   { id: 'SVRC', label: 'Considerable Severe Thunderstorm Warning' },
   { id: 'SVR', label: 'Severe Thunderstorm Warning' },
@@ -1324,6 +1445,7 @@ const WARNING_PREF_CONFIG = Object.freeze([
   { id: 'HWO', label: 'Hazardous Weather Outlook' },
 ]);
 const WARNING_PREF_ID_SET = new Set(WARNING_PREF_CONFIG.map(item => item.id));
+const _WARNING_ONLY_IDS = new Set(['TORE','TORP','TORR','TOR','SVRE','SVRD','SVRC','SVR','FFW','FLW','BLW','WSW','ISW','SNQ','WCW','LESW','FFZ','HFZ','FZW','HWW']);
 const ALERT_FALLBACK_COLOR = '#E6E6E6';
 const ALERT_DEFAULT_KEEP_MS = 6 * 60 * 60 * 1000;
 const WARNING_NOTIFY_STARTUP_QUIET_MS = 10_000;
@@ -1344,6 +1466,7 @@ function _warningDefaultLineWidth(warnClass = '') {
     case 'SVR': return 2.6;
     case 'SVRC': return 2.8;
     case 'SVRD': return 3.0;
+    case 'SVRE': return 3.2;
     case 'TOR': return 3.1;
     case 'TORR': return 3.3;
     case 'TORP': return 3.6;
@@ -1362,6 +1485,7 @@ function _defaultWarningPrefs() {
     TORP: 'pds-tornado-issued',
     TORR: 'confirmed-tornado-issued',
     TOR:  'radar-tornado-issued',
+    SVRE: 'severe-eds-issued',
     SVRD: 'severe-destructive-issued',
     SVRC: 'severe-considerable-issued',
     SVR:  'severe-issued',
@@ -2169,6 +2293,8 @@ function _syncNoaaOutlooksSessionUi() {
       : 'Session-only overlays. Nothing persists after restart.';
   }
   if (clearBtn) clearBtn.disabled = count === 0;
+  const settingsCountEl = document.getElementById('settings-noaa-count');
+  if (settingsCountEl) settingsCountEl.textContent = count > 0 ? `${count} active` : 'None active';
 }
 
 function _syncNoaaOutlooksUi() {
@@ -2197,10 +2323,8 @@ function _normalizeNoaaOutlooksOpenSections(preferredKey = '') {
 function _applyNoaaOutlooksOpenSectionsUi() {
   Object.keys(NOAA_OUTLOOK_SECTIONS || {}).forEach(key => {
     const open = Boolean(noaaOutlooksOpenSections[key]);
-    const section = document.querySelector(`[data-outlook-section="${key}"]`);
-    const btn = document.querySelector(`[data-outlook-section-btn="${key}"]`);
-    if (section) section.classList.toggle('open', open);
-    if (btn) btn.setAttribute('aria-expanded', open ? 'true' : 'false');
+    document.querySelectorAll(`[data-outlook-section="${key}"]`).forEach(el => el.classList.toggle('open', open));
+    document.querySelectorAll(`[data-outlook-section-btn="${key}"]`).forEach(btn => btn.setAttribute('aria-expanded', open ? 'true' : 'false'));
   });
 }
 
@@ -2297,11 +2421,9 @@ function _ensureNoaaOutlooksModalPosition(modal) {
   modal.style.top = `${Math.min(maxTop, Math.max(0, rect.top))}px`;
 }
 
-function _renderNoaaOutlooksPanel(sectionKey) {
+function _renderNoaaOutlooksPanelEl(sectionKey, panelEl) {
   const sectionDef = NOAA_OUTLOOK_SECTIONS[sectionKey];
-  if (!sectionDef) return;
-  const panelEl = document.getElementById(`noaa-outlooks-panel-${sectionKey.toLowerCase()}`);
-  if (!panelEl) return;
+  if (!sectionDef || !panelEl) return;
 
   const tabKeys = Object.keys(sectionDef.tabs);
   let activeTab = noaaOutlooksActiveTabs[sectionKey];
@@ -2355,8 +2477,16 @@ function _renderNoaaOutlooksPanel(sectionKey) {
       inp.checked = enabled;
     });
   });
+}
 
-  _warmNoaaOutlookTab(sectionKey, activeTab);
+function _renderNoaaOutlooksPanel(sectionKey) {
+  const sectionDef = NOAA_OUTLOOK_SECTIONS[sectionKey];
+  if (!sectionDef) return;
+  const modalPanelEl = document.getElementById(`noaa-outlooks-panel-${sectionKey.toLowerCase()}`);
+  const settingsPanelEl = document.getElementById(`settings-noaa-panel-${sectionKey.toLowerCase()}`);
+  if (modalPanelEl) _renderNoaaOutlooksPanelEl(sectionKey, modalPanelEl);
+  if (settingsPanelEl) _renderNoaaOutlooksPanelEl(sectionKey, settingsPanelEl);
+  _warmNoaaOutlookTab(sectionKey, noaaOutlooksActiveTabs[sectionKey] || Object.keys(sectionDef.tabs)[0]);
   requestAnimationFrame(() => {
     const modal = document.getElementById('noaa-outlooks-modal');
     if (modal) _ensureNoaaOutlooksModalPosition(modal);
@@ -3716,9 +3846,11 @@ async function _fetchBytesViaTauri(url, opts = {}) {
 
 const _processedWiseLatestCache = new Map();
 const _processedWisePrefetchBytes = new Map();
+const _processedWiseRawBytesCache = new Map();
 let _processedWiseRealtimeRefreshTimer = null;
 let _processedWiseRealtimeRefreshActive = false;
 let _processedWiseRealtimeRefreshQueued = false;
+let _processedWiseDirListPollRunning = false;
 const _wiseGeometryCache = new Map();
 const _wiseNotFoundCooldown = new Map();
 const _weatherWiseRelayState = {
@@ -3809,6 +3941,45 @@ function _formatProcessedWiseFileName(ms) {
   return `${y}_${mo}_${day}_${hh}_${mm}.wise`;
 }
 
+function _formatWiseMinuteFile(ms) {
+  const d = new Date(ms);
+  const yyyy = d.getUTCFullYear();
+  const MM = String(d.getUTCMonth() + 1).padStart(2, '0');
+  const DD = String(d.getUTCDate()).padStart(2, '0');
+  const hh = String(d.getUTCHours()).padStart(2, '0');
+  const mm = String(d.getUTCMinutes()).padStart(2, '0');
+  return `${yyyy}_${MM}_${DD}_${hh}_${mm}.wise`;
+}
+
+function _buildNextWiseProbeCandidates(lastFileName, nowMs = Date.now()) {
+  const out = [];
+  const seen = new Set();
+  const lastMs = _parseProcessedWiseFileTimestampMs(lastFileName);
+
+  function add(ms, reason) {
+    const rounded = Math.floor(ms / 60000) * 60000;
+    if (!Number.isFinite(rounded)) return;
+    const fileName = _formatWiseMinuteFile(rounded);
+    if (seen.has(fileName)) return;
+    seen.add(fileName);
+    out.push({ fileName, ms: rounded, reason });
+  }
+
+  if (Number.isFinite(lastMs)) {
+    for (const min of [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]) {
+      add(lastMs + min * 60000, `last+${min}`);
+    }
+  }
+
+  for (const minAgo of [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]) {
+    add(nowMs - minAgo * 60000, `now-${minAgo}`);
+  }
+
+  return out
+    .sort((a, b) => b.ms - a.ms)
+    .slice(0, 12);
+}
+
 function _processedWiseFileNameFromKey(key) {
   if (!String(key || '').startsWith('WISE:')) return '';
   return decodeURIComponent(String(key || '').split(':').slice(4).join(':') || '');
@@ -3872,6 +4043,215 @@ function _storeProcessedWisePrefetch(meta, bytes) {
 // Deduplication map: url → in-flight fetch Promise.  Multiple concurrent
 // callers for the same URL share one HTTP request rather than racing.
 const _pendingWiseFetches = new Map();
+let activeWiseProbeTimer = null;
+let activeWiseProbeRunning = false;
+let activeWiseProbePendingKey = '';
+let activeWiseProbeProductCursor = 0;
+const activeWiseProbeCandidateCursor = new Map();
+
+function _bytesHaveWiseMagic(bytes) {
+  return bytes instanceof Uint8Array
+    && bytes.byteLength >= 4
+    && String.fromCharCode(bytes[0], bytes[1], bytes[2], bytes[3]) === WISE_MAGIC;
+}
+
+function startActiveWiseProbeLoop() {
+  stopActiveWiseProbeLoop();
+  if (!activeStation || isLocalRadarMode()) return;
+  if (!_canUseProcessedWise(activeStation, activeFamily, activeTilt)) return;
+  activeWiseProbeTimer = setInterval(() => {
+    void _probeActiveWisePredictedUrls().catch(() => {});
+  }, ACTIVE_WISE_PROBE_MS);
+  void _probeActiveWisePredictedUrls().catch(() => {});
+}
+
+function stopActiveWiseProbeLoop() {
+  if (activeWiseProbeTimer) clearInterval(activeWiseProbeTimer);
+  activeWiseProbeTimer = null;
+  activeWiseProbeRunning = false;
+  activeWiseProbePendingKey = '';
+  activeWiseProbeProductCursor = 0;
+  activeWiseProbeCandidateCursor.clear();
+}
+
+function _wiseProbeFamiliesForStation(stationId) {
+  const sid = canonicalStationId(stationId);
+  const families = supportedL3FamiliesForStation(sid);
+  return families
+    .map(family => String(family || '').trim().toUpperCase())
+    .filter(Boolean);
+}
+
+function _nextWiseProbeMetaForCombo(station, family, tilt, comboKey) {
+  const currentKey = comboLatestKey.get(comboKey) || '';
+  const currentFileName = _processedWiseFileNameFromKey(currentKey);
+  const currentTs = _parseProcessedWiseFileTimestampMs(currentFileName) || 0;
+  const candidates = _buildNextWiseProbeCandidates(currentFileName);
+  if (!candidates.length) return null;
+
+  const cursorKey = `${comboKey}:${currentFileName}`;
+  let cursor = activeWiseProbeCandidateCursor.get(cursorKey) || 0;
+  for (let i = 0; i < candidates.length; i += 1) {
+    const cand = candidates[(cursor + i) % candidates.length];
+    const meta = _buildProcessedWiseMeta(station, family, tilt, cand.fileName);
+    if (!meta?.key || !meta?.url) continue;
+    if (meta.key === currentKey) continue;
+    if (meta.key === activeWiseProbePendingKey) continue;
+
+    const candTs = _parseProcessedWiseFileTimestampMs(cand.fileName) || 0;
+    if (currentTs && candTs && candTs <= currentTs) continue;
+
+    activeWiseProbeCandidateCursor.set(cursorKey, (cursor + i + 1) % candidates.length);
+    return { meta, comboKey };
+  }
+  activeWiseProbeCandidateCursor.set(cursorKey, (cursor + 1) % candidates.length);
+  return null;
+}
+
+async function _probePredictedWiseCombo(station, family, tilt, comboKey, priority = false) {
+  const next = _nextWiseProbeMetaForCombo(station, family, tilt, comboKey);
+  if (!next?.meta) return false;
+  const meta = next.meta;
+  if (frameCache.has(meta.key)) {
+    _commitAndDisplayPredictedWise(meta, frameCache.get(meta.key), comboKey);
+    return true;
+  }
+
+  const exists = await _probeWiseMetaExists(meta);
+  if (!exists) return false;
+
+  activeWiseProbePendingKey = meta.key;
+  await _decodePredictedWiseAndDisplay(meta, comboKey, priority);
+  activeWiseProbePendingKey = '';
+  return true;
+}
+
+async function _probeActiveWisePredictedUrls() {
+  if (activeWiseProbeRunning) return;
+  if (!activeStation || isLocalRadarMode()) return;
+  if (!_canUseProcessedWise(activeStation, activeFamily, activeTilt)) return;
+  activeWiseProbeRunning = true;
+
+  try {
+    const station = canonicalStationId(activeStation);
+    const activeFamilyName = String(activeFamily || 'REF').trim().toUpperCase();
+    const activeTiltName = _normalizeProcessedWiseTiltForStation(station, activeFamilyName, activeTilt || '0.5');
+    const activeCombo = activeCacheKey();
+
+    if (await _probePredictedWiseCombo(station, activeFamilyName, activeTiltName, activeCombo, true)) return;
+
+    const families = _wiseProbeFamiliesForStation(station).filter(family => family !== activeFamilyName);
+    if (!families.length) return;
+    const family = families[activeWiseProbeProductCursor % families.length];
+    activeWiseProbeProductCursor = (activeWiseProbeProductCursor + 1) % families.length;
+    const tilt = _normalizeProcessedWiseTiltForStation(station, family, activeTilt || '0.5');
+    if (!_canUseProcessedWise(station, family, tilt)) return;
+    const comboKey = `${station}:${family}:${tilt}`;
+    await _probePredictedWiseCombo(station, family, tilt, comboKey, false);
+  } finally {
+    activeWiseProbePendingKey = '';
+    activeWiseProbeRunning = false;
+  }
+}
+
+async function _probeWiseMetaExists(meta) {
+  try {
+    _clearWiseNotFound?.(meta.key);
+    _clearWiseNotFound?.(meta.url);
+
+    try {
+      const result = await invoke('probe_wise_url', {
+        url: meta.url,
+        timeoutMs: WISE_PROBE_TIMEOUT_MS,
+      });
+      if (result?.bodyBytes) {
+        const bytes = new Uint8Array(result.bodyBytes);
+        if (_bytesHaveWiseMagic(bytes) && bytes.byteLength > WISE_FIXED_HEADER_SIZE) {
+          _storeProcessedWisePrefetch(meta, bytes);
+          return true;
+        }
+      }
+      if (result?.exists || result?.wiseMagic) return true;
+      return false;
+    } catch (_) {}
+
+    return false;
+  } catch (_) {
+    return false;
+  }
+}
+
+async function _decodePredictedWiseAndDisplay(meta, comboKey, priority = false) {
+  if (!priority) {
+    enqueueDecode(meta.key, {
+      ...meta,
+      confirmed: true,
+      activateL3Latest: false,
+      predictedWarm: true,
+      latestEntry: meta,
+      comboKey,
+    }, false);
+    return true;
+  }
+  const data = await ensureFrameDecoded(meta.key, {
+    ...meta,
+    confirmed: true,
+    activateL3Latest: false,
+    latestEntry: meta,
+    comboKey,
+  }, priority);
+  if (!data) return false;
+  _commitAndDisplayPredictedWise(meta, data, comboKey);
+  return true;
+}
+
+function _commitAndDisplayPredictedWise(meta, data, comboKey) {
+  if (!meta?.key || !data || !comboKey) return false;
+  frameCache.set(meta.key, data);
+
+  const existing = historyMap.get(comboKey) || [];
+  const withoutDup = existing.filter(item => item?.key !== meta.key);
+  const nextHistory = [...withoutDup, meta].sort((a, b) => {
+    const at = _parseProcessedWiseFileTimestampMs(a.fileName || a.filename || a.key) || 0;
+    const bt = _parseProcessedWiseFileTimestampMs(b.fileName || b.filename || b.key) || 0;
+    return at - bt;
+  });
+
+  _setL3HistoryEntries(comboKey, nextHistory, meta.key);
+  comboLatestKey.set(comboKey, meta.key);
+
+  if (comboKey === activeCacheKey()) {
+    showFrame(meta.key);
+  }
+
+  _scheduleBackgroundSameTimestampProducts(meta);
+  return true;
+}
+
+function _scheduleBackgroundSameTimestampProducts(activeMeta) {
+  const station = canonicalStationId(activeMeta?.stationId || activeStation);
+  const fileName = activeMeta?.fileName || activeMeta?.filename;
+  const tilt = activeMeta?.tilt || activeTilt || '0.5';
+  if (!station || !fileName) return;
+
+  for (const family of _wiseProbeFamiliesForStation(station)) {
+    const f = String(family || '').trim().toUpperCase();
+    if (f === String(activeMeta?.family || '').trim().toUpperCase()) continue;
+    const normalizedTilt = _normalizeProcessedWiseTiltForStation(station, f, tilt);
+    if (!_canUseProcessedWise(station, f, normalizedTilt)) continue;
+    const meta = _buildProcessedWiseMeta(station, f, normalizedTilt, fileName);
+    if (!meta?.key || frameCache.has(meta.key)) continue;
+    const comboKey = `${station}:${f}:${normalizedTilt}`;
+    enqueueDecode(meta.key, {
+      ...meta,
+      confirmed: true,
+      activateL3Latest: false,
+      predictedWarm: true,
+      latestEntry: meta,
+      comboKey,
+    }, false);
+  }
+}
 
 // After successfully decoding a WISE file for time T, speculatively fetch
 // the file for T+1min so it's ready in the prefetch cache the moment the
@@ -3997,16 +4377,16 @@ async function _relayActivateNewFrame(stationId, family, tilt, knownFilename = n
     if (frameCache.has(probedMeta.key)) {
       // Already in cache (predictive prefetch hit)
       _setL3HistoryEntries(ck, [...(historyMap.get(ck) || []), probedMeta], probedMeta.key);
-      if (liveSweepEnabled && !sweepActive) {
+      if (_canLiveSweepNow(ck, probedMeta.key)) {
         const d = frameCache.get(probedMeta.key);
-        if (d) beginSweepReveal(d, probedMeta.key); else showFrame(probedMeta.key);
-      } else if (!sweepActive) {
+        if (d) beginSweepReveal(d, probedMeta.key, ck); else showFrame(probedMeta.key);
+      } else if (_isViewingLiveLatest(ck) && !sweepActive) {
         showFrame(probedMeta.key);
       }
     } else {
       // Enqueue decode; decode worker will call _setL3HistoryEntries via activateL3Latest
       const prevKey = comboLatestKey.get(ck);
-      if (liveSweepEnabled && prevKey) sweepPendingKey = probedMeta.key;
+      if (_canStartIncomingSweep(ck, probedMeta.key) && prevKey) sweepPendingKey = probedMeta.key;
       enqueueDecode(probedMeta.key, { ...probedMeta, activateL3Latest: true, comboKey: ck, latestEntry: probedMeta }, true);
     }
     _syncLoadMoreBtn();
@@ -4290,17 +4670,10 @@ async function _weatherWiseRelayEnsureConnected() {
 }
 
 function _syncProcessedWiseRealtime() {
-  const desiredCount    = _weatherWiseRelayCurrentCountRoom();
-  const desiredProducts = _weatherWiseRelayCurrentProductRooms();
-  _weatherWiseRelayState.desiredRoom         = desiredCount;
-  _weatherWiseRelayState.desiredProductRooms = desiredProducts;
-  if (!desiredCount && !desiredProducts.size) {
-    _weatherWiseRelayClose(false);
-    return;
-  }
-  void _weatherWiseRelayEnsureConnected().catch(() => {});
-  // Re-sync rooms immediately if the socket is already open
-  _weatherWiseRelayJoinDesiredRoom();
+  _weatherWiseRelayState.desiredRoom = '';
+  _weatherWiseRelayState.desiredProductRooms = new Set();
+  _weatherWiseRelayClose(false);
+  stopActiveWiseProbeLoop();
 }
 
 async function _probeLatestProcessedWiseMeta(stationId, family, tilt, lastFileName, opts = {}) {
@@ -7074,6 +7447,7 @@ function _alertsLineWidthDefaultExpr(inner = true) {
       'SVR', 2.6,
       'SVRC', 2.8,
       'SVRD', 3.0,
+      'SVRE', 3.2,
       'TOR', 3.1,
       'TORR', 3.3,
       'TORP', 3.6,
@@ -7085,6 +7459,7 @@ function _alertsLineWidthDefaultExpr(inner = true) {
       'SVR', 5.9,
       'SVRC', 6.3,
       'SVRD', 6.7,
+      'SVRE', 7.0,
       'TOR', 6.8,
       'TORR', 7.2,
       'TORP', 7.7,
@@ -7325,6 +7700,7 @@ function _alertsDashboardTitle(props = {}) {
     const detect = _alertsParamText(props, 'tornadoDetection');
     return detect.includes('OBSERVED') ? 'Observed Tornado Warning' : 'Confirmed Tornado Warning';
   }
+  if (warnClass === 'SVRE') return tornadoPossibleSevere ? 'Tornado Possible EDS Severe Thunderstorm Warning' : 'Extremely Dangerous Situation Severe Thunderstorm Warning';
   if (warnClass === 'SVRD') return tornadoPossibleSevere ? 'Tornado Possible Destructive Severe Thunderstorm Warning' : 'Destructive Severe Thunderstorm Warning';
   if (warnClass === 'SVRC') return tornadoPossibleSevere ? 'Tornado Possible Considerable Severe Thunderstorm Warning' : 'Considerable Severe Thunderstorm Warning';
   if (tornadoPossibleSevere && String(event || '').trim().toUpperCase() === 'SEVERE THUNDERSTORM WARNING') {
@@ -7547,6 +7923,7 @@ function _alertsWarnClass(eventName, props = {}) {
 
   if (e.includes('severe thunderstorm warning')) {
     const damage = _alertsParamText(props, 'thunderstormDamageThreat');
+    if (damage.includes('DESTRUCTIVE') && fullText.includes('EXTREMELY DANGEROUS SITUATION')) return 'SVRE';
     if (damage.includes('DESTRUCTIVE')) return 'SVRD';
     if (damage.includes('CONSIDERABLE')) return 'SVRC';
     return 'SVR';
@@ -7561,7 +7938,7 @@ function _alertsWarnClass(eventName, props = {}) {
 
 const _WARN_CATEGORY_MAP = {
   tornado: new Set(['TOR', 'TORR', 'TORP', 'TORE', 'TOW', 'TOWP']),
-  severe:  new Set(['SVR', 'SVRC', 'SVRD', 'SVW', 'SVWP']),
+  severe:  new Set(['SVR', 'SVRC', 'SVRD', 'SVRE', 'SVW', 'SVWP']),
   winter:  new Set(['WSW', 'BLW', 'ISW', 'SNQ', 'WCW', 'LESW', 'FFZ', 'HFZ', 'FZW', 'WSWA', 'ISWA', 'LESWA', 'WWA', 'FRA', 'WCVA', 'LESA']),
   special: new Set(['SPS', 'HWO', 'DFA', 'HWW', 'WNDADV']),
   flood:   new Set(['FFW', 'FLW']),
@@ -8124,6 +8501,7 @@ function _warningUrgencyScore(props = {}) {
     TORP: 960,
     TORR: 930,
     TOR: 900,
+    SVRE: 860,
     SVRD: 820,
     SVRC: 780,
     SVR: 740,
@@ -8841,6 +9219,24 @@ function _buildTestWarningFeatures() {
       },
       severity: 'Severe',
       certainty: 'Possible',
+    }),
+    make({
+      id: 'TEST-SVRE-1',
+      event: 'Severe Thunderstorm Warning',
+      station: STATIONS.KBMX || [33.172, -86.769],
+      halfLng: 0.40,
+      halfLat: 0.28,
+      issuedOffsetMin: 6,
+      expiresInMin: 32,
+      areaDesc: 'Jefferson County',
+      headline: 'EXTREMELY DANGEROUS SITUATION - Destructive Severe Thunderstorm Warning until 10:18 PM CDT',
+      description: 'At 9:45 PM CDT, an extremely dangerous thunderstorm was located near Hoover moving east at 60 mph. EXTREMELY DANGEROUS SITUATION.',
+      instruction: 'This is an extremely dangerous situation. Move to an interior room immediately.',
+      parameters: {
+        thunderstormDamageThreat: ['DESTRUCTIVE'],
+        windGust: ['100 mph'],
+        hailSize: ['3.00'],
+      },
     }),
     make({
       id: 'TEST-SVRD-1',
@@ -10631,7 +11027,13 @@ function _buildWiseFrame(container) {
   const payloadCopy = src instanceof Uint16Array
     ? new Uint16Array(src)
     : new Uint8Array(src);
-  const containerMsg = { ...container, payloadData: null };
+  const containerMsg = {
+    ...container,
+    payloadData: null,
+    dataSmoothingStrength: radarDataSmoothing === true
+      ? Math.max(0, Math.min(1, Number(radarDataSmoothingStrength) || 0))
+      : 0,
+  };
 
   const id = ++_wiseWorkerIdSeq;
   return new Promise((resolve, reject) => {
@@ -10681,6 +11083,14 @@ async function _decodeWiseKey(key, opts = {}) {
   }
   _clearWiseNotFound(key);
   _clearWiseNotFound(url);
+  if (bytes) {
+    _processedWiseRawBytesCache.set(key, new Uint8Array(bytes));
+    while (_processedWiseRawBytesCache.size > WISE_PREFETCH_CACHE_MAX) {
+      const oldest = _processedWiseRawBytesCache.keys().next().value;
+      if (oldest == null) break;
+      _processedWiseRawBytesCache.delete(oldest);
+    }
+  }
   const container = parseWiseContainer(bytes, stationId, family, fileName);
   const frame = await _buildWiseFrame(container);
   _schedulePredictiveWisePrefetch(stationId, family, tilt, fileName);
@@ -10692,16 +11102,7 @@ async function _decodeWiseKey(key, opts = {}) {
 
 async function backendDecode(key, opts = {}) {
   if (String(key || '').startsWith('WISE:')) {
-    const parts = String(key).split(':');
-    const family = String(parts[2] || '').trim().toUpperCase();
-    const palette = family === 'PRT'
-      ? _prepareWisePrtPalette()
-      : _prepareInlinePalette(ctGetEffectivePalette(family));
-    const palettes = palette
-      ? { [family]: { xp: Array.from(palette.xp), fp: Array.from(palette.fp), scale: palette.scale } }
-      : {};
-    const buf = await invoke('decode_wise_key', { key, palettes });
-    return parseRadarBinaryBlob(buf);
+    return _decodeWiseKey(key, opts);
   }
   throw new Error('Legacy Py-ART decode was removed. This build supports processed WeatherWise radar only.');
 }
@@ -10827,6 +11228,8 @@ class RadarGateLayer {
           if (u_min_value > -9990.0 && v_value < u_min_value) discard;
           if (u_sweep_mode > 0.5) {
             highp float dx = v_pos.x - u_station.x;
+            if (dx > 0.5) dx -= 1.0;
+            if (dx < -0.5) dx += 1.0;
             highp float dy = u_station.y - v_pos.y;
             highp float az = degrees(atan(dx, dy));
             if (az < 0.0) az += 360.0;
@@ -11100,6 +11503,9 @@ class SweepLayer {
     this._trailDeg = 28;
     this._trailSegs = 20;
     this._rangeMeters = 260000;
+    this._lineSegs = 3;
+    this._posData = new Float32Array((this._lineSegs + 2) * 2);
+    this._alphaData = new Float32Array(this._lineSegs + 2);
   }
 
   onAdd(map, gl) {
@@ -11118,15 +11524,17 @@ class SweepLayer {
     `;
     const frag = `
       precision mediump float;
+      uniform vec3 u_color;
       varying float v_alpha;
       void main() {
-        gl_FragColor = vec4(1.0, 1.0, 1.0, v_alpha);
+        gl_FragColor = vec4(u_color, v_alpha);
       }
     `;
     this.program  = buildProgram(gl, vert, frag);
     this.aPos     = gl.getAttribLocation(this.program, 'a_pos');
     this.aAlpha   = gl.getAttribLocation(this.program, 'a_alpha');
     this.uMatrix  = gl.getUniformLocation(this.program, 'u_matrix');
+    this.uColor   = gl.getUniformLocation(this.program, 'u_color');
     this.posBuffer   = gl.createBuffer();
     this.alphaBuffer = gl.createBuffer();
   }
@@ -11146,7 +11554,7 @@ class SweepLayer {
   }
 
   render(gl, matrix) {
-    if (!sweepActive || !this._hasStation || !this.program) return;
+    if (!sweepActive || sweepWaitingForLayer || !this._hasStation || !this.program) return;
 
     const cx    = this.stationX;
     const cy    = this.stationY;
@@ -11154,9 +11562,9 @@ class SweepLayer {
     const angle = sweepAngleDeg;
 
     // Just the bright sweep line — a very tight 1.5° fan so it's visible as a line
-    const segs = 3;
-    const posData   = new Float32Array((segs + 2) * 2);
-    const alphaData = new Float32Array(segs + 2);
+    const segs = this._lineSegs;
+    const posData = this._posData;
+    const alphaData = this._alphaData;
     posData[0] = cx; posData[1] = cy; alphaData[0] = 0.0;
     for (let i = 0; i <= segs; i++) {
       const t   = i / segs;
@@ -11169,6 +11577,8 @@ class SweepLayer {
 
     gl.useProgram(this.program);
     gl.uniformMatrix4fv(this.uMatrix, false, matrix);
+    const color = _parseHexColorRgb(liveSweepColor, LIVE_SWEEP_DEFAULT_COLOR);
+    gl.uniform3f(this.uColor, color.r / 255, color.g / 255, color.b / 255);
 
     gl.bindBuffer(gl.ARRAY_BUFFER, this.posBuffer);
     gl.bufferData(gl.ARRAY_BUFFER, posData, gl.DYNAMIC_DRAW);
@@ -11347,6 +11757,7 @@ const map = new mapboxgl.Map({
   maxBounds: MAP_AMERICAS_MAX_BOUNDS,
   renderWorldCopies: false,
   preserveDrawingBuffer: true,
+  antialias: true,
 });
 // Disable Mapbox's built-in keyboard handler so arrow keys are used
 // exclusively for frame navigation (stepHistory) without panning the map.
@@ -11519,12 +11930,12 @@ function _boardCanvasHasVisibleContent(canvas) {
   return false;
 }
 
-async function _snapshotBoardCanvas() {
+async function _snapshotBoardCanvas(opts = {}) {
   const boardRect = mapGridEl?.getBoundingClientRect?.();
   if (!boardRect || boardRect.width < 2 || boardRect.height < 2) {
     throw new Error('Board is not ready.');
   }
-  const scale = Math.max(1, Math.min(window.devicePixelRatio || 1, 2));
+  const scale = Math.max(1, Math.min(Number(opts?.scale) || (window.devicePixelRatio || 1), 3));
   const out = document.createElement('canvas');
   out.width = Math.max(1, Math.round(boardRect.width * scale));
   out.height = Math.max(1, Math.round(boardRect.height * scale));
@@ -12254,7 +12665,7 @@ function _paneSetActiveComboLayer(pane) {
   let layer = pane.layerPool.get(safeId);
   if (!layer) {
     layer = new RadarGateLayer(safeId);
-    pane.map.addLayer(layer, pane.sweepLayer?.id || (pane.map.getLayer('stations-dot') ? 'stations-dot' : undefined));
+    pane.map.addLayer(layer, pane.sweepLayer?.id || _radarBaseMapBeforeId(pane.map));
     pane.layerPool.set(safeId, layer);
   }
   layer.setVisible(true);
@@ -12271,7 +12682,7 @@ function _paneEnsureSweepLayer(pane) {
   if (!layer) {
     layer = new RadarGateLayer(safeId);
     layer._visible = true;
-    pane.map.addLayer(layer, pane.map.getLayer('stations-dot') ? 'stations-dot' : undefined);
+    pane.map.addLayer(layer, _radarBaseMapBeforeId(pane.map));
     pane.layerPool.set(safeId, layer);
   }
   layer.setVisible(false);
@@ -12330,7 +12741,7 @@ function _tickPaneSweep(pane, now) {
 
   if (st.lastTime !== null) {
     const dt = now - st.lastTime;
-    const delta = (dt * 360) / SWEEP_REV_MS;
+    const delta = (dt * 360) / _liveSweepRevMs();
     st.angle = (st.angle + delta) % 360;
     st.total += delta;
     pane.radarLayer?.setSweepAngle(st.angle);
@@ -12402,6 +12813,12 @@ function _paneRenderFrame(pane, frame, opts = {}) {
   const _noProductEl = document.getElementById(`pane-no-product-${pane.id}`);
   if (_noProductEl) _noProductEl.style.display = 'none';
   if (inspectorEnabled && inspectorPaneId === pane.id) updateInspectorReadout();
+}
+
+function _paneIsViewingLatest(pane, entries) {
+  if (!pane || !Array.isArray(entries) || !entries.length) return true;
+  if (pane.historyIdx == null || pane.historyIdx < 0) return true;
+  return pane.historyIdx >= entries.length - 1;
 }
 
 async function _loadSecondaryPaneLatest(paneId, { force = false, syncToPrimaryHistory = true, priority = true, deferRender = false, animate = null, userSelected = false, knownMeta = null } = {}) {
@@ -12563,7 +12980,7 @@ async function _loadSecondaryPaneLatest(paneId, { force = false, syncToPrimaryHi
     }
     if (token !== pane.loadToken || pane.lastKey !== targetEntry.key) return;
     const shouldAnimate = animate == null
-      ? (liveSweepEnabled && !force && prevKey && prevKey !== targetEntry.key && historyIdx < 0)
+      ? (liveSweepEnabled && !force && prevKey && prevKey !== targetEntry.key && _paneIsViewingLatest(pane, entries))
       : (animate === true && prevKey && prevKey !== targetEntry.key);
     if (deferRender) {
       _enqueueHistoryNeighborhood(entries, targetIndex, {
@@ -12748,6 +13165,7 @@ function _createSecondaryPane(id) {
     maxBounds: MAP_AMERICAS_MAX_BOUNDS,
     renderWorldCopies: false,
     preserveDrawingBuffer: true,
+    antialias: true,
   });
   paneMap.keyboard.disable();
   paneMap.dragRotate.disable();
@@ -13265,13 +13683,82 @@ let sweepTotalDeg  = 0;
 let sweepActive    = false;
 let sweepLastTime  = null;
 let liveSweepEnabled = false;
+let liveSweepColor = LIVE_SWEEP_DEFAULT_COLOR;
+let liveSweepRevMs = LIVE_SWEEP_DEFAULT_REV_MS;
 let sweepPendingKey  = null;   // S3 key of the incoming scan waiting to be revealed
 let sweepNewKey      = null;   // key being swept in right now
 let sweepNewData     = null;   // decoded frame data for the incoming scan
 let sweepWaitingForLayer = false;
+let sweepComboKey    = '';     // comboKey active when sweep started
+let sweepSessionId   = 0;     // incremented each beginSweepReveal; cancels stale RAF chains
+
+function _isViewingLiveLatest(comboKey = activeCacheKey()) {
+  const history = comboKey ? (historyMap.get(comboKey) || []) : [];
+  if (!history.length) return true;
+  if (historyIdx < 0) return true;
+  return historyIdx >= history.length - 1;
+}
+
+function _canLiveSweepNow(comboKey = activeCacheKey(), key = '') {
+  if (!liveSweepEnabled) return false;
+  if (sweepActive) return false;
+  if (!activeStation) return false;
+  if (isLocalRadarMode()) return false;
+  if (!_isViewingLiveLatest(comboKey)) return false;
+  if (_tlDragging) return false;
+  if (isPlaying) return false;
+  if (_isManualHistoryActive(comboKey)) return false;
+  if (key) {
+    const latestKey = comboLatestKey.get(comboKey);
+    if (latestKey && latestKey !== key) return false;
+  }
+  return true;
+}
+
+function _canStartIncomingSweep(comboKey, incomingKey) {
+  if (!liveSweepEnabled) return false;
+  if (sweepActive) return false;
+  if (!activeStation) return false;
+  if (isLocalRadarMode()) return false;
+  if (!_isViewingLiveLatest(comboKey)) return false;
+  if (_tlDragging || isPlaying) return false;
+  if (_isManualHistoryActive(comboKey)) return false;
+  const prevKey = comboLatestKey.get(comboKey);
+  if (!prevKey) return true;
+  if (prevKey === incomingKey) return false;
+  const prevTs = parseKeyTimestampMs(prevKey);
+  const nextTs = parseKeyTimestampMs(incomingKey);
+  if (Number.isFinite(prevTs) && Number.isFinite(nextTs)) {
+    return nextTs >= prevTs;
+  }
+  return !!incomingKey;
+}
+
+function _canContinueCurrentSweep(comboKey) {
+  if (!activeStation) return false;
+  if (isLocalRadarMode()) return false;
+  if (comboKey !== activeCacheKey()) return false;
+  if (_tlDragging || isPlaying) return false;
+  if (_isManualHistoryActive(comboKey)) return false;
+  if (!_isViewingLiveLatest(comboKey)) return false;
+  return true;
+}
+
+function _maybeStartCachedLatestSweepAfterFinish(comboKey, finishedKey) {
+  const latestKey = comboLatestKey.get(comboKey);
+  if (!latestKey || latestKey === finishedKey) return false;
+  const latestData = frameCache.get(latestKey);
+  if (!latestData) return false;
+  if (!_canStartIncomingSweep(comboKey, latestKey)) return false;
+  return beginSweepReveal(latestData, latestKey, comboKey);
+}
 let stationMercX = 0, stationMercY = 0; // shared with radarLayerSweep uniform
-const SWEEP_REV_MS = 18000;   // 18-second full revolution
+const SWEEP_REV_MS = LIVE_SWEEP_DEFAULT_REV_MS;   // default full revolution
 let _sweepPromoteToken = 0;   // cancels stale "clear sweep layer" waits
+
+function _liveSweepRevMs() {
+  return _normalizeLiveSweepRevMs(liveSweepRevMs || SWEEP_REV_MS);
+}
 
 function _clearSweepLayerWhenBaseReady(frameRef) {
   if (!radarLayerSweep) return;
@@ -13298,13 +13785,18 @@ function _clearSweepLayerWhenBaseReady(frameRef) {
   requestAnimationFrame(wait);
 }
 
-function sweepTick(now) {
+function sweepTick(now, sessionId = sweepSessionId) {
+  if (sessionId !== sweepSessionId) return;
   if (!sweepActive) return;
+  if (!_canContinueCurrentSweep(sweepComboKey)) {
+    cancelSweep(false);
+    return;
+  }
   if (sweepWaitingForLayer) {
     const ready = !!(radarLayerSweep && radarLayerSweep.isFrameReady(sweepNewData));
     if (!ready) {
       map.triggerRepaint();
-      requestAnimationFrame(sweepTick);
+      requestAnimationFrame(ts => sweepTick(ts, sessionId));
       return;
     }
     sweepWaitingForLayer = false;
@@ -13322,12 +13814,12 @@ function sweepTick(now) {
       radarLayerSweep.setSweepMode(1);
     }
     map.triggerRepaint();
-    requestAnimationFrame(sweepTick);
+    requestAnimationFrame(ts => sweepTick(ts, sessionId));
     return;
   }
   if (sweepLastTime !== null) {
     const dt    = now - sweepLastTime;
-    const delta = (dt * 360) / SWEEP_REV_MS;
+    const delta = (dt * 360) / _liveSweepRevMs();
     sweepAngleDeg  = (sweepAngleDeg + delta) % 360;
     sweepTotalDeg += delta;
     // Push angle into both layers each tick
@@ -13342,13 +13834,16 @@ function sweepTick(now) {
   }
   sweepLastTime = now;
   map.triggerRepaint();
-  requestAnimationFrame(sweepTick);
+  requestAnimationFrame(ts => sweepTick(ts, sessionId));
 }
 
-function beginSweepReveal(data, key) {
+function beginSweepReveal(data, key, comboKey = activeCacheKey()) {
+  if (!_canLiveSweepNow(comboKey, key)) return false;
   ++_sweepPromoteToken; // stop any old completion waiter
-  sweepNewKey  = key;
-  sweepNewData = data;
+  const sessionId = ++sweepSessionId;
+  sweepComboKey  = comboKey;
+  sweepNewKey    = key;
+  sweepNewData   = data;
   sweepAngleDeg  = 0;
   sweepTotalDeg  = 0;
   sweepLastTime  = null;
@@ -13369,34 +13864,45 @@ function beginSweepReveal(data, key) {
     radarLayerSweep.setSweepMode(0);
     radarLayerSweep.setFrame(data);
   }
-  requestAnimationFrame(sweepTick);
+  requestAnimationFrame(ts => sweepTick(ts, sessionId));
+  return true;
 }
 
 function completeSweep() {
+  const finishedComboKey = sweepComboKey;
+  const finishedKey = sweepNewKey;
+  const finishedData = sweepNewData;
+  if (!_canContinueCurrentSweep(finishedComboKey)) {
+    cancelSweep(false);
+    return;
+  }
   // Restore base layer to normal mode, promote new frame, clear mask layer
   if (radarLayer) radarLayer.setSweepMode(0);
-  if (sweepNewData && radarLayer) {
-    radarLayer.setFrame(sweepNewData);
-    showFrameMeta(sweepNewKey, sweepNewData);
+  if (finishedData && radarLayer) {
+    radarLayer.setFrame(finishedData);
+    showFrameMeta(finishedKey, finishedData);
   }
   if (radarLayerSweep) {
     radarLayerSweep.setVisible(true);
     radarLayerSweep.setSweepMode(0);
-    if (sweepNewData && radarLayer) {
+    if (finishedData && radarLayer) {
       // Keep the sweep layer visible until base-layer upload completes.
-      radarLayerSweep.setFrame(sweepNewData);
-      _clearSweepLayerWhenBaseReady(sweepNewData);
+      radarLayerSweep.setFrame(finishedData);
+      _clearSweepLayerWhenBaseReady(finishedData);
     } else {
       radarLayerSweep.clearFrame();
     }
   }
-  sweepNewKey  = null;
-  sweepNewData = null;
+  sweepComboKey = '';
+  sweepNewKey   = null;
+  sweepNewData  = null;
   sweepWaitingForLayer = false;
+  _maybeStartCachedLatestSweepAfterFinish(finishedComboKey, finishedKey);
 }
 
 function cancelSweep(promoteNewFrame = false) {
   ++_sweepPromoteToken; // stop any old completion waiter
+  ++sweepSessionId;     // invalidates any in-flight RAF chain
   sweepActive = false;
   // Restore base layer to normal mode, optionally promote incoming frame.
   if (radarLayer) radarLayer.setSweepMode(0);
@@ -13409,8 +13915,9 @@ function cancelSweep(promoteNewFrame = false) {
     radarLayerSweep.clearFrame();
     radarLayerSweep.setVisible(false);
   }
-  sweepNewKey  = null;
-  sweepNewData = null;
+  sweepComboKey = '';
+  sweepNewKey   = null;
+  sweepNewData  = null;
   sweepWaitingForLayer = false;
   sweepPendingKey = null;
 }
@@ -13676,18 +14183,85 @@ let displayedPrimaryFamily = 'REF';
 // toggle instead of a full GPU re-upload.
 const layerPool = new Map(); // comboKey ? RadarGateLayer
 
+function _radarBaseMapBeforeId(targetMap = map) {
+  const layers = targetMap?.getStyle?.()?.layers;
+  if (!Array.isArray(layers)) return targetMap?.getLayer?.('stations-dot') ? 'stations-dot' : undefined;
+
+  const isBaseReferenceLayer = layer => {
+    if (!layer?.id) return false;
+    const id = String(layer.id).toLowerCase();
+    if (id.startsWith('stations-') || id.startsWith('radar-') || id.startsWith('pane-')) return false;
+    if (id.startsWith('alerts-') || id.startsWith('spc-') || id.startsWith('meso-')) return false;
+    if (id.startsWith('storm-') || id.startsWith('lightning-') || id.startsWith('draw')) return false;
+    if (id.includes('camera') || id.includes('metar') || id.includes('spotter')) return false;
+    const source = String(layer.source || '').toLowerCase();
+    const sourceLayer = String(layer['source-layer'] || '').toLowerCase();
+    const type = String(layer.type || '').toLowerCase();
+    const isVectorBase = source === 'composite' || source.includes('mapbox') || sourceLayer;
+    return isVectorBase && (type === 'line' || type === 'symbol');
+  };
+
+  const roadLayer = layers.find(layer => {
+    if (!isBaseReferenceLayer(layer)) return false;
+    const id = String(layer.id || '').toLowerCase();
+    const sourceLayer = String(layer['source-layer'] || '').toLowerCase();
+    return id.includes('road') || id.includes('street') || id.includes('highway') || sourceLayer.includes('road');
+  });
+  if (roadLayer?.id && targetMap.getLayer(roadLayer.id)) return roadLayer.id;
+
+  const firstReferenceLayer = layers.find(isBaseReferenceLayer);
+  if (firstReferenceLayer?.id && targetMap.getLayer(firstReferenceLayer.id)) return firstReferenceLayer.id;
+
+  return targetMap?.getLayer?.('stations-dot') ? 'stations-dot' : undefined;
+}
+
 function getOrCreatePoolLayer(ck) {
   if (layerPool.has(ck)) return layerPool.get(ck);
   const safeId = 'radar-pool-' + ck.replace(/[:.]/g, '-');
   const layer  = new RadarGateLayer(safeId);
-  // Insert below the sweep layer so pooled data renders underneath the sweep animation.
+  // Insert below the sweep layer, which itself sits under base-map roads/labels.
   if (map.getLayer('radar-gates-sweep')) {
     map.addLayer(layer, 'radar-gates-sweep');
   } else {
-    map.addLayer(layer, 'stations-dot');
+    map.addLayer(layer, _radarBaseMapBeforeId(map));
   }
   layerPool.set(ck, layer);
   return layer;
+}
+
+let _radarDataSmoothingRebuildTimer = null;
+let _radarDataSmoothingRebuildSeq = 0;
+
+function _scheduleRadarDataSmoothingRebuild(delayMs = 120) {
+  if (_radarDataSmoothingRebuildTimer != null) {
+    clearTimeout(_radarDataSmoothingRebuildTimer);
+  }
+  const delay = Math.max(0, Number(delayMs) || 0);
+  _radarDataSmoothingRebuildTimer = setTimeout(() => {
+    _radarDataSmoothingRebuildTimer = null;
+    void _rebuildVisibleWiseFrameForSmoothing();
+  }, delay);
+}
+
+async function _rebuildVisibleWiseFrameForSmoothing() {
+  const key = viewedKey();
+  if (!key || !String(key).startsWith('WISE:')) return;
+  const seq = ++_radarDataSmoothingRebuildSeq;
+  const rawBytes = _processedWiseRawBytesCache.get(key);
+  if (rawBytes) {
+    _processedWisePrefetchBytes.delete(key);
+    _processedWisePrefetchBytes.set(key, new Uint8Array(rawBytes));
+  }
+  frameCache.delete(key);
+  try {
+    const data = await ensureFrameDecoded(key, { forceDecode: true }, true);
+    if (seq !== _radarDataSmoothingRebuildSeq) return;
+    if (data && key === viewedKey()) {
+      showFrame(key, { immediateUpload: true, skipSmoothingStateCheck: true });
+    }
+  } catch (err) {
+    console.warn('[Radar smoothing] rebuild failed', err?.message || err);
+  }
 }
 
 function _displayComboFromFrameKey(key, fallbackComboKey = activeCacheKey(), fallbackFamily = activeFamily) {
@@ -13792,11 +14366,20 @@ function _buildStationPillPath(ctx, x, y, width, height, radius) {
 function _stationPillIconExpr(normal = true) {
   const wsr = normal ? STATION_PILL_IMAGE_WSR : STATION_PILL_ACTIVE_IMAGE_WSR;
   const tdwr = normal ? STATION_PILL_IMAGE_TDWR : STATION_PILL_ACTIVE_IMAGE_TDWR;
-  return ['case', ['==', ['get', 'stationKind'], 'tdwr'], tdwr, wsr];
+  const offline = normal ? STATION_PILL_IMAGE_OFFLINE : STATION_PILL_ACTIVE_IMAGE_OFFLINE;
+  return ['case',
+    ['==', ['get', 'offline'], true], offline,
+    ['==', ['get', 'stationKind'], 'tdwr'], tdwr,
+    wsr,
+  ];
 }
 
 function _stationPillHoverIconExpr() {
-  return ['case', ['==', ['get', 'stationKind'], 'tdwr'], STATION_PILL_HOVER_IMAGE_TDWR, STATION_PILL_HOVER_IMAGE_WSR];
+  return ['case',
+    ['==', ['get', 'offline'], true], STATION_PILL_HOVER_IMAGE_OFFLINE,
+    ['==', ['get', 'stationKind'], 'tdwr'], STATION_PILL_HOVER_IMAGE_TDWR,
+    STATION_PILL_HOVER_IMAGE_WSR,
+  ];
 }
 
 function _createStationPillImage(accentHex, opts = {}) {
@@ -13860,10 +14443,13 @@ function _ensureStationPillImages(targetMap) {
   if (!targetMap) return;
   _setOrUpdateMapImage(targetMap, STATION_PILL_IMAGE_WSR, _createStationPillImage(radarSitesWsrColor));
   _setOrUpdateMapImage(targetMap, STATION_PILL_IMAGE_TDWR, _createStationPillImage(radarSitesTerminalColor));
+  _setOrUpdateMapImage(targetMap, STATION_PILL_IMAGE_OFFLINE, _createStationPillImage(RADAR_SITE_OFFLINE_COLOR));
   _setOrUpdateMapImage(targetMap, STATION_PILL_HOVER_IMAGE_WSR, _createStationPillImage(radarSitesWsrColor, { hover: true }));
   _setOrUpdateMapImage(targetMap, STATION_PILL_HOVER_IMAGE_TDWR, _createStationPillImage(radarSitesTerminalColor, { hover: true }));
+  _setOrUpdateMapImage(targetMap, STATION_PILL_HOVER_IMAGE_OFFLINE, _createStationPillImage(RADAR_SITE_OFFLINE_COLOR, { hover: true }));
   _setOrUpdateMapImage(targetMap, STATION_PILL_ACTIVE_IMAGE_WSR, _createStationPillImage(radarSitesWsrColor, { active: true }));
   _setOrUpdateMapImage(targetMap, STATION_PILL_ACTIVE_IMAGE_TDWR, _createStationPillImage(radarSitesTerminalColor, { active: true }));
+  _setOrUpdateMapImage(targetMap, STATION_PILL_ACTIVE_IMAGE_OFFLINE, _createStationPillImage(RADAR_SITE_OFFLINE_COLOR, { active: true }));
 }
 
 function _stationFeatureCollection() {
@@ -13876,7 +14462,9 @@ function _stationFeatureCollection() {
         id,
         label: displayStationId(id),
         name,
-        dotColor: stationDotColor(id),
+        dotColor: _stationDotColorForStatus(id),
+        offline: _isRadarSiteOffline(id),
+        statusText: radarSiteStatusById.get(canonicalStationId(id))?.label || '',
         stationKind: stationKind(id),
         stationSource: stationSource(id),
       },
@@ -14471,15 +15059,16 @@ map.on('load', () => {
   _applyDarkStyleTextTweaks(map, mapStyle);
   _applySatelliteStyleTweaks(map, mapStyle);
   _initStationsOnMap(map, 1);
+  startRadarSiteStatusPolling();
 
-  // Sweep mask layer — sits above all pool layers, below station dots.
+  // Sweep mask layer — sits above all pool layers, below base-map roads/labels and station dots.
   // Pool layers are inserted before this layer so they render underneath.
   radarLayerSweep = new RadarGateLayer('radar-gates-sweep');
   radarLayerSweep._visible = true; // sweep layer is always considered visible; sweep mode + vertexCount gate draws
-  map.addLayer(radarLayerSweep, 'stations-dot');
+  map.addLayer(radarLayerSweep, _radarBaseMapBeforeId(map));
 
   sweepLayer = new SweepLayer('radar-sweep');
-  map.addLayer(sweepLayer, 'stations-dot');
+  map.addLayer(sweepLayer, _radarBaseMapBeforeId(map));
 
   setStationLayersVisible(radarSitesVisible);
 
@@ -14515,6 +15104,8 @@ activeFamily  = 'REF';
 activeTilt    = '0.5';
 pollTimer     = null;
 dbzFilter     = -30;
+radarDataSmoothing = false;
+radarDataSmoothingStrength = 0.45;
 let isPlaying = false;
 let playTimer = null;
 let spcVisible = false;
@@ -14522,7 +15113,7 @@ let spcDay = 'DAY1';
 let spcType = 'CAT';
 let outlookSelections = {};
 let noaaOutlooksActiveTabs = { SPC: 'THUNDER', WPC: 'QPF', CPC: 'PRECIPTEMP' };
-let noaaOutlooksOpenSections = { SPC: true, WPC: false, CPC: false };
+let noaaOutlooksOpenSections = { SPC: false, WPC: false, CPC: false };
 let spcMapReady = false;
 let spcLoadSeq = 0;
 let spcRenderedKey = '';
@@ -14890,8 +15481,8 @@ function clearAllRuntimeCaches() {
 }
 
 // Parallel decode queue for the active radar selection.
-const N_DECODE_WORKERS_L3 = 6;
-const N_DECODE_WORKERS_L3_BURST = 10;
+const N_DECODE_WORKERS_L3 = 2;
+const N_DECODE_WORKERS_L3_BURST = 2;
 const N_DECODE_WORKERS_L2 = 2;
 const L3_DECODE_BURST_MS = 7000;
 const MANUAL_HISTORY_BURST_MS = 18000;
@@ -16064,10 +16655,30 @@ async function _runOneDecodeWorker() {
           _setL3HistoryEntries(comboKey, [...(historyMap.get(comboKey) || []), latestEntry], job.s3key);
         }
       }
+      if (!isL2 && job.meta?.predictedWarm && job.meta?.comboKey) {
+        const comboKey = String(job.meta.comboKey);
+        const latestEntry = job.meta?.latestEntry?.key
+          ? job.meta.latestEntry
+          : { key: job.s3key };
+        const existing = historyMap.get(comboKey) || [];
+        const withoutDup = existing.filter(item => item?.key !== job.s3key);
+        const nextHistory = [...withoutDup, latestEntry].sort((a, b) => {
+          const at = _parseProcessedWiseFileTimestampMs(a.fileName || a.filename || a.key) || 0;
+          const bt = _parseProcessedWiseFileTimestampMs(b.fileName || b.filename || b.key) || 0;
+          return at - bt;
+        });
+        _setL3HistoryEntries(comboKey, nextHistory, job.s3key);
+        comboLatestKey.set(comboKey, job.s3key);
+      }
 
-      if (liveSweepEnabled && job.s3key === sweepPendingKey) {
+      if (job.s3key === sweepPendingKey) {
+        const ck = String(job.meta?.comboKey || activeCacheKey());
         sweepPendingKey = null;
-        beginSweepReveal(data, job.s3key);
+        if (_canLiveSweepNow(ck, job.s3key)) {
+          beginSweepReveal(data, job.s3key, ck);
+        } else if (_isViewingLiveLatest(ck) && activeStation && job.s3key === viewedKey() && !sweepActive) {
+          showFrame(job.s3key);
+        }
       } else if (activeStation && job.s3key === viewedKey() && !sweepActive) {
         showFrame(job.s3key);
       }
@@ -16140,6 +16751,15 @@ function scheduleNeighborPrefetch() {
 function showFrame(s3key, opts = {}) {
   const data = frameCache.get(s3key);
   if (!data) return;
+  if (
+    String(s3key || '').startsWith('WISE:') &&
+    data?.data_smoothing != null &&
+    Boolean(data.data_smoothing) !== (radarDataSmoothing === true) &&
+    opts?.skipSmoothingStateCheck !== true
+  ) {
+    _scheduleRadarDataSmoothingRebuild(0);
+    return;
+  }
   if (String(s3key || '').startsWith('L2:')) _setActiveL2AvailableProducts(data?.l2_available_products);
   else _setActiveL2AvailableProducts(null);
   applyRadarFrame(data, s3key, () => showFrameMeta(s3key, data), {
@@ -16332,12 +16952,14 @@ async function loadHistory(stationId, family, tilt, opts = {}) {
 
 async function pollActiveL3Latest(stationId) {
   if (stationId !== activeStation || _isL2PathForFamily(activeFamily)) return;
+  if (_processedWiseDirListPollRunning) return;
 
   const family = activeFamily;
   const tilt = activeTilt;
   const ck = `${stationId}:${family}:${tilt}`;
   if (_isManualHistoryActive(ck)) return;
 
+  _processedWiseDirListPollRunning = true;
   try {
     const latestMeta = await findLatestKeyCurrentOnly(stationId, { family, tilt, forceRefresh: true });
     if (!latestMeta?.key) return;
@@ -16355,22 +16977,25 @@ async function pollActiveL3Latest(stationId) {
     // If already decoded, show it immediately
     if (frameCache.has(latestMeta.key)) {
       _setL3HistoryEntries(ck, [...(historyMap.get(ck) || []), latestMeta], latestMeta.key);
-      if (liveSweepEnabled && !sweepActive) {
+      if (_canLiveSweepNow(ck, latestMeta.key)) {
         const cachedData = frameCache.get(latestMeta.key);
-        if (cachedData) beginSweepReveal(cachedData, latestMeta.key);
+        if (cachedData) beginSweepReveal(cachedData, latestMeta.key, ck);
         else showFrame(latestMeta.key);
-      } else if (!sweepActive) {
+      } else if (_isViewingLiveLatest(ck) && !sweepActive) {
         showFrame(latestMeta.key);
       }
       return;
     }
 
     // New frame -> download/decode only this one
-    if (liveSweepEnabled && prevKey) {
+    if (_canStartIncomingSweep(ck, latestMeta.key) && prevKey) {
       sweepPendingKey = latestMeta.key;
     }
     enqueueDecode(latestMeta.key, { ...latestMeta, activateL3Latest: true, comboKey: ck, latestEntry: latestMeta }, true);
-  } catch (_) {}
+  } catch (_) {
+  } finally {
+    _processedWiseDirListPollRunning = false;
+  }
 }
 
 // Fetch older history frames in the background and prepend them to historyMap
@@ -16420,7 +17045,8 @@ async function _backfillHistory(stationId, family, tilt, seq) {
 
 function stopPolling() {
   if (pollTimer !== null) { clearInterval(pollTimer); pollTimer = null; }
-  _syncProcessedWiseRealtime();
+  stopActiveWiseProbeLoop();
+  _weatherWiseRelayClose(false);
 }
 
 async function loadAll(stationId, isInitial = false) {
@@ -16816,14 +17442,42 @@ async function loadRecentWiseFramesForAllProducts(stationId = activeStation, pri
 }
 
 const _tlPlay   = document.getElementById('tl-btn-play');
+const _tlClose  = document.getElementById('tl-btn-close');
 const _tlFpsVal = 6;
 let   _tlDragging = false;
 function drawTimeline() { _updateTlPosition(); }
 function updateSlider() {}
 
+function closeRadarTimeline() {
+  isPlaying = false;
+  _tlDragging = false;
+  if (_tlPlay) { _tlPlay.innerHTML = '&#9654;'; _tlPlay.title = 'Play'; }
+  historyIdx = -1;
+  cancelSweep(false);
+  _hideTimeline();
+  const latestKey = comboLatestKey.get(activeCacheKey());
+  if (latestKey && !sweepActive) showFrame(latestKey);
+}
+
+_tlClose?.addEventListener('click', evt => {
+  evt.preventDefault();
+  evt.stopPropagation();
+  closeRadarTimeline();
+});
+
+document.addEventListener('keydown', evt => {
+  if (evt.key !== 'Escape') return;
+  const island = document.getElementById('control-island');
+  if (!island?.classList.contains('tl-active')) return;
+  closeRadarTimeline();
+});
+
 // -- Settings modal ------------------------------------------------------------
 const settingsBtn     = document.getElementById('settings-btn');
 const settingsOverlay = document.getElementById('settings-overlay');
+const settingsModal   = document.getElementById('settings-modal');
+const settingsModalHeader = document.getElementById('settings-modal-header');
+const settingsBody = document.getElementById('settings-body');
 const dbzSlider       = document.getElementById('dbz-slider');
 const dbzNumberInput  = document.getElementById('dbz-number');
 const citySearchWrap = document.getElementById('city-search-wrap');
@@ -16982,7 +17636,7 @@ function _queueCitySearch(query) {
   citySearchTimer = setTimeout(() => { _runCitySearch(q); }, 180);
 }
 
-const SETTINGS_GROUP_IDS = ['radar', 'overlays', 'app', 'colortables', 'others'];
+const SETTINGS_GROUP_IDS = ['radar', 'overlays', 'customization', 'app', 'colortables', 'others'];
 
 function setSettingsGroupOpen(groupId, open) {
   const group = document.getElementById(`settings-group-${groupId}`);
@@ -17009,11 +17663,1319 @@ function resetSettingsSidebarState() {
   setWarningPrefsOpen(false);
 }
 
+const SETTINGS_PAGES = {
+  radar: {
+    title: 'Radar',
+    subtitle: 'Core radar display controls and scan behavior.',
+  },
+  overlays: {
+    title: 'Overlays',
+    subtitle: 'Warnings, watches, outlooks, reports, cameras, METARs, and map overlay layers.',
+  },
+  'overlays-weather': {
+    title: 'Active Weather',
+    subtitle: 'Warnings, watches, discussions, reports, lightning, and TVS icons.',
+  },
+  'overlays-cameras': {
+    title: 'Cameras',
+    subtitle: 'Traffic, weather, chaser, state, and video filters.',
+  },
+  'overlays-outlooks': {
+    title: 'Outlooks',
+    subtitle: 'NOAA outlook selector and active selections.',
+  },
+  app: {
+    title: 'App',
+    subtitle: 'Map style, cache, update, and app behavior controls.',
+  },
+  colortables: {
+    title: 'Color Tables',
+    subtitle: 'Radar palette assignments by product family.',
+  },
+  others: {
+    title: 'Others',
+    subtitle: 'Extra tools and panels.',
+  },
+  customization: {
+    title: 'Customization',
+    subtitle: 'Colors, visibility, and notifications for each warning type.',
+  },
+};
+
+const SETTINGS_SECTIONS = [
+  { id: 'radar', label: 'Radar', pages: [{ id: 'radar', label: 'Radar' }] },
+  { id: 'overlays', label: 'Overlays', pages: [
+    { id: 'overlays-weather', label: 'Active Weather' },
+    { id: 'overlays-cameras', label: 'Cameras' },
+    { id: 'overlays-outlooks', label: 'Outlooks' },
+  ]},
+  { id: 'customization', label: 'Customization', pages: [{ id: 'customization', label: 'Customization' }] },
+  { id: 'app', label: 'App', pages: [{ id: 'app', label: 'App' }] },
+  { id: 'colortables', label: 'Color Tables', pages: [{ id: 'colortables', label: 'Color Tables' }] },
+  { id: 'others', label: 'Others', pages: [{ id: 'others', label: 'Others' }] },
+];
+
+const SETTINGS_LAYER_PRESETS = {
+  severe: {
+    label: 'Severe',
+    toggles: {
+      'toggle-alerts': true,
+      'toggle-watches': true,
+      'toggle-meso': true,
+      'toggle-storm-reports': true,
+      'toggle-lightning': true,
+      'toggle-tvs': true,
+      'toggle-radar-sites': true,
+      'toggle-metars': true,
+      'toggle-cameras': false,
+    },
+  },
+  winter: {
+    label: 'Winter',
+    toggles: {
+      'toggle-alerts': true,
+      'toggle-watches': true,
+      'toggle-meso': true,
+      'toggle-storm-reports': false,
+      'toggle-lightning': false,
+      'toggle-tvs': false,
+      'toggle-radar-sites': true,
+      'toggle-metars': true,
+      'toggle-cameras': false,
+    },
+  },
+  clean: {
+    label: 'Clean Map',
+    toggles: {
+      'toggle-alerts': false,
+      'toggle-watches': false,
+      'toggle-meso': false,
+      'toggle-storm-reports': false,
+      'toggle-lightning': false,
+      'toggle-tvs': false,
+      'toggle-radar-sites': false,
+      'toggle-metars': false,
+      'toggle-cameras': false,
+    },
+  },
+  analysis: {
+    label: 'Analysis',
+    toggles: {
+      'toggle-alerts': true,
+      'toggle-watches': true,
+      'toggle-meso': true,
+      'toggle-storm-reports': true,
+      'toggle-lightning': false,
+      'toggle-tvs': true,
+      'toggle-radar-sites': true,
+      'toggle-metars': true,
+      'toggle-cameras': true,
+    },
+  },
+  reset: {
+    label: 'Reset',
+    toggles: {
+      'toggle-alerts': true,
+      'toggle-watches': false,
+      'toggle-meso': false,
+      'toggle-storm-reports': false,
+      'toggle-lightning': false,
+      'toggle-tvs': false,
+      'toggle-radar-sites': true,
+      'toggle-metars': false,
+      'toggle-cameras': false,
+    },
+  },
+};
+
+let settingsActivePage = 'radar';
+let settingsRadarTab = 'radar';
+let settingsActiveLayerTab = 'general';
+let settingsActivePreset = 'custom';
+let settingsApplyingPreset = false;
+const settingsLiveSyncers = [];
+
+function _settingsEl(tag, className = '', text = '') {
+  const el = document.createElement(tag);
+  if (className) el.className = className;
+  if (text) el.textContent = text;
+  return el;
+}
+
+function _settingsMoveNodeById(id) {
+  const el = document.getElementById(id);
+  return el || null;
+}
+
+function _settingsMoveRowForControl(id) {
+  const el = document.getElementById(id);
+  if (!el) return null;
+  return el.closest('.settings-section, .sp-row, .settings-subblock') || el;
+}
+
+function _settingsMakeCard(title, subtitle = '', tab = 'general', opts = {}) {
+  const card = _settingsEl('section', `settings-card layer-card${opts.full ? ' full' : ''}`);
+  card.dataset.settingsSearch = `${title} ${subtitle}`.toLowerCase();
+  card.dataset.layerTab = tab;
+  const head = _settingsEl('div', 'settings-card-head layer-card-head');
+  head.appendChild(_settingsEl('div', 'settings-card-title layer-card-title', title));
+  if (subtitle) head.appendChild(_settingsEl('div', 'settings-card-subtitle layer-card-subtitle', subtitle));
+  const body = _settingsEl('div', `settings-card-body layer-card-body${opts.padded ? ' padded' : ''}`);
+  card.append(head, body);
+  return { card, body };
+}
+
+function _settingsAppendExisting(body, nodes = []) {
+  nodes.filter(Boolean).forEach(node => body.appendChild(node));
+}
+
+function _settingsMakeToggle(labelText, getChecked, onChange, note = '') {
+  const row = _settingsEl('div', 'sp-row settings-live-row');
+  const left = _settingsEl('div', 'settings-row-left');
+  left.appendChild(_settingsEl('span', 'sp-row-label', labelText));
+  if (note) left.appendChild(_settingsEl('span', 'sp-note', note));
+  const label = _settingsEl('label', 'toggle');
+  const input = document.createElement('input');
+  input.type = 'checkbox';
+  const track = _settingsEl('span', 'toggle-track');
+  label.append(input, track);
+  row.append(left, label);
+  const sync = () => { input.checked = !!getChecked(); };
+  settingsLiveSyncers.push(sync);
+  sync();
+  input.addEventListener('change', () => {
+    void Promise.resolve(onChange(!!input.checked)).finally(() => {
+      settingsActivePreset = 'custom';
+      syncSettingsLayerUi();
+    });
+  });
+  return row;
+}
+
+function _settingsMakeToggleSlider(labelText, getChecked, onToggle, getValue, onValue) {
+  const row = _settingsEl('div', 'sp-row settings-live-row settings-toggle-slider-row');
+  const left = _settingsEl('div', 'settings-row-left');
+  left.appendChild(_settingsEl('span', 'sp-row-label', labelText));
+  const right = _settingsEl('div', 'sp-row-right settings-toggle-slider-right');
+  const slider = document.createElement('input');
+  slider.type = 'range';
+  slider.min = '0';
+  slider.max = '100';
+  slider.step = '1';
+  slider.className = 'sp-slider settings-inline-smoothing-slider';
+  const badge = _settingsEl('span', 'settings-slider-badge');
+  const label = _settingsEl('label', 'toggle');
+  const input = document.createElement('input');
+  input.type = 'checkbox';
+  label.append(input, _settingsEl('span', 'toggle-track'));
+  right.append(slider, badge, label);
+  row.append(left, right);
+  const sync = () => {
+    const checked = !!getChecked();
+    const value = Math.max(0, Math.min(1, Number(getValue()) || 0));
+    input.checked = checked;
+    slider.value = String(Math.round(value * 100));
+    badge.textContent = `${Math.round(value * 100)}%`;
+    slider.hidden = !checked;
+    badge.hidden = !checked;
+  };
+  settingsLiveSyncers.push(sync);
+  sync();
+  input.addEventListener('change', () => {
+    void Promise.resolve(onToggle(!!input.checked)).finally(() => {
+      settingsActivePreset = 'custom';
+      syncSettingsLayerUi();
+    });
+  });
+  slider.addEventListener('input', () => {
+    const value = Number(slider.value || 0) / 100;
+    badge.textContent = `${Math.round(value * 100)}%`;
+    onValue(value, { persist: false });
+  });
+  slider.addEventListener('change', () => {
+    const value = Number(slider.value || 0) / 100;
+    void Promise.resolve(onValue(value)).finally(syncSettingsLayerUi);
+  });
+  return row;
+}
+
+function _settingsMakeColorRow(labelText, getColor, onChange) {
+  const row = _settingsEl('div', 'sp-row settings-live-row');
+  const left = _settingsEl('div', 'settings-row-left');
+  left.appendChild(_settingsEl('span', 'sp-row-label', labelText));
+  const right = _settingsEl('div', 'sp-row-right');
+  const input = document.createElement('input');
+  input.type = 'color';
+  input.className = 'settings-color-chip';
+  right.appendChild(input);
+  row.append(left, right);
+  const sync = () => { input.value = _normalizeSpcHex(getColor()) || '#ffffff'; };
+  settingsLiveSyncers.push(sync);
+  sync();
+  input.addEventListener('input', () => {
+    onChange(input.value, { persist: false });
+    settingsActivePreset = 'custom';
+    syncSettingsLayerUi();
+  });
+  input.addEventListener('change', () => {
+    onChange(input.value, { persist: true });
+    settingsActivePreset = 'custom';
+    syncSettingsLayerUi();
+  });
+  return row;
+}
+
+function _settingsMakeValueSliderRow(labelText, min, max, step, getValue, onChange, formatValue) {
+  const row = _settingsEl('div', 'sp-row settings-live-row');
+  const left = _settingsEl('div', 'settings-row-left');
+  left.appendChild(_settingsEl('span', 'sp-row-label', labelText));
+  const right = _settingsEl('div', 'sp-row-right settings-slider-right');
+  const slider = document.createElement('input');
+  slider.type = 'range';
+  slider.min = String(min);
+  slider.max = String(max);
+  slider.step = String(step);
+  slider.className = 'sp-slider';
+  const badge = _settingsEl('span', 'settings-slider-badge');
+  right.append(slider, badge);
+  row.append(left, right);
+  const render = value => { badge.textContent = formatValue ? formatValue(value) : String(value); };
+  const sync = () => {
+    const v = Number(getValue());
+    slider.value = String(v);
+    render(v);
+  };
+  settingsLiveSyncers.push(sync);
+  sync();
+  slider.addEventListener('input', () => {
+    const value = Number(slider.value);
+    render(value);
+    onChange(value, { persist: false });
+    settingsActivePreset = 'custom';
+  });
+  slider.addEventListener('change', () => {
+    onChange(Number(slider.value), { persist: true });
+    syncSettingsLayerUi();
+  });
+  return row;
+}
+
+function _settingsMakeButton(labelText, onClick) {
+  const btn = _settingsEl('button', 'settings-link-btn', labelText);
+  btn.type = 'button';
+  btn.addEventListener('click', onClick);
+  return btn;
+}
+
+function _settingsMakeDisclosure(labelText, getChecked, onChange, childNodes = [], opts = {}) {
+  const wrap = _settingsEl('section', 'settings-disclosure');
+  const head = _settingsEl('div', 'sp-row settings-live-row settings-disclosure-head');
+  const left = _settingsEl('div', 'settings-row-left');
+  left.appendChild(_settingsEl('span', 'sp-row-label', labelText));
+  if (opts.note) left.appendChild(_settingsEl('span', 'sp-note', opts.note));
+  const arrow = _settingsEl('button', 'settings-disclosure-arrow', '›');
+  arrow.type = 'button';
+  arrow.setAttribute('aria-label', `Expand ${labelText}`);
+  const label = _settingsEl('label', 'toggle');
+  const input = document.createElement('input');
+  input.type = 'checkbox';
+  const track = _settingsEl('span', 'toggle-track');
+  label.append(input, track);
+  head.append(left, arrow, label);
+
+  const body = _settingsEl('div', 'settings-disclosure-body');
+  childNodes.filter(Boolean).forEach(node => body.appendChild(node));
+  body.hidden = true;
+  wrap.append(head, body);
+
+  const sync = () => { input.checked = !!getChecked(); };
+  settingsLiveSyncers.push(sync);
+  sync();
+
+  const setOpen = open => {
+    const next = !!open;
+    wrap.classList.toggle('open', next);
+    arrow.setAttribute('aria-expanded', next ? 'true' : 'false');
+    body.hidden = !next;
+  };
+
+  const toggleOpen = () => {
+    setOpen(!wrap.classList.contains('open'));
+    if (opts.onOpen && wrap.classList.contains('open')) opts.onOpen();
+  };
+
+  arrow.addEventListener('click', event => {
+    event.stopPropagation();
+    toggleOpen();
+  });
+
+  head.addEventListener('click', event => {
+    if (event.target.closest('.toggle') || event.target.closest('.settings-disclosure-arrow')) return;
+    toggleOpen();
+  });
+
+  head.addEventListener('dblclick', () => {
+    toggleOpen();
+  });
+
+  input.addEventListener('change', () => {
+    void Promise.resolve(onChange(!!input.checked)).finally(() => {
+      settingsActivePreset = 'custom';
+      syncSettingsLayerUi();
+    });
+  });
+
+  return wrap;
+}
+
+function _settingsMakeSliderRow(labelText, min, max, step, getValue, onChange) {
+  const row = _settingsEl('div', 'sp-row settings-live-row');
+  const left = _settingsEl('div', 'settings-row-left');
+  left.appendChild(_settingsEl('span', 'sp-row-label', labelText));
+  const right = _settingsEl('div', 'sp-row-right settings-slider-right');
+  const slider = document.createElement('input');
+  slider.type = 'range';
+  slider.min = String(min);
+  slider.max = String(max);
+  slider.step = String(step);
+  slider.className = 'sp-slider';
+  const badge = _settingsEl('span', 'settings-slider-badge');
+  right.append(slider, badge);
+  row.append(left, right);
+  const sync = () => {
+    const v = Number(getValue());
+    slider.value = String(v);
+    badge.textContent = `${v} dBZ`;
+  };
+  settingsLiveSyncers.push(sync);
+  sync();
+  slider.addEventListener('input', () => {
+    badge.textContent = `${slider.value} dBZ`;
+    void Promise.resolve(onChange(Number(slider.value))).finally(syncSettingsLayerUi);
+  });
+  return row;
+}
+
+function _settingsMakeSelectRow(labelText, optionsFn, getValue, onChange, note = '') {
+  const row = _settingsEl('div', 'sp-row settings-live-row');
+  const left = _settingsEl('div', 'settings-row-left');
+  left.appendChild(_settingsEl('span', 'sp-row-label', labelText));
+  if (note) left.appendChild(_settingsEl('span', 'sp-note', note));
+  const right = _settingsEl('div', 'sp-row-right');
+  const select = _settingsEl('select', 'ct-select');
+  right.appendChild(select);
+  row.append(left, right);
+  const sync = () => {
+    const value = String(getValue() || '');
+    select.innerHTML = '';
+    optionsFn().forEach(opt => {
+      const option = document.createElement('option');
+      option.value = String(opt.value);
+      option.textContent = String(opt.label);
+      select.appendChild(option);
+    });
+    select.value = value;
+  };
+  settingsLiveSyncers.push(sync);
+  sync();
+  select.addEventListener('change', () => {
+    void Promise.resolve(onChange(select.value)).finally(syncSettingsLayerUi);
+  });
+  return row;
+}
+
+function _settingsSetSelectControl(id, value) {
+  const select = document.getElementById(id);
+  if (!select) return false;
+  select.value = String(value);
+  select.dispatchEvent(new Event('change', { bubbles: true }));
+  return true;
+}
+
+function _settingsSectionForPage(pageId) {
+  return SETTINGS_SECTIONS.find(section => section.pages.some(page => page.id === pageId)) || SETTINGS_SECTIONS[0];
+}
+
+function _settingsSyncTopTabs(activeSection, activePageId) {
+  const tabs = document.getElementById('settings-layer-tabs');
+  if (!tabs) return;
+  tabs.innerHTML = '';
+  if (activeSection?.id === 'radar') {
+    tabs.hidden = false;
+    [
+      { id: 'radar', label: 'Radar' },
+      { id: 'customize', label: 'Customize' },
+    ].forEach(tab => {
+      const btn = _settingsEl('button', `settings-tab${tab.id === settingsRadarTab ? ' active' : ''}`, tab.label);
+      btn.type = 'button';
+      btn.dataset.radarSettingsTab = tab.id;
+      btn.addEventListener('click', () => _settingsSetRadarTab(tab.id));
+      tabs.appendChild(btn);
+    });
+    return;
+  }
+  const showTabs = activeSection?.id === 'overlays' && Array.isArray(activeSection.pages) && activeSection.pages.length > 1;
+  tabs.hidden = !showTabs;
+  if (!showTabs) return;
+  activeSection.pages.forEach(page => {
+    const btn = _settingsEl('button', `settings-tab${page.id === activePageId ? ' active' : ''}`, page.label);
+    btn.type = 'button';
+    btn.dataset.settingsPage = page.id;
+    btn.addEventListener('click', () => _settingsSetPage(page.id, activeSection.id));
+    tabs.appendChild(btn);
+  });
+}
+
+function _settingsSetPage(pageId, preferredSectionId = '') {
+  if (pageId === 'overlays') pageId = 'overlays-weather';
+  const next = SETTINGS_PAGES[pageId] ? pageId : 'radar';
+  settingsActivePage = next;
+  const preferredSection = SETTINGS_SECTIONS.find(section =>
+    section.id === preferredSectionId && section.pages.some(page => page.id === next)
+  );
+  const activeSection = preferredSection || _settingsSectionForPage(next);
+  document.querySelectorAll('.settings-sidebar-group').forEach(group => {
+    const open = group.dataset.settingsSection === activeSection?.id;
+    group.classList.toggle('open', open);
+  });
+  document.querySelectorAll('.settings-nav-item').forEach(btn => {
+    btn.classList.toggle('active', btn.dataset.settingsSection === activeSection?.id);
+  });
+  document.querySelectorAll('.settings-page').forEach(page => {
+    const active = page.dataset.settingsPage === next;
+    page.classList.toggle('active', active);
+    page.hidden = !active;
+  });
+  _settingsSyncTopTabs(activeSection, next);
+  const meta = activeSection?.id === 'overlays'
+    ? SETTINGS_PAGES.overlays
+    : (SETTINGS_PAGES[next] || SETTINGS_PAGES.radar);
+  const title = document.getElementById('settings-page-title');
+  const subtitle = document.getElementById('settings-page-subtitle');
+  if (title) title.textContent = meta.title;
+  if (subtitle) subtitle.textContent = meta.subtitle;
+  if (next === 'customization') syncWarningPrefsUi();
+  if (next === 'overlays-outlooks') {
+    _syncNoaaOutlooksUi();
+    _warmNoaaOutlookTab('WPC', noaaOutlooksActiveTabs.WPC || 'QPF');
+    _warmNoaaOutlookTab('CPC', noaaOutlooksActiveTabs.CPC || 'PRECIPTEMP');
+    _applyNoaaOutlooksOpenSectionsUi();
+    Object.entries(noaaOutlooksOpenSections).forEach(([key, open]) => {
+      if (open) _renderNoaaOutlooksPanel(key);
+    });
+  }
+  _settingsApplySearch();
+}
+
+function _settingsSetLayerTab(tabId) {
+  const pageByTab = {
+    general: 'overlays',
+    severe: 'overlays',
+    cameras: 'overlays',
+    outlooks: 'overlays',
+  };
+  const next = pageByTab[tabId] ? tabId : 'general';
+  settingsActiveLayerTab = next;
+  _settingsSetPage(pageByTab[next], 'overlays');
+  _settingsApplySearch();
+}
+
+function _settingsSetRadarTab(tabId) {
+  const next = tabId === 'customize' ? 'customize' : 'radar';
+  settingsRadarTab = next;
+  document.querySelectorAll('[data-radar-settings-tab]').forEach(btn => {
+    btn.classList.toggle('active', btn.dataset.radarSettingsTab === next);
+  });
+  document.querySelectorAll('[data-radar-settings-panel]').forEach(panel => {
+    const active = panel.dataset.radarSettingsPanel === next;
+    panel.classList.toggle('active', active);
+    panel.hidden = !active;
+  });
+  _settingsApplySearch();
+}
+
+function _settingsSetControl(id, checked) {
+  const input = document.getElementById(id);
+  if (!input) return;
+  const next = !!checked;
+  if (input.checked === next) return;
+  input.checked = next;
+  input.dispatchEvent(new Event('change', { bubbles: true }));
+}
+
+function _settingsApplyPreset(presetId) {
+  const preset = SETTINGS_LAYER_PRESETS[presetId];
+  if (!preset) return;
+  settingsApplyingPreset = true;
+  try {
+    settingsActivePreset = presetId === 'reset' ? 'default' : presetId;
+    Object.entries(preset.toggles).forEach(([id, checked]) => _settingsSetControl(id, checked));
+    if (presetId === 'severe') {
+      _settingsSetControl('toggle-storm-reports-lsr', true);
+      _settingsSetControl('toggle-storm-reports-spotter', true);
+      _settingsSetControl('toggle-mping', true);
+    }
+    if (presetId === 'winter') {
+      _settingsSetControl('toggle-meso-winter', true);
+      _settingsSetControl('toggle-meso-precip', true);
+      _settingsSetControl('toggle-meso-convective', false);
+    }
+  } finally {
+    settingsApplyingPreset = false;
+  }
+  syncSettingsLayerUi();
+}
+
+function _settingsCurrentPresetLabel() {
+  if (settingsActivePreset === 'default') return 'Default';
+  return SETTINGS_LAYER_PRESETS[settingsActivePreset]?.label || 'Custom';
+}
+
+function syncSettingsLayerUi() {
+  const states = {
+    'toggle-sweep': liveSweepEnabled,
+    'toggle-alerts': alertsVisible,
+    'toggle-watches': watchesVisible,
+    'toggle-meso': mesoVisible,
+    'toggle-lightning': lightningVisible,
+    'toggle-tvs': tvsVisible,
+    'toggle-radar-sites': radarSitesVisible,
+    'toggle-radar-sites-pill': radarSitePillMode,
+    'toggle-storm-reports': stormReportsVisible || stormReportsLsrVisible || stormReportsSpotterVisible,
+    'toggle-storm-reports-lsr': stormReportsLsrVisible,
+    'toggle-storm-reports-spotter': stormReportsSpotterVisible,
+    'toggle-mping': mpingVisible,
+    'toggle-metars': metarsVisible,
+    'toggle-spotter-locations': spotterLocationsVisible,
+    'toggle-cameras': camerasOverlayVisible,
+  };
+  Object.entries(states).forEach(([id, checked]) => {
+    const input = document.getElementById(id);
+    if (input) input.checked = !!checked;
+  });
+  const count = typeof _activeNoaaOutlookCount === 'function' ? _activeNoaaOutlookCount() : 0;
+  const noaaCount = document.getElementById('settings-noaa-count');
+  if (noaaCount) noaaCount.textContent = `${count} selected`;
+  const presetLabel = document.getElementById('settings-preset-active-label');
+  if (presetLabel) presetLabel.textContent = _settingsCurrentPresetLabel();
+  document.querySelectorAll('.settings-preset-btn').forEach(btn => {
+    btn.classList.toggle('active', btn.dataset.settingsPreset === settingsActivePreset);
+  });
+  settingsLiveSyncers.forEach(sync => {
+    try { sync(); } catch (_) {}
+  });
+}
+
+function _settingsApplySearch() {
+  const input = document.getElementById('settings-search-input');
+  const query = String(input?.value || '').trim().toLowerCase();
+  const page = document.querySelector(`.settings-page[data-settings-page="${settingsActivePage}"]`);
+  if (!page) return;
+  page.querySelectorAll('.settings-card, .layer-card, .settings-page-empty').forEach(card => {
+    if (!query) {
+      card.dataset.settingsHidden = 'false';
+      return;
+    }
+    const text = `${card.dataset.settingsSearch || ''} ${card.textContent || ''}`.toLowerCase();
+    card.dataset.settingsHidden = text.includes(query) ? 'false' : 'true';
+  });
+}
+
+function _settingsBuildTitlebar() {
+  if (!settingsModalHeader || settingsModalHeader.dataset.redesigned === 'true') return;
+  settingsModalHeader.classList.add('settings-titlebar');
+  const closeBtn = document.getElementById('settings-close');
+  const actions = _settingsEl('div', 'settings-title-actions');
+  const searchWrap = _settingsEl('div', 'settings-search-wrap');
+  const searchBtn = _settingsEl('button', 'settings-titlebar-btn');
+  searchBtn.type = 'button';
+  searchBtn.id = 'settings-search-toggle';
+  searchBtn.title = 'Search settings';
+  searchBtn.setAttribute('aria-label', 'Search settings');
+  searchBtn.innerHTML = '<svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M10.5 3a7.5 7.5 0 0 1 5.94 12.08l4.24 4.24-1.42 1.42-4.24-4.24A7.5 7.5 0 1 1 10.5 3Zm0 2A5.5 5.5 0 1 0 16 10.5 5.51 5.51 0 0 0 10.5 5Z"/></svg>';
+  const searchInput = _settingsEl('input', 'settings-search-input');
+  searchInput.type = 'search';
+  searchInput.id = 'settings-search-input';
+  searchInput.placeholder = 'Search settings';
+  searchInput.autocomplete = 'off';
+  searchWrap.append(searchBtn, searchInput);
+  actions.appendChild(searchWrap);
+  if (closeBtn) actions.appendChild(closeBtn);
+  settingsModalHeader.appendChild(actions);
+  searchBtn.addEventListener('click', event => {
+    event.stopPropagation();
+    settingsModal?.classList.toggle('search-open');
+    if (settingsModal?.classList.contains('search-open')) searchInput.focus();
+    else {
+      searchInput.value = '';
+      _settingsApplySearch();
+    }
+  });
+  searchInput.addEventListener('input', _settingsApplySearch);
+  searchInput.addEventListener('pointerdown', event => event.stopPropagation());
+  settingsModalHeader.dataset.redesigned = 'true';
+}
+
+function _settingsBuildLayerPage(pagesWrap) {
+  // Active Weather page
+  const weatherPage = _settingsEl('div', 'settings-page settings-page-grid active');
+  weatherPage.dataset.settingsPage = 'overlays-weather';
+  weatherPage.hidden = false;
+  const activeWeather = _settingsMakeCard('Active Weather', 'Warnings, watches, discussions, reports, lightning, and TVS icons.', 'general');
+  activeWeather.body.append(
+    _settingsMakeDisclosure(
+      'Warnings',
+      () => alertsVisible,
+      on => _settingsSetControl('toggle-alerts', on),
+      [
+        _settingsMakeToggle('NWS API Source', () => _shouldUseNwwsBridge() ? true : nwsApiEnabled, on => _settingsSetControl('toggle-nws-api-alerts', on)),
+        _settingsMakeToggle('NWWS Source', () => nwwsEnabled, on => _settingsSetControl('toggle-nwws-alerts', on)),
+      ],
+    ),
+    _settingsMakeToggle('Watches', () => watchesVisible, on => _settingsSetControl('toggle-watches', on)),
+    _settingsMakeDisclosure(
+      'Mesoscale Discussions',
+      () => mesoVisible,
+      on => _settingsSetControl('toggle-meso', on),
+      [
+        _settingsMakeToggle('Convective', () => mesoFilterSelection.convective !== false, on => _settingsSetControl('toggle-meso-convective', on)),
+        _settingsMakeToggle('Winter', () => mesoFilterSelection.winter !== false, on => _settingsSetControl('toggle-meso-winter', on)),
+        _settingsMakeToggle('Precip', () => mesoFilterSelection.precip !== false, on => _settingsSetControl('toggle-meso-precip', on)),
+      ],
+    ),
+    _settingsMakeDisclosure(
+      'Storm Reports',
+      () => stormReportsVisible || stormReportsLsrVisible || stormReportsSpotterVisible,
+      on => _settingsSetControl('toggle-storm-reports', on),
+      [
+        _settingsMakeToggle('NWS Local Storm Reports', () => stormReportsLsrVisible, on => _settingsSetControl('toggle-storm-reports-lsr', on)),
+        _settingsMakeToggle('Spotter Network Reports', () => stormReportsSpotterVisible, on => _settingsSetControl('toggle-storm-reports-spotter', on)),
+        _settingsMakeToggle('mPING Reports', () => mpingVisible, on => _settingsSetControl('toggle-mping', on)),
+      ],
+    ),
+    _settingsMakeToggle('Lightning', () => lightningVisible, on => _settingsSetControl('toggle-lightning', on)),
+    _settingsMakeToggle('TVS Icons', () => tvsVisible, on => _settingsSetControl('toggle-tvs', on)),
+    _settingsMakeToggle('METARs', () => metarsVisible, on => _settingsSetControl('toggle-metars', on)),
+    _settingsMakeToggle('Spotter Locations', () => spotterLocationsVisible, on => _settingsSetControl('toggle-spotter-locations', on)),
+  );
+  weatherPage.appendChild(activeWeather.card);
+  pagesWrap.appendChild(weatherPage);
+
+  // Cameras page
+  const camerasPage = _settingsEl('div', 'settings-page settings-page-grid');
+  camerasPage.dataset.settingsPage = 'overlays-cameras';
+  camerasPage.hidden = true;
+  const cameras = _settingsMakeCard('Cameras', 'Traffic, weather, chaser, state, and video filters.', 'general');
+  cameras.body.append(
+    _settingsMakeDisclosure('Cameras', () => camerasOverlayVisible, on => _settingsSetControl('toggle-cameras', on), [
+      _settingsMakeToggle('Traffic Cameras', () => cameraFilterSelection.traffic !== false, on => _settingsSetControl('camera-filter-traffic', on)),
+      _settingsMakeToggle('Weather Cameras', () => cameraFilterSelection.weather !== false, on => _settingsSetControl('camera-filter-weather', on)),
+      _settingsMakeToggle('Chasers', () => cameraFilterSelection.chasers !== false, on => _settingsSetControl('camera-filter-chasers', on)),
+    ]),
+    _settingsMakeToggle('Video Only', () => cameraVideoOnly, on => _settingsSetControl('camera-video-only-toggle', on)),
+    _settingsMakeSelectRow(
+      'State',
+      () => [{ value: 'ALL', label: 'All States' }, ...Object.entries(US_STATE_NAMES).map(([value, label]) => ({ value, label: `${value} - ${label}` }))],
+      () => cameraStateFilter || 'ALL',
+      value => {
+        cameraStateFilter = String(value || 'ALL').toUpperCase();
+        _applyCameraStateFilter();
+        saveSettings();
+      },
+    ),
+  );
+  camerasPage.appendChild(cameras.card);
+  pagesWrap.appendChild(camerasPage);
+
+  // Outlooks page
+  const outlooksPage = _settingsEl('div', 'settings-page settings-page-grid');
+  outlooksPage.dataset.settingsPage = 'overlays-outlooks';
+  outlooksPage.hidden = true;
+  const outlooksCard = _settingsMakeCard('Outlooks', 'Session-only NOAA outlook products.', 'general', { full: true });
+  const outlookHeader = _settingsEl('div', 'settings-noaa-header');
+  const outlookCountWrap = _settingsEl('div', 'settings-preset-active');
+  outlookCountWrap.innerHTML = 'Active: <strong id="settings-noaa-count">None active</strong>';
+  const outlookClearBtn = _settingsMakeButton('Clear All', () => _clearAllNoaaOutlookSelections({ rerenderPanels: true }));
+  outlookHeader.append(outlookCountWrap, outlookClearBtn);
+  outlooksCard.body.appendChild(outlookHeader);
+
+  const sectionsEl = _settingsEl('div', 'settings-noaa-sections');
+  Object.entries(NOAA_OUTLOOK_SECTIONS).forEach(([key, sectionDef]) => {
+    const sectionEl = _settingsEl('div', 'noaa-outlooks-section');
+    sectionEl.dataset.outlookSection = key;
+
+    const btnEl = _settingsEl('button', 'noaa-outlooks-section-head');
+    btnEl.type = 'button';
+    btnEl.dataset.outlookSectionBtn = key;
+    btnEl.setAttribute('aria-expanded', 'false');
+    btnEl.innerHTML = `<div class="noaa-outlooks-section-head-left"><span class="noaa-outlooks-section-title">${sectionDef.label}</span></div><svg class="noaa-outlooks-section-chevron" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="m7 10 5 5 5-5z"/></svg>`;
+    btnEl.addEventListener('click', () => {
+      const nowOpen = !sectionEl.classList.contains('open');
+      if (nowOpen) _normalizeNoaaOutlooksOpenSections(key);
+      else noaaOutlooksOpenSections[key] = false;
+      _applyNoaaOutlooksOpenSectionsUi();
+      if (nowOpen) _renderNoaaOutlooksPanel(key);
+    });
+
+    const bodyEl = _settingsEl('div', 'noaa-outlooks-section-body');
+    const innerEl = _settingsEl('div', 'noaa-outlooks-section-inner');
+    innerEl.id = `settings-noaa-panel-${key.toLowerCase()}`;
+    bodyEl.appendChild(innerEl);
+    sectionEl.append(btnEl, bodyEl);
+    sectionsEl.appendChild(sectionEl);
+  });
+  outlooksCard.body.appendChild(sectionsEl);
+  outlooksPage.appendChild(outlooksCard.card);
+  pagesWrap.appendChild(outlooksPage);
+}
+
+function _settingsBuildPage(pagesWrap, pageId, nodes = [], emptyText = '') {
+  const page = _settingsEl('div', 'settings-page settings-page-grid');
+  page.dataset.settingsPage = pageId;
+  page.hidden = true;
+  const meta = SETTINGS_PAGES[pageId] || SETTINGS_PAGES.radar;
+  const card = _settingsMakeCard(meta.title, meta.subtitle, 'general', { full: true });
+  _settingsAppendExisting(card.body, nodes);
+  if (!card.body.children.length && emptyText) {
+    const empty = _settingsEl('div', 'settings-page-empty', emptyText);
+    empty.dataset.settingsSearch = emptyText.toLowerCase();
+    card.body.appendChild(empty);
+  }
+  page.appendChild(card.card);
+  pagesWrap.appendChild(page);
+}
+
+function _settingsBuildActionPage(pagesWrap, pageId, cards = []) {
+  const page = _settingsEl('div', 'settings-page settings-page-grid');
+  page.dataset.settingsPage = pageId;
+  page.hidden = true;
+  cards.forEach(cardConfig => {
+    const card = _settingsMakeCard(cardConfig.title, cardConfig.subtitle || '', 'general', { full: !!cardConfig.full, padded: true });
+    (cardConfig.actions || []).forEach(action => {
+      const btn = _settingsEl('button', 'settings-link-btn', action.label);
+      btn.type = 'button';
+      btn.addEventListener('click', action.onClick);
+      card.body.appendChild(btn);
+    });
+    if (cardConfig.note) card.body.appendChild(_settingsEl('div', 'settings-page-empty', cardConfig.note));
+    page.appendChild(card.card);
+  });
+  pagesWrap.appendChild(page);
+}
+
+function _initSettingsRedesign() {
+  if (!settingsBody || settingsBody.dataset.redesigned === 'true') return;
+  settingsBody.dataset.redesigned = 'true';
+  settingsModal?.classList.add('settings-window');
+  _settingsBuildTitlebar();
+
+  const legacyPool = _settingsEl('div', 'settings-legacy-pool');
+  legacyPool.hidden = true;
+  Array.from(settingsBody.children).forEach(child => legacyPool.appendChild(child));
+
+  const shell = _settingsEl('div', 'settings-shell');
+  const sidebar = _settingsEl('nav', 'settings-sidebar');
+  const content = _settingsEl('main', 'settings-content');
+  const head = _settingsEl('div', 'settings-main-head');
+  const title = _settingsEl('div', 'settings-page-title', SETTINGS_PAGES.radar.title);
+  title.id = 'settings-page-title';
+  const subtitle = _settingsEl('div', 'settings-page-subtitle', SETTINGS_PAGES.radar.subtitle);
+  subtitle.id = 'settings-page-subtitle';
+  head.append(title, subtitle);
+
+  const tabs = _settingsEl('div', 'settings-tabs');
+  tabs.id = 'settings-layer-tabs';
+  tabs.hidden = true;
+
+  const pagesWrap = _settingsEl('div', 'settings-pages');
+  _settingsBuildLayerPage(pagesWrap);
+
+  const radarPage = _settingsEl('div', 'settings-page settings-page-grid');
+  radarPage.dataset.settingsPage = 'radar';
+  radarPage.hidden = true;
+  const radarCard = _settingsMakeCard('Radar', 'Core radar display controls and scan behavior.', 'general', { full: true });
+  const radarControlsPanel = _settingsEl('div', 'radar-card-panel active');
+  radarControlsPanel.dataset.radarSettingsPanel = 'radar';
+  radarControlsPanel.append(
+    _settingsMakeSelectRow('Data Level', () => [{ value: '3', label: 'Level III' }], () => '3', () => {}),
+    _settingsMakeToggle('Live Sweep', () => liveSweepEnabled, on => _settingsSetControl('toggle-sweep', on)),
+    _settingsMakeToggleSlider(
+      'Data Smoothing',
+      () => radarDataSmoothing,
+      on => _setRadarDataSmoothing(on),
+      () => radarDataSmoothingStrength,
+      value => _setRadarDataSmoothingStrength(value),
+    ),
+    _settingsMakeSliderRow('dBZ Filter', -30, 75, 5, () => dbzFilter, value => _setDbzFilter(value)),
+    _settingsMakeToggle('Radar Sites', () => radarSitesVisible, on => _settingsSetControl('toggle-radar-sites', on)),
+    _settingsMakeToggle('Pill Radar Sites', () => radarSitePillMode, on => _settingsSetControl('toggle-radar-sites-pill', on)),
+  );
+
+  const radarCustomizePanel = _settingsEl('div', 'radar-card-panel');
+  radarCustomizePanel.dataset.radarSettingsPanel = 'customize';
+  radarCustomizePanel.hidden = true;
+  const radarSitesSection = _settingsEl('section', 'radar-customize-section');
+  radarSitesSection.appendChild(_settingsEl('div', 'radar-customize-title', 'Radar Sites'));
+  const radarSitesGrid = _settingsEl('div', 'radar-customize-grid');
+  const radarSitesControls = _settingsEl('div', 'radar-customize-controls');
+  radarSitesControls.append(
+    _settingsMakeToggle('Radar Sites', () => radarSitesVisible, on => _setRadarSitesVisible(on)),
+    _settingsMakeToggle('Pill Radar Sites', () => radarSitePillMode, on => _setRadarSitePillMode(on)),
+    _settingsMakeColorRow('WSR-88D Color', () => radarSitesWsrColor, (value, opts) => _setRadarSitesWsrColor(value, opts)),
+    _settingsMakeColorRow('Terminal Color', () => radarSitesTerminalColor, (value, opts) => _setRadarSitesTerminalColor(value, opts)),
+    _settingsMakeButton('Default Radar Sites', resetRadarSiteAppearanceDefaults),
+  );
+  radarSitesGrid.appendChild(radarSitesControls);
+  radarSitesSection.appendChild(radarSitesGrid);
+
+  const sweepCustomizeSection = _settingsEl('section', 'radar-customize-section');
+  sweepCustomizeSection.appendChild(_settingsEl('div', 'radar-customize-title', 'Live Sweep'));
+  const sweepGrid = _settingsEl('div', 'radar-customize-grid');
+  const sweepControls = _settingsEl('div', 'radar-customize-controls');
+  sweepControls.append(
+    _settingsMakeToggle('Live Sweep', () => liveSweepEnabled, on => _setLiveSweepEnabled(on)),
+    _settingsMakeColorRow('Sweep Color', () => liveSweepColor, (value, opts) => _setLiveSweepColor(value, opts)),
+    _settingsMakeValueSliderRow(
+      'Sweep Speed',
+      LIVE_SWEEP_MIN_REV_MS / 1000,
+      LIVE_SWEEP_MAX_REV_MS / 1000,
+      1,
+      () => Math.round(_liveSweepRevMs() / 1000),
+      (value, opts) => _setLiveSweepSpeedSeconds(value, opts),
+      value => `${Math.round(Number(value) || 0)}s/rev`,
+    ),
+    _settingsMakeButton('Default Live Sweep', resetLiveSweepAppearanceDefaults),
+  );
+  sweepGrid.appendChild(sweepControls);
+  sweepCustomizeSection.appendChild(sweepGrid);
+  radarCustomizePanel.append(radarSitesSection, sweepCustomizeSection);
+  radarCard.body.append(radarControlsPanel, radarCustomizePanel);
+  radarPage.appendChild(radarCard.card);
+  pagesWrap.appendChild(radarPage);
+
+  const mapPage = _settingsEl('div', 'settings-page settings-page-grid');
+  mapPage.dataset.settingsPage = 'app';
+  mapPage.hidden = true;
+  const mapCard = _settingsMakeCard('App', 'Map style, cache, update, and app behavior controls.', 'general', { full: true });
+  mapCard.body.append(
+    _settingsMakeSelectRow(
+      'Map Style',
+      () => MAP_STYLE_OPTIONS.map(opt => ({ value: opt.id, label: opt.label })),
+      () => mapStyle,
+      value => {
+        if (!_settingsSetSelectControl('app-map-style', value)) {
+          const next = String(value || '');
+          if (!MAP_STYLE_IDS.has(next) || next === mapStyle) return;
+          mapStyle = next;
+          saveSettings();
+          setTimeout(() => window.location.reload(), 50);
+        }
+      },
+    ),
+  );
+
+  // NWWS disclosure
+  const nwwsDisclosure = _settingsEl('section', 'settings-disclosure');
+  const nwwsHead = _settingsEl('div', 'sp-row settings-live-row settings-disclosure-head');
+  const nwwsLeft = _settingsEl('div', 'settings-row-left');
+  const nwwsLabelWrap = _settingsEl('div', 'settings-disclosure-title-row');
+  nwwsLabelWrap.append(
+    _settingsEl('span', 'sp-row-label', 'NWWS'),
+  );
+  const nwwsBadge = _settingsEl('span', 'settings-nwws-badge');
+  nwwsBadge.id = 'settings-nwws-badge';
+  nwwsLabelWrap.appendChild(nwwsBadge);
+  nwwsLeft.appendChild(nwwsLabelWrap);
+  const nwwsArrow = _settingsEl('button', 'settings-disclosure-arrow', '›');
+  nwwsArrow.type = 'button';
+  const nwwsToggleLabel = _settingsEl('label', 'toggle');
+  const nwwsToggleInput = document.createElement('input');
+  nwwsToggleInput.type = 'checkbox';
+  nwwsToggleLabel.append(nwwsToggleInput, _settingsEl('span', 'toggle-track'));
+  nwwsHead.append(nwwsLeft, nwwsArrow, nwwsToggleLabel);
+
+  const nwwsBody = _settingsEl('div', 'settings-disclosure-body settings-nwws-body');
+  const nwwsUserRow = _settingsEl('div', 'settings-nwws-input-row');
+  nwwsUserRow.appendChild(_settingsEl('span', 'sp-row-label', 'Username'));
+  const nwwsUserInput = _settingsEl('input', 'settings-nwws-input');
+  nwwsUserInput.id = 'settings-nwws-username';
+  nwwsUserInput.type = 'text';
+  nwwsUserInput.placeholder = 'NWWS username';
+  nwwsUserInput.autocomplete = 'username';
+  nwwsUserRow.appendChild(nwwsUserInput);
+  const nwwsPassRow = _settingsEl('div', 'settings-nwws-input-row');
+  nwwsPassRow.appendChild(_settingsEl('span', 'sp-row-label', 'Password'));
+  const nwwsPassInput = _settingsEl('input', 'settings-nwws-input');
+  nwwsPassInput.id = 'settings-nwws-password';
+  nwwsPassInput.type = 'password';
+  nwwsPassInput.placeholder = 'NWWS password';
+  nwwsPassInput.autocomplete = 'current-password';
+  nwwsPassRow.appendChild(nwwsPassInput);
+  const nwwsSaveBtn = _settingsMakeButton('Save & Reconnect', () => {
+    nwwsUsername = _normalizeNwwsCredential(nwwsUserInput.value || '');
+    nwwsPassword = _normalizeNwwsCredential(nwwsPassInput.value || '');
+    saveSettings();
+    syncNwwsSettingsUi();
+    nwwsFatalStopInFlight = false;
+    setNwwsCredentialsStatus(_getNwwsBridgeCredentials().configured ? 'Saving and reconnecting...' : 'Missing credentials');
+    invoke('stop_nwws_bridge').catch(() => {}).finally(() => {
+      nwwsBridgeStartPromise = null;
+      nwwsLastStatusSig = '';
+      nwwsLastAlertsGeneratedAt = '';
+      _resetWarningNotificationPriming();
+      applyAlertSourceMode();
+    });
+  });
+  nwwsBody.append(nwwsUserRow, nwwsPassRow, nwwsSaveBtn);
+  nwwsBody.hidden = true;
+  nwwsDisclosure.append(nwwsHead, nwwsBody);
+
+  const nwwsSetOpen = open => {
+    nwwsDisclosure.classList.toggle('open', open);
+    nwwsArrow.setAttribute('aria-expanded', open ? 'true' : 'false');
+    nwwsBody.hidden = !open;
+  };
+  nwwsArrow.addEventListener('click', e => { e.stopPropagation(); nwwsSetOpen(!nwwsDisclosure.classList.contains('open')); });
+  nwwsHead.addEventListener('click', e => {
+    if (e.target.closest('.toggle') || e.target.closest('.settings-disclosure-arrow')) return;
+    nwwsSetOpen(!nwwsDisclosure.classList.contains('open'));
+  });
+  const nwwsToggleSync = () => { nwwsToggleInput.checked = !!nwwsEnabled; };
+  settingsLiveSyncers.push(nwwsToggleSync);
+  nwwsToggleSync();
+  nwwsToggleInput.addEventListener('change', () => {
+    _settingsSetControl('toggle-nwws-alerts', nwwsToggleInput.checked);
+  });
+  mapCard.body.appendChild(nwwsDisclosure);
+
+  mapCard.body.append(
+    _settingsMakeButton('Delete Radar Data Cache', () => void clearAppCaches()),
+    _settingsMakeButton('Show Cache Details', () => {
+      setAppCacheDetailsOpen(true);
+      void refreshAppCacheStats();
+    }),
+    _settingsMakeButton('Check App Updates', () => void checkForAppUpdate({ openModalOnAvailable: true, manual: true })),
+  );
+  mapPage.appendChild(mapCard.card);
+  pagesWrap.appendChild(mapPage);
+
+  const colorPage = _settingsEl('div', 'settings-page settings-page-grid');
+  colorPage.dataset.settingsPage = 'colortables';
+  colorPage.hidden = true;
+  const colorCard = _settingsMakeCard('Color Tables', 'Radar palette assignments by product family.', 'general', { full: true, padded: true });
+  CT_FAMILIES.forEach(family => {
+    const row = _settingsEl('div', 'sp-row settings-live-row');
+    row.appendChild(_settingsEl('span', 'sp-row-label', family));
+    const right = _settingsEl('div', 'sp-row-right');
+    const select = _settingsEl('select', 'ct-select');
+    const preview = _settingsEl('div', 'ct-preview');
+    preview.style.width = '90px';
+    preview.style.height = '18px';
+    preview.style.border = '1px solid #222';
+    preview.style.borderRadius = '3px';
+    const upload = _settingsMakeButton('Upload .pal', () => {
+      ctPendingFamily = family;
+      document.getElementById('ct-file-input')?.click();
+    });
+    const del = _settingsMakeButton('Delete', () => {
+      const store = ctStore(family);
+      if (store.active !== 'Default') {
+        delete store.tables[store.active];
+        store.active = 'Default';
+        ctSave(family, store);
+        frameCache.clear();
+        ctRefreshCurrentFrame();
+        syncSettingsLayerUi();
+      }
+    });
+    right.append(select, preview, upload, del);
+    row.appendChild(right);
+    const sync = () => {
+      const store = ctStore(family);
+      select.innerHTML = '<option value="Default">Default</option>';
+      Object.keys(store.tables || {}).forEach(name => {
+        const opt = document.createElement('option');
+        opt.value = name;
+        opt.textContent = name;
+        select.appendChild(opt);
+      });
+      select.value = store.active || 'Default';
+      preview.style.background = buildGradientStyle(ctGetEffectivePalette(family), family);
+      del.hidden = select.value === 'Default';
+    };
+    settingsLiveSyncers.push(sync);
+    sync();
+    select.addEventListener('change', () => {
+      const store = ctStore(family);
+      store.active = select.value;
+      ctSave(family, store);
+      frameCache.clear();
+      ctRefreshCurrentFrame();
+      syncSettingsLayerUi();
+    });
+    colorCard.body.appendChild(row);
+  });
+  colorPage.appendChild(colorCard.card);
+  pagesWrap.appendChild(colorPage);
+
+  const advancedPage = _settingsEl('div', 'settings-page settings-page-grid');
+  advancedPage.dataset.settingsPage = 'others';
+  advancedPage.hidden = true;
+  const advancedCard = _settingsMakeCard('Others', 'Extra tools and panels.', 'general', { full: true, padded: true });
+  advancedCard.body.append(
+    _settingsMakeButton('Open YouTube Embed Panel', () => void openYouTubeEmbedPanel(youtubeEmbedDraft || youtubeEmbedInput?.value || '')),
+  );
+  advancedPage.appendChild(advancedCard.card);
+  pagesWrap.appendChild(advancedPage);
+
+  const customizationPage = _settingsEl('div', 'settings-page settings-page-grid');
+  customizationPage.dataset.settingsPage = 'customization';
+  customizationPage.hidden = true;
+  const customizationCard = _settingsMakeCard('Warning Customization', 'Colors, visibility, and notifications for each warning type.', 'general', { full: true });
+  const settingsWarningList = _settingsEl('div', 'settings-warning-customization-list');
+  settingsWarningList.id = 'settings-warning-customization-list';
+  customizationCard.body.appendChild(settingsWarningList);
+  customizationPage.appendChild(customizationCard.card);
+  pagesWrap.appendChild(customizationPage);
+
+  SETTINGS_SECTIONS.forEach(section => {
+    const group = _settingsEl('div', `settings-sidebar-group${section.id === 'radar' ? ' open' : ''}`);
+    group.dataset.settingsSection = section.id;
+    const btn = _settingsEl('button', `settings-nav-item${section.id === 'radar' ? ' active' : ''}`);
+    btn.type = 'button';
+    btn.dataset.settingsSection = section.id;
+    btn.textContent = section.label;
+    btn.addEventListener('click', () => {
+      const firstPage = section.pages[0]?.id || 'radar';
+      _settingsSetPage(firstPage, section.id);
+    });
+    group.appendChild(btn);
+    sidebar.appendChild(group);
+  });
+
+  content.append(head, tabs, pagesWrap);
+  shell.append(sidebar, content);
+
+  const footer = _settingsEl('div', 'settings-footer', 'Changes apply immediately.');
+  settingsBody.replaceChildren(shell, legacyPool);
+  settingsModal?.appendChild(footer);
+  const ctInput = document.getElementById('ct-file-input');
+  if (ctInput) settingsBody.appendChild(ctInput);
+  settingsBody.addEventListener('change', event => {
+    if (settingsApplyingPreset) return;
+    if (!event.target?.matches?.('input[type="checkbox"]')) return;
+    if (!event.target.closest?.('.layer-card')) return;
+    settingsActivePreset = 'custom';
+    requestAnimationFrame(syncSettingsLayerUi);
+  });
+  _settingsSetPage('radar');
+  syncSettingsLayerUi();
+}
+
+const SETTINGS_WINDOW_DEFAULT_POS = { left: 72, top: 64 };
+let settingsWindowDrag = null;
+let settingsWindowResize = null;
+
+function _clampSettingsWindowPosition(left, top) {
+  if (!settingsModal) return { left, top };
+  const rect = settingsModal.getBoundingClientRect();
+  const margin = 8;
+  const maxLeft = Math.max(margin, window.innerWidth - rect.width - margin);
+  const maxTop = Math.max(margin, window.innerHeight - rect.height - margin);
+  return {
+    left: Math.max(margin, Math.min(left, maxLeft)),
+    top: Math.max(margin, Math.min(top, maxTop)),
+  };
+}
+
+function _setSettingsWindowPosition(left, top) {
+  if (!settingsModal) return;
+  const pos = _clampSettingsWindowPosition(left, top);
+  settingsModal.style.left = `${Math.round(pos.left)}px`;
+  settingsModal.style.top = `${Math.round(pos.top)}px`;
+}
+
+function _settingsWindowBounds() {
+  const margin = 8;
+  return {
+    margin,
+    minWidth: Math.min(420, Math.max(300, window.innerWidth - margin * 2)),
+    minHeight: Math.min(360, Math.max(260, window.innerHeight - margin * 2)),
+    maxWidth: Math.max(300, window.innerWidth - margin * 2),
+    maxHeight: Math.max(260, window.innerHeight - margin * 2),
+  };
+}
+
+function _setSettingsWindowRect(left, top, width, height) {
+  if (!settingsModal) return;
+  const bounds = _settingsWindowBounds();
+  let nextWidth = Math.max(bounds.minWidth, Math.min(bounds.maxWidth, Number(width) || bounds.minWidth));
+  let nextHeight = Math.max(bounds.minHeight, Math.min(bounds.maxHeight, Number(height) || bounds.minHeight));
+  let nextLeft = Number(left) || bounds.margin;
+  let nextTop = Number(top) || bounds.margin;
+
+  if (nextLeft < bounds.margin) {
+    nextWidth -= bounds.margin - nextLeft;
+    nextLeft = bounds.margin;
+  }
+  if (nextTop < bounds.margin) {
+    nextHeight -= bounds.margin - nextTop;
+    nextTop = bounds.margin;
+  }
+  if (nextLeft + nextWidth > window.innerWidth - bounds.margin) {
+    nextWidth = window.innerWidth - bounds.margin - nextLeft;
+  }
+  if (nextTop + nextHeight > window.innerHeight - bounds.margin) {
+    nextHeight = window.innerHeight - bounds.margin - nextTop;
+  }
+
+  nextWidth = Math.max(bounds.minWidth, Math.min(bounds.maxWidth, nextWidth));
+  nextHeight = Math.max(bounds.minHeight, Math.min(bounds.maxHeight, nextHeight));
+  nextLeft = Math.max(bounds.margin, Math.min(window.innerWidth - nextWidth - bounds.margin, nextLeft));
+  nextTop = Math.max(bounds.margin, Math.min(window.innerHeight - nextHeight - bounds.margin, nextTop));
+
+  settingsModal.style.left = `${Math.round(nextLeft)}px`;
+  settingsModal.style.top = `${Math.round(nextTop)}px`;
+  settingsModal.style.width = `${Math.round(nextWidth)}px`;
+  settingsModal.style.height = `${Math.round(nextHeight)}px`;
+}
+
+function _ensureSettingsWindowInViewport() {
+  if (!settingsModal) return;
+  const rect = settingsModal.getBoundingClientRect();
+  const hasInlinePosition = !!(settingsModal.style.left && settingsModal.style.top);
+  const left = hasInlinePosition ? rect.left : SETTINGS_WINDOW_DEFAULT_POS.left;
+  const top = hasInlinePosition ? rect.top : SETTINGS_WINDOW_DEFAULT_POS.top;
+  if (settingsModal.style.width || settingsModal.style.height) {
+    _setSettingsWindowRect(left, top, rect.width, rect.height);
+  } else {
+    _setSettingsWindowPosition(left, top);
+  }
+}
+
+function _bindSettingsWindowDrag() {
+  if (!settingsModal || !settingsModalHeader) return;
+
+  settingsModalHeader.addEventListener('pointerdown', event => {
+    if (event.button != null && event.button !== 0) return;
+    if (event.target?.closest?.('button, input, select, textarea, a')) return;
+    const rect = settingsModal.getBoundingClientRect();
+    settingsWindowDrag = {
+      pointerId: event.pointerId,
+      startX: event.clientX,
+      startY: event.clientY,
+      left: rect.left,
+      top: rect.top,
+    };
+    settingsModal.classList.add('dragging');
+    settingsModalHeader.setPointerCapture?.(event.pointerId);
+    event.preventDefault();
+  });
+
+  settingsModalHeader.addEventListener('pointermove', event => {
+    if (!settingsWindowDrag || settingsWindowDrag.pointerId !== event.pointerId) return;
+    _setSettingsWindowPosition(
+      settingsWindowDrag.left + event.clientX - settingsWindowDrag.startX,
+      settingsWindowDrag.top + event.clientY - settingsWindowDrag.startY,
+    );
+  });
+
+  const endDrag = event => {
+    if (!settingsWindowDrag || settingsWindowDrag.pointerId !== event.pointerId) return;
+    settingsModal.classList.remove('dragging');
+    settingsModalHeader.releasePointerCapture?.(event.pointerId);
+    settingsWindowDrag = null;
+  };
+
+  settingsModalHeader.addEventListener('pointerup', endDrag);
+  settingsModalHeader.addEventListener('pointercancel', endDrag);
+  window.addEventListener('resize', _ensureSettingsWindowInViewport);
+}
+
+function _ensureSettingsResizeHandles() {
+  if (!settingsModal || settingsModal.dataset.resizeHandles === 'true') return;
+  ['nw', 'ne', 'sw', 'se'].forEach(corner => {
+    const handle = document.createElement('div');
+    handle.className = `settings-resize-handle ${corner}`;
+    handle.dataset.resizeCorner = corner;
+    handle.setAttribute('aria-hidden', 'true');
+    settingsModal.appendChild(handle);
+  });
+  settingsModal.dataset.resizeHandles = 'true';
+}
+
+function _bindSettingsWindowResize() {
+  if (!settingsModal) return;
+  _ensureSettingsResizeHandles();
+
+  settingsModal.querySelectorAll('.settings-resize-handle').forEach(handle => {
+    handle.addEventListener('pointerdown', event => {
+      if (event.button != null && event.button !== 0) return;
+      const corner = handle.dataset.resizeCorner || 'se';
+      const rect = settingsModal.getBoundingClientRect();
+      settingsWindowResize = {
+        pointerId: event.pointerId,
+        corner,
+        startX: event.clientX,
+        startY: event.clientY,
+        left: rect.left,
+        top: rect.top,
+        width: rect.width,
+        height: rect.height,
+      };
+      settingsModal.classList.add('resizing');
+      handle.setPointerCapture?.(event.pointerId);
+      event.preventDefault();
+      event.stopPropagation();
+    });
+
+    handle.addEventListener('pointermove', event => {
+      if (!settingsWindowResize || settingsWindowResize.pointerId !== event.pointerId) return;
+      const dx = event.clientX - settingsWindowResize.startX;
+      const dy = event.clientY - settingsWindowResize.startY;
+      const fromLeft = settingsWindowResize.corner.includes('w');
+      const fromTop = settingsWindowResize.corner.includes('n');
+      const nextLeft = fromLeft ? settingsWindowResize.left + dx : settingsWindowResize.left;
+      const nextTop = fromTop ? settingsWindowResize.top + dy : settingsWindowResize.top;
+      const nextWidth = fromLeft ? settingsWindowResize.width - dx : settingsWindowResize.width + dx;
+      const nextHeight = fromTop ? settingsWindowResize.height - dy : settingsWindowResize.height + dy;
+      _setSettingsWindowRect(nextLeft, nextTop, nextWidth, nextHeight);
+    });
+
+    const endResize = event => {
+      if (!settingsWindowResize || settingsWindowResize.pointerId !== event.pointerId) return;
+      settingsModal.classList.remove('resizing');
+      handle.releasePointerCapture?.(event.pointerId);
+      settingsWindowResize = null;
+    };
+    handle.addEventListener('pointerup', endResize);
+    handle.addEventListener('pointercancel', endResize);
+  });
+}
+
+_bindSettingsWindowDrag();
+_bindSettingsWindowResize();
+
 function setSettingsOpen(open) {
-  settingsOverlay?.classList.toggle('open', open);
-  settingsBtn?.classList.toggle('open', open);
-  if (open) {
+  const next = !!open;
+  settingsOverlay?.classList.toggle('open', next);
+  settingsOverlay?.setAttribute('aria-hidden', next ? 'false' : 'true');
+  settingsBtn?.classList.toggle('open', next);
+  settingsBtn?.setAttribute('aria-expanded', next ? 'true' : 'false');
+  if (!next) {
+    settingsWindowDrag = null;
+    settingsWindowResize = null;
+    settingsModal?.classList.remove('dragging');
+    settingsModal?.classList.remove('resizing');
+    settingsModalHeader?.blur?.();
+    settingsBtn?.blur?.();
+    return;
+  }
+  if (next) {
+    requestAnimationFrame(_ensureSettingsWindowInViewport);
     _setCitySearchOpen(false);
+    _settingsSetPage(settingsActivePage || 'radar');
+    syncSettingsLayerUi();
     syncSpcFilterUi();
     syncMesoFilterUi();
     syncStormFilterUi();
@@ -17072,10 +19034,14 @@ if (citySearchInput) {
 }
 
 settingsOverlay?.addEventListener('click', e => {
-  if (e.target === settingsOverlay) setSettingsOpen(false);
+  if (e.target === settingsOverlay) e.stopPropagation();
 });
 
 document.getElementById('settings-close')?.addEventListener('click', () => setSettingsOpen(false));
+
+document.addEventListener('keydown', e => {
+  if (e.key === 'Escape' && settingsOverlay?.classList.contains('open')) setSettingsOpen(false);
+});
 
 SETTINGS_GROUP_IDS.forEach(groupId => {
   document.getElementById(`settings-group-${groupId}-btn`)?.addEventListener('click', e => {
@@ -17096,6 +19062,100 @@ function _setDbzFilter(next, { apply = true, persist = true } = {}) {
   if (persist) saveSettings();
 }
 
+function _setRadarDataSmoothing(next, { persist = true } = {}) {
+  const enabled = !!next;
+  if (radarDataSmoothing === enabled) return;
+  radarDataSmoothing = enabled;
+  if (persist) saveSettings();
+  _scheduleRadarDataSmoothingRebuild(0);
+  syncSettingsLayerUi();
+}
+
+function _setRadarDataSmoothingStrength(next, { persist = true } = {}) {
+  const numeric = Number(next);
+  radarDataSmoothingStrength = Number.isFinite(numeric)
+    ? Math.max(0, Math.min(1, numeric))
+    : 0.65;
+  if (persist) saveSettings();
+  _scheduleRadarDataSmoothingRebuild();
+  syncSettingsLayerUi();
+}
+
+function _setLiveSweepEnabled(next, { persist = true } = {}) {
+  liveSweepEnabled = !!next;
+  const tog = document.getElementById('toggle-sweep');
+  if (tog && tog.checked !== liveSweepEnabled) tog.checked = liveSweepEnabled;
+  if (!liveSweepEnabled) {
+    cancelSweep(true);
+    _cancelAllPaneSweeps(true);
+  }
+  if (persist) saveSettings();
+  syncSettingsLayerUi();
+}
+
+function _setLiveSweepColor(next, { persist = true } = {}) {
+  liveSweepColor = _normalizeLiveSweepColor(next);
+  _overlayMaps().forEach(m => {
+    try { m.triggerRepaint(); } catch (_) {}
+  });
+  if (persist) saveSettings();
+}
+
+function _setLiveSweepSpeedSeconds(next, { persist = true } = {}) {
+  const seconds = Number(next);
+  liveSweepRevMs = _normalizeLiveSweepRevMs((Number.isFinite(seconds) ? seconds : 18) * 1000);
+  if (persist) saveSettings();
+}
+
+function _setRadarSitesVisible(next, { persist = true } = {}) {
+  radarSitesVisible = !!next;
+  if (toggleRadarSites && toggleRadarSites.checked !== radarSitesVisible) toggleRadarSites.checked = radarSitesVisible;
+  setStationLayersVisible(radarSitesVisible);
+  if (persist) saveSettings();
+  syncSettingsLayerUi();
+}
+
+function _setRadarSitePillMode(next, { persist = true } = {}) {
+  radarSitePillMode = !!next;
+  if (toggleRadarSitesPill && toggleRadarSitesPill.checked !== radarSitePillMode) toggleRadarSitesPill.checked = radarSitePillMode;
+  _clearStationsHoverFilter();
+  _refreshStationSourceData();
+  syncRadarSiteSettingsUi();
+  if (persist) saveSettings();
+  syncSettingsLayerUi();
+}
+
+function _setRadarSitesWsrColor(next, { persist = true } = {}) {
+  radarSitesWsrColor = _normalizeRadarSiteColor(next, RADAR_SITE_DEFAULT_WSR_COLOR);
+  if (radarSitesWsrColorInput && radarSitesWsrColorInput.value !== radarSitesWsrColor) radarSitesWsrColorInput.value = radarSitesWsrColor;
+  _refreshStationSourceData();
+  if (persist) saveSettings();
+}
+
+function _setRadarSitesTerminalColor(next, { persist = true } = {}) {
+  radarSitesTerminalColor = _normalizeRadarSiteColor(next, RADAR_SITE_DEFAULT_TERMINAL_COLOR);
+  if (radarSitesTerminalColorInput && radarSitesTerminalColorInput.value !== radarSitesTerminalColor) radarSitesTerminalColorInput.value = radarSitesTerminalColor;
+  _refreshStationSourceData();
+  if (persist) saveSettings();
+}
+
+function resetRadarSiteAppearanceDefaults() {
+  _setRadarSitesVisible(true, { persist: false });
+  _setRadarSitePillMode(false, { persist: false });
+  _setRadarSitesWsrColor(RADAR_SITE_DEFAULT_WSR_COLOR, { persist: false });
+  _setRadarSitesTerminalColor(RADAR_SITE_DEFAULT_TERMINAL_COLOR, { persist: false });
+  saveSettings();
+  syncSettingsLayerUi();
+}
+
+function resetLiveSweepAppearanceDefaults() {
+  _setLiveSweepEnabled(false, { persist: false });
+  _setLiveSweepColor(LIVE_SWEEP_DEFAULT_COLOR, { persist: false });
+  _setLiveSweepSpeedSeconds(LIVE_SWEEP_DEFAULT_REV_MS / 1000, { persist: false });
+  saveSettings();
+  syncSettingsLayerUi();
+}
+
 if (dbzSlider) {
   dbzSlider.addEventListener('input', () => {
     _setDbzFilter(dbzSlider.value);
@@ -17113,12 +19173,7 @@ dbzNumberInput?.addEventListener('change', () => {
 const toggleSweep = document.getElementById('toggle-sweep');
 if (toggleSweep) {
   toggleSweep.addEventListener('change', () => {
-    liveSweepEnabled = toggleSweep.checked;
-    if (!liveSweepEnabled) {
-      cancelSweep(true);
-      _cancelAllPaneSweeps(true);
-    }
-    saveSettings();
+    _setLiveSweepEnabled(toggleSweep.checked);
   });
 }
 
@@ -17315,9 +19370,9 @@ function _setWarningGlobalVolume(next, opts = {}) {
   if (opts?.persist !== false) saveSettings();
 }
 
-function syncWarningPrefsUi() {
-  if (!warningSettingsList) return;
-  warningSettingsList.innerHTML = '';
+function renderWarningPrefsInto(container) {
+  if (!container) return;
+  container.innerHTML = '';
   const categorySections = [];
   let activeCategorySection = null;
 
@@ -17429,7 +19484,7 @@ function syncWarningPrefsUi() {
   volumeRow.appendChild(volumeTitleWrap);
   volumeRow.appendChild(volumeControl.wrap);
   volumeCard.appendChild(volumeRow);
-  warningSettingsList.appendChild(volumeCard);
+  container.appendChild(volumeCard);
 
   const searchWrap = document.createElement('div');
   searchWrap.className = 'warning-pref-search';
@@ -17441,7 +19496,7 @@ function syncWarningPrefsUi() {
   searchInput.setAttribute('autocomplete', 'off');
   searchInput.setAttribute('spellcheck', 'false');
   searchWrap.appendChild(searchInput);
-  warningSettingsList.appendChild(searchWrap);
+  container.appendChild(searchWrap);
 
   const applySearchFilter = (query = '') => {
     const q = String(query || '').trim().toLowerCase();
@@ -17458,10 +19513,11 @@ function syncWarningPrefsUi() {
   };
   searchInput.addEventListener('input', () => applySearchFilter(searchInput.value));
 
-  // Group config items by category, preserving within-group order
+  // Group config items by category, preserving within-group order (warnings only)
   const _prefGroups = {};
   for (const cat of _PREF_CATEGORY_ORDER) _prefGroups[cat] = [];
   for (const meta of WARNING_PREF_CONFIG) {
+    if (!_WARNING_ONLY_IDS.has(meta.id)) continue;
     const cat = _warningCategory(meta.id);
     (_prefGroups[cat] || _prefGroups['other']).push(meta);
   }
@@ -17479,7 +19535,7 @@ function syncWarningPrefsUi() {
       const header = document.createElement('div');
       header.className = 'warning-pref-category-header';
       header.textContent = _PREF_CATEGORY_LABELS[item.cat] || item.cat;
-      warningSettingsList.appendChild(header);
+      container.appendChild(header);
       activeCategorySection = { header, entries: [] };
       categorySections.push(activeCategorySection);
       continue;
@@ -17720,9 +19776,14 @@ function syncWarningPrefsUi() {
 
     entry.appendChild(summary);
     entry.appendChild(details);
-    warningSettingsList.appendChild(entry);
+    container.appendChild(entry);
   }
   applySearchFilter(searchInput.value);
+}
+
+function syncWarningPrefsUi() {
+  renderWarningPrefsInto(warningSettingsList);
+  renderWarningPrefsInto(document.getElementById('settings-warning-customization-list'));
 }
 
 if (cameraFilterBtn) {
@@ -18253,6 +20314,13 @@ function setNwwsCredentialsStatus(text = '', isError = false) {
     el.classList.toggle('error', !!next && isError);
     el.classList.toggle('success', !!next && !isError);
   });
+  const badge = document.getElementById('settings-nwws-badge');
+  if (badge) {
+    const isConnected = next.toLowerCase().includes('connected') && !isError;
+    badge.textContent = isConnected ? 'Connected' : (next || 'Not configured');
+    badge.classList.toggle('connected', isConnected);
+    badge.classList.toggle('error', isError);
+  }
 }
 
 function syncNwwsSettingsUi() {
@@ -18265,6 +20333,10 @@ function syncNwwsSettingsUi() {
   if (nwwsPasswordInput && nwwsPasswordInput.value !== nwwsPassword) {
     nwwsPasswordInput.value = nwwsPassword || '';
   }
+  const settingsUserInput = document.getElementById('settings-nwws-username');
+  const settingsPassInput = document.getElementById('settings-nwws-password');
+  if (settingsUserInput && settingsUserInput.value !== nwwsUsername) settingsUserInput.value = nwwsUsername || '';
+  if (settingsPassInput && settingsPassInput.value !== nwwsPassword) settingsPassInput.value = nwwsPassword || '';
   if (toggleNwwsAlerts) toggleNwwsAlerts.checked = nwwsEnabled;
   if (toggleNwsApiAlerts) {
     toggleNwsApiAlerts.checked = useNwws ? true : nwsApiEnabled;
@@ -18579,43 +20651,31 @@ if (toggleTvs) {
 
 if (toggleRadarSites) {
   toggleRadarSites.addEventListener('change', () => {
-    radarSitesVisible = Boolean(toggleRadarSites.checked);
-    setStationLayersVisible(radarSitesVisible);
-    saveSettings();
+    _setRadarSitesVisible(toggleRadarSites.checked);
   });
 }
 
 if (toggleRadarSitesPill) {
   toggleRadarSitesPill.addEventListener('change', () => {
-    radarSitePillMode = Boolean(toggleRadarSitesPill.checked);
-    _clearStationsHoverFilter();
-    _refreshStationSourceData();
-    syncRadarSiteSettingsUi();
-    saveSettings();
+    _setRadarSitePillMode(toggleRadarSitesPill.checked);
   });
 }
 
 if (radarSitesWsrColorInput) {
   radarSitesWsrColorInput.addEventListener('input', () => {
-    radarSitesWsrColor = _normalizeRadarSiteColor(radarSitesWsrColorInput.value, RADAR_SITE_DEFAULT_WSR_COLOR);
-    _refreshStationSourceData();
+    _setRadarSitesWsrColor(radarSitesWsrColorInput.value, { persist: false });
   });
   radarSitesWsrColorInput.addEventListener('change', () => {
-    radarSitesWsrColor = _normalizeRadarSiteColor(radarSitesWsrColorInput.value, RADAR_SITE_DEFAULT_WSR_COLOR);
-    _refreshStationSourceData();
-    saveSettings();
+    _setRadarSitesWsrColor(radarSitesWsrColorInput.value);
   });
 }
 
 if (radarSitesTerminalColorInput) {
   radarSitesTerminalColorInput.addEventListener('input', () => {
-    radarSitesTerminalColor = _normalizeRadarSiteColor(radarSitesTerminalColorInput.value, RADAR_SITE_DEFAULT_TERMINAL_COLOR);
-    _refreshStationSourceData();
+    _setRadarSitesTerminalColor(radarSitesTerminalColorInput.value, { persist: false });
   });
   radarSitesTerminalColorInput.addEventListener('change', () => {
-    radarSitesTerminalColor = _normalizeRadarSiteColor(radarSitesTerminalColorInput.value, RADAR_SITE_DEFAULT_TERMINAL_COLOR);
-    _refreshStationSourceData();
-    saveSettings();
+    _setRadarSitesTerminalColor(radarSitesTerminalColorInput.value);
   });
 }
 
@@ -24456,10 +26516,14 @@ window.addEventListener('mouseup', () => { floatingPanelPointerState = null; }, 
 function saveSettings() {
   try {
     stormReportsVisible = stormReportsLsrVisible || stormReportsSpotterVisible;
-    localStorage.setItem('radar_settings', JSON.stringify({
+    const nextSettings = {
       dataLevel: 'L3',
       dbzFilter,
+      radarDataSmoothing,
+      radarDataSmoothingStrength,
       liveSweepEnabled,
+      liveSweepColor,
+      liveSweepRevMs,
       mapStyle,
       spcDay,
       spcType,
@@ -24496,7 +26560,8 @@ function saveSettings() {
       nwwsEnabled,
       nwwsUsername,
       nwwsPassword,
-    }));
+    };
+    localStorage.setItem('radar_settings', JSON.stringify(nextSettings));
   } catch (_) {}
 }
 
@@ -24515,11 +26580,21 @@ function loadSettings() {
     if (s.dbzFilter != null) {
       _setDbzFilter(s.dbzFilter, { apply: false, persist: false });
     }
+    if (s.radarDataSmoothing != null) {
+      radarDataSmoothing = Boolean(s.radarDataSmoothing);
+    }
+    if (s.radarDataSmoothingStrength != null) {
+      const strength = Number(s.radarDataSmoothingStrength);
+      if (Number.isFinite(strength)) radarDataSmoothingStrength = Math.max(0, Math.min(1, strength));
+    }
     if (s.liveSweepEnabled != null) {
       liveSweepEnabled = Boolean(s.liveSweepEnabled);
       const tog = document.getElementById('toggle-sweep');
       if (tog) tog.checked = liveSweepEnabled;
     }
+    liveSweepColor = _normalizeLiveSweepColor(s.liveSweepColor);
+    if (s.liveSweepRevMs != null) liveSweepRevMs = _normalizeLiveSweepRevMs(s.liveSweepRevMs);
+    else if (s.liveSweepSpeedSeconds != null) liveSweepRevMs = _normalizeLiveSweepRevMs(Number(s.liveSweepSpeedSeconds) * 1000);
     if (typeof s.spcDay === 'string' && SPC_OUTLOOK_SOURCES[s.spcDay]) {
       spcDay = s.spcDay;
     }
@@ -25227,7 +27302,9 @@ document.getElementById('ct-file-input')?.addEventListener('change', async e => 
 });
 
 // -- Load persisted settings on startup ---------------------------------------
+_initSettingsRedesign();
 loadSettings();
+syncSettingsLayerUi();
 syncDataLevelAvailability();
 syncAppUpdateUi();
 setTimeout(() => {
@@ -25740,17 +27817,17 @@ async function pollActiveL2Latest(stationId) {
 
     if (frameCache.has(latestKey)) {
       _setL2HistoryEntries(ck, entries, latestKey);
-      if (liveSweepEnabled && prevKey && !sweepActive) {
+      if (_canLiveSweepNow(ck, latestKey) && prevKey) {
         const cachedData = frameCache.get(latestKey);
-        if (cachedData) beginSweepReveal(cachedData, latestKey);
+        if (cachedData) beginSweepReveal(cachedData, latestKey, ck);
         else showFrame(latestKey);
-      } else if (!sweepActive) {
+      } else if (_isViewingLiveLatest(ck) && !sweepActive) {
         showFrame(latestKey);
       }
       return;
     }
 
-    if (liveSweepEnabled && prevKey) {
+    if (_canStartIncomingSweep(ck, latestKey) && prevKey) {
       sweepPendingKey = latestKey;
     }
     _setL2HistoryEntries(ck, entries, prevKey || latestKey);

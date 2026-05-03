@@ -3,7 +3,7 @@ use std::fs;
 use std::io::{BufRead, BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -23,6 +23,7 @@ const BACKEND_EXE_NAME: &str = if cfg!(target_os = "windows") {
     "radar_backend"
 };
 const S3_LEVEL3_LIST_URL: &str = "https://unidata-nexrad-level3.s3.amazonaws.com/";
+const WISE_PROCESSED_BASE_URL: &str = "https://data2.weatherwise.app/radar/processed";
 const TGFTP_LEVEL3_BASE_URL: &str = "https://tgftp.nws.noaa.gov/SL.us008001/DF.of/DC.radar";
 const KANDRIVE_GRAPHQL_URL: &str = "https://www.kandrive.gov/api/graphql";
 const APP_UPDATE_GITHUB_OWNER: &str = "anony121221";
@@ -35,11 +36,36 @@ const DECODE_CACHE_MAX_BYTES: u64 = 768 * 1024 * 1024;
 const DECODE_CACHE_MAX_AGE_SECS: u64 = 3 * 24 * 60 * 60;
 const DECODE_CACHE_CLEANUP_INTERVAL_WRITES: usize = 8;
 static DECODE_CACHE_WRITE_COUNT: AtomicUsize = AtomicUsize::new(0);
+static WISE_DIR_LIST_CACHE: OnceLock<Mutex<HashMap<WiseDirListCacheKey, WiseDirListCacheEntry>>> =
+    OnceLock::new();
 
 struct BackendInner {
     stdin: BufWriter<ChildStdin>,
     stdout: BufReader<ChildStdout>,
     _child: Child,
+}
+
+#[derive(Clone, Hash, PartialEq, Eq)]
+struct WiseDirListCacheKey {
+    station: String,
+    family: String,
+    tilt: String,
+}
+
+#[derive(Clone)]
+struct WiseDirListCacheEntry {
+    files: Vec<String>,
+    folder: String,
+    fetched_at: Instant,
+}
+
+#[derive(serde::Serialize)]
+struct WiseListFramesResponse {
+    frames: Vec<String>,
+    folder: String,
+    station: String,
+    family: String,
+    tilt: String,
 }
 
 enum BackendState {
@@ -94,6 +120,66 @@ fn stop_nwws_bridge_process_for_app(app: &AppHandle) {
     if let Some(state) = app.try_state::<NwwsBridgeState>() {
         stop_nwws_bridge_process(&state.child);
     }
+}
+
+#[cfg(target_os = "windows")]
+fn collect_nwws_bridge_process_pids() -> Vec<u32> {
+    let mut command = Command::new("powershell");
+    command
+        .args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            "$ErrorActionPreference='SilentlyContinue'; Get-CimInstance Win32_Process | Where-Object { $_.Name -eq 'node.exe' -and $_.CommandLine -like '*nwws-bridge.cjs*' } | Select-Object -ExpandProperty ProcessId",
+        ])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    command.creation_flags(CREATE_NO_WINDOW);
+
+    let Ok(output) = command.output() else {
+        return Vec::new();
+    };
+    if !output.status.success() {
+        return Vec::new();
+    }
+
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(|line| line.trim().parse::<u32>().ok())
+        .collect()
+}
+
+#[cfg(not(target_os = "windows"))]
+fn collect_nwws_bridge_process_pids() -> Vec<u32> {
+    Vec::new()
+}
+
+#[cfg(target_os = "windows")]
+fn terminate_process_tree_by_pid(pid: u32) -> bool {
+    let mut command = Command::new("taskkill");
+    command
+        .args(["/PID", &pid.to_string(), "/T", "/F"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    command.creation_flags(CREATE_NO_WINDOW);
+    command.status().map(|status| status.success()).unwrap_or(false)
+}
+
+#[cfg(not(target_os = "windows"))]
+fn terminate_process_tree_by_pid(_pid: u32) -> bool {
+    false
+}
+
+fn kill_stale_nwws_bridge_processes() -> usize {
+    let mut killed = 0usize;
+    for pid in collect_nwws_bridge_process_pids() {
+        if terminate_process_tree_by_pid(pid) {
+            killed += 1;
+        }
+    }
+    killed
 }
 
 fn stop_backend_pool(pool: &Arc<Vec<Mutex<BackendState>>>) {
@@ -1876,15 +1962,15 @@ fn bundled_nwws_bridge_script_candidates(app: &AppHandle) -> Result<Vec<PathBuf>
 }
 
 fn resolve_nwws_bridge_script(app: &AppHandle) -> Result<PathBuf, String> {
+    let local = local_nwws_bridge_script_path();
+    if local.is_file() {
+        return Ok(local);
+    }
+
     for bundled in bundled_nwws_bridge_script_candidates(app)? {
         if bundled.is_file() {
             return Ok(bundled);
         }
-    }
-
-    let local = local_nwws_bridge_script_path();
-    if local.is_file() {
-        return Ok(local);
     }
 
     Err("NWWS bridge script was not found".into())
@@ -1997,6 +2083,17 @@ fn start_nwws_bridge(
         }
     }
 
+    let stale_killed = kill_stale_nwws_bridge_processes();
+    if stale_killed > 0 {
+        let _ = app.emit(
+            "nwws-log",
+            serde_json::json!({
+                "level": "warn",
+                "message": format!("Stopped {stale_killed} stale NWWS bridge process(es) before launch"),
+            }),
+        );
+    }
+
     let script = resolve_nwws_bridge_script(&app)?;
     let script_dir = script
         .parent()
@@ -2051,18 +2148,20 @@ fn start_nwws_bridge(
             "alertCount": 0
         }),
     );
-    let _ = app.emit(
-        "nwws-log",
-        serde_json::json!({
-            "level": "info",
-            "message": format!(
-                "NWWS bridge process launched (pid={}, script={}, dataDir={})",
-                child_pid,
-                script.display(),
-                data_dir.display()
-            ),
-        }),
-    );
+    if std::env::var("NWWS_DEBUG").ok().as_deref() == Some("1") {
+        let _ = app.emit(
+            "nwws-log",
+            serde_json::json!({
+                "level": "debug",
+                "message": format!(
+                    "[NWWS DEBUG] NWWS bridge process launched (pid={}, script={}, dataDir={})",
+                    child_pid,
+                    script.display(),
+                    data_dir.display()
+                ),
+            }),
+        );
+    }
 
     *guard = Some(child);
     Ok(())
@@ -2238,66 +2337,145 @@ async fn decode_wise_key(
     .map_err(|e| e.to_string())?
 }
 
+fn is_tdwr_station_id(station: &str) -> bool {
+    let s = station.trim().to_uppercase();
+    s.len() == 4 && s.starts_with('T')
+}
+
+fn wise_folder_name(station: &str, family: &str, tilt: &str) -> Option<String> {
+    let f = family.trim().to_uppercase();
+    if f == "DTA" {
+        return Some("DTA".into());
+    }
+    if f == "ET" || f == "EET" {
+        return Some("EET".into());
+    }
+    if is_tdwr_station_id(station) {
+        return match f.as_str() {
+            "REF" => Some("TZ0".into()),
+            "VEL" => Some("TV0".into()),
+            "PRT" => Some("PRT0".into()),
+            "REF-LR" => Some("TZL".into()),
+            _ => None,
+        };
+    }
+    let idx = match tilt.trim() {
+        "0.5" => 0,
+        "0.9" => 1,
+        "1.3" => 2,
+        "1.8" => 3,
+        "2.5" => 4,
+        "3.1" => 5,
+        _ => 0,
+    };
+    Some(format!("{f}{idx}"))
+}
+
+fn wise_dir_list_cache()
+-> &'static Mutex<HashMap<WiseDirListCacheKey, WiseDirListCacheEntry>> {
+    WISE_DIR_LIST_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn fetch_wise_dir_list_blocking(
+    station: &str,
+    family: &str,
+    tilt: &str,
+) -> Result<(Vec<String>, String), String> {
+    let folder = wise_folder_name(station, family, tilt)
+        .ok_or_else(|| format!("No folder for {station}/{family}/{tilt}"))?;
+    let base_url = format!("{WISE_PROCESSED_BASE_URL}/{station}/{folder}/dir.list");
+    let url = format!("{base_url}?_={}", unix_millis_now());
+    let resp = get_http_client()
+        .get(&url)
+        .header("Accept", "text/plain,application/octet-stream,*/*")
+        .header(reqwest::header::CACHE_CONTROL, "no-cache")
+        .header("Pragma", "no-cache")
+        .send()
+        .map_err(|err| format!("{err} (url={base_url})"))?;
+    let status = resp.status().as_u16();
+    if status >= 400 {
+        return Err(format!("HTTP {status} (url={base_url})"));
+    }
+    let bytes = resp.bytes().map_err(|err| err.to_string())?;
+    let mut text = String::from_utf8_lossy(&bytes).trim().to_string();
+    if !text.to_lowercase().contains(".wise") {
+        if let Ok(decoded) = B64.decode(text.as_bytes()) {
+            text = String::from_utf8_lossy(&decoded).trim().to_string();
+        }
+    }
+    let mut files: Vec<String> = text
+        .lines()
+        .map(str::trim)
+        .filter(|line| line.to_lowercase().ends_with(".wise"))
+        .map(str::to_string)
+        .collect();
+    files.sort();
+    Ok((files, folder))
+}
+
+fn unix_millis_now() -> u128 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis())
+        .unwrap_or(0)
+}
+
 #[tauri::command]
 async fn list_wise_frames(
-    state: tauri::State<'_, Backend>,
     station: String,
     family: String,
     tilt: Option<String>,
     max_frames: Option<u32>,
     mode: Option<String>,
-) -> Result<serde_json::Value, String> {
-    let pool = state.0.clone();
+) -> Result<WiseListFramesResponse, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        let mut guard = acquire_backend(&pool);
-
-        if let BackendState::Failed(prev_err) = &*guard {
-            match spawn_backend() {
-                Ok(inner) => *guard = BackendState::Ready(inner),
-                Err(new_err) => {
-                    return Err(format!(
-                        "Backend unavailable.\nPrevious error: {}\nRestart error: {}",
-                        prev_err, new_err
-                    ))
-                }
-            }
-        }
-
-        let inner = match &mut *guard {
-            BackendState::Ready(inner) => inner,
-            BackendState::Failed(err) => return Err(err.clone()),
+        let station = station.trim().to_uppercase();
+        let family = family.trim().to_uppercase();
+        let tilt = tilt.unwrap_or_else(|| "0.5".into());
+        let mode = mode.unwrap_or_else(|| "live".into()).to_lowercase();
+        let max_frames = max_frames.unwrap_or(20).clamp(1, 60) as usize;
+        let ttl = if mode == "manual" {
+            Duration::from_secs(20)
+        } else {
+            Duration::from_secs(5)
+        };
+        let key = WiseDirListCacheKey {
+            station: station.clone(),
+            family: family.clone(),
+            tilt: tilt.clone(),
         };
 
-        let req_obj = serde_json::json!({
-            "cmd": "list_wise",
-            "station": station,
-            "family": family,
-            "tilt": tilt.unwrap_or_else(|| "0.5".into()),
-            "max_frames": max_frames.unwrap_or(20),
-            "mode": mode.unwrap_or_else(|| "live".into()),
-        });
+        let cached = wise_dir_list_cache()
+            .lock()
+            .ok()
+            .and_then(|cache| cache.get(&key).cloned())
+            .filter(|entry| entry.fetched_at.elapsed() < ttl);
 
-        match request_backend(inner, req_obj.clone()) {
-            Ok(val) => Ok(val),
-            Err(first_err) => {
-                if !should_restart_backend(&first_err) {
-                    return Err(first_err);
-                }
-                let restarted = spawn_backend().map_err(|restart_err| {
-                    format!(
-                        "Backend request failed: {}\nBackend restart failed: {}",
-                        first_err, restart_err
-                    )
-                })?;
-                *inner = restarted;
-                request_backend(inner, req_obj).map_err(|retry_err| {
-                    format!(
-                        "Backend request failed: {}\nBackend restarted but retry failed: {}",
-                        first_err, retry_err
-                    )
-                })
+        let (files, folder) = if let Some(entry) = cached {
+            (entry.files, entry.folder)
+        } else {
+            let (files, folder) = fetch_wise_dir_list_blocking(&station, &family, &tilt)?;
+            if let Ok(mut cache) = wise_dir_list_cache().lock() {
+                cache.insert(
+                    key,
+                    WiseDirListCacheEntry {
+                        files: files.clone(),
+                        folder: folder.clone(),
+                        fetched_at: Instant::now(),
+                    },
+                );
             }
-        }
+            (files, folder)
+        };
+
+        let start = files.len().saturating_sub(max_frames);
+        Ok(WiseListFramesResponse {
+            frames: files[start..].to_vec(),
+            folder,
+            station,
+            family,
+            tilt,
+        })
     })
     .await
     .map_err(|e| e.to_string())?
@@ -2337,6 +2515,16 @@ struct FetchBase64Response {
     content_type: String,
     body_base64: String,
     final_url: String,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct WiseProbeResult {
+    status: u16,
+    exists: bool,
+    wise_magic: bool,
+    body_bytes: Option<Vec<u8>>,
+    error: Option<String>,
 }
 
 fn do_fetch(url: String, timeout_ms: Option<u64>) -> Result<FetchBase64Response, String> {
@@ -2522,6 +2710,15 @@ fn do_fetch_inner(url: String, depth: u8, timeout_ms: Option<u64>) -> Result<Fet
     } else if url.contains("511.idaho.gov") {
         // Idaho
         req = req.header("Origin", "https://511.idaho.gov").header("Referer", "https://511.idaho.gov/");
+    } else if url.contains("mapservices.weather.noaa.gov")
+        || url.contains("ftp.cpc.ncep.noaa.gov")
+        || url.contains("www.cpc.ncep.noaa.gov")
+    {
+        // NOAA outlook services occasionally send compressed responses that reqwest
+        // fails to decode reliably through the app path. Force identity transfer.
+        req = req
+            .header("Accept-Encoding", "identity")
+            .header("Referer", "https://www.weather.gov/");
     } else if url.contains("spc.noaa.gov") {
         // SPC outlook images and discussion pages require a browser-like Referer to avoid 403
         eprintln!("[spc] fetching: {}", url);
@@ -2636,6 +2833,69 @@ async fn fetch_url_base64(url: String, timeout_ms: Option<u64>) -> Result<FetchB
 //   Step 1: GET fl511.com/Camera/GetVideoUrl?imageId=<id>  → { token, sourceId, systemSourceId }
 //   Step 2: POST divas.cloud/.../GetSecureTokenUriBySourceId  → "?token=<hex>"
 //   Result: assemble final m3u8 URL from the divas.cloud channel URL + token
+
+#[tauri::command]
+async fn probe_wise_url(url: String, timeout_ms: Option<u64>) -> Result<WiseProbeResult, String> {
+    if !url.starts_with("http://") && !url.starts_with("https://") {
+        return Err("Only http/https URLs allowed".into());
+    }
+    tauri::async_runtime::spawn_blocking(move || {
+        let timeout = timeout_ms
+            .filter(|ms| *ms >= 100)
+            .map(Duration::from_millis)
+            .unwrap_or_else(|| Duration::from_millis(100));
+        let resp = match get_http_client()
+            .get(&url)
+            .timeout(timeout)
+            .header("Accept", "application/octet-stream,*/*")
+            .header(reqwest::header::CACHE_CONTROL, "no-cache")
+            .header("Pragma", "no-cache")
+            .header(reqwest::header::RANGE, "bytes=0-67")
+            .send()
+        {
+            Ok(resp) => resp,
+            Err(err) => {
+                return Ok(WiseProbeResult {
+                    status: 0,
+                    exists: false,
+                    wise_magic: false,
+                    body_bytes: None,
+                    error: Some(err.to_string()),
+                });
+            }
+        };
+        let status = resp.status().as_u16();
+        if status == 404 {
+            return Ok(WiseProbeResult {
+                status,
+                exists: false,
+                wise_magic: false,
+                body_bytes: None,
+                error: None,
+            });
+        }
+        if !(200..400).contains(&status) {
+            return Ok(WiseProbeResult {
+                status,
+                exists: false,
+                wise_magic: false,
+                body_bytes: None,
+                error: None,
+            });
+        }
+        let bytes = resp.bytes().map_err(|e| e.to_string())?.to_vec();
+        let wise_magic = bytes.len() >= 4 && &bytes[0..4] == b"WISE";
+        Ok(WiseProbeResult {
+            status,
+            exists: wise_magic,
+            wise_magic,
+            body_bytes: if status == 200 { Some(bytes) } else { None },
+            error: None,
+        })
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
 
 #[tauri::command]
 async fn fetch_url_bytes(url: String, timeout_ms: Option<u64>) -> Result<tauri::ipc::Response, String> {
@@ -3938,6 +4198,7 @@ pub fn run() {
             get_app_version,
             install_app_update,
             fetch_url_base64,
+            probe_wise_url,
             fetch_url_bytes,
             fetch_fl511_stream,
             fetch_pendot_stream,
