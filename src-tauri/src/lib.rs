@@ -28,7 +28,7 @@ const TGFTP_LEVEL3_BASE_URL: &str = "https://tgftp.nws.noaa.gov/SL.us008001/DF.o
 const KANDRIVE_GRAPHQL_URL: &str = "https://www.kandrive.gov/api/graphql";
 const APP_UPDATE_GITHUB_OWNER: &str = "anony121221";
 const APP_UPDATE_GITHUB_REPO: &str = "app";
-const APP_UPDATE_GITHUB_TOKEN: &str = "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";
+const APP_UPDATE_GITHUB_TOKEN_ENV: &str = "RADAR_APP_GITHUB_TOKEN";
 const APP_UPDATE_USER_AGENT: &str = "RadarApp-Updater";
 const DECODE_CACHE_VERSION: u32 = 3;
 const DECODE_CACHE_MAX_FILES: usize = 384;
@@ -3854,11 +3854,17 @@ fn github_request(
     url: &str,
     accept: &str,
 ) -> reqwest::blocking::RequestBuilder {
-    client
+    let request = client
         .get(url)
         .header(USER_AGENT, APP_UPDATE_USER_AGENT)
-        .header(AUTHORIZATION, format!("Bearer {APP_UPDATE_GITHUB_TOKEN}"))
-        .header(ACCEPT, accept)
+        .header(ACCEPT, accept);
+
+    match std::env::var(APP_UPDATE_GITHUB_TOKEN_ENV) {
+        Ok(token) if !token.trim().is_empty() => {
+            request.header(AUTHORIZATION, format!("Bearer {}", token.trim()))
+        }
+        _ => request,
+    }
 }
 
 #[derive(Clone)]

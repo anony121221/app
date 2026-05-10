@@ -2181,6 +2181,62 @@
 
     }
 
+    #boot-status {
+      position: fixed;
+      right: 12px;
+      bottom: 12px;
+      z-index: 60;
+      display: grid;
+      grid-template-columns: 22px minmax(0, 1fr);
+      column-gap: 9px;
+      align-items: center;
+      width: min(190px, calc(100vw - 24px));
+      padding: 9px 10px;
+      border: 1px solid #1f3f66;
+      border-radius: 7px;
+      background: rgba(3, 8, 14, 0.94);
+      box-shadow: 0 10px 28px rgba(0,0,0,0.5);
+      color: #f2f2f2;
+      pointer-events: none;
+      transition: opacity 160ms ease, transform 160ms ease;
+    }
+    #boot-status.hidden {
+      opacity: 0;
+      transform: translateY(8px);
+    }
+    #boot-status-spinner {
+      width: 18px;
+      height: 18px;
+      border: 2px solid rgba(111, 180, 255, 0.22);
+      border-top-color: #5aa9ff;
+      border-right-color: #e9f4ff;
+      border-radius: 999px;
+      animation: boot-spin 760ms linear infinite;
+    }
+    #boot-status-copy {
+      min-width: 0;
+    }
+    #boot-status-title {
+      font-size: 9px;
+      font-weight: 900;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+      color: #6fb4ff;
+      margin-bottom: 2px;
+      white-space: nowrap;
+    }
+    #boot-status-detail {
+      font-size: 11px;
+      font-weight: 700;
+      color: #dcdcdc;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    @keyframes boot-spin {
+      to { transform: rotate(360deg); }
+    }
+
 
 
     #status-main {
@@ -2599,14 +2655,15 @@
     /* ââ Control island âââââââââââââââââââââââââââââââââââââââââââââââââ */
 
     #control-island {
-      position: fixed; right: 10px; bottom: 10px;
+      position: fixed; left: 10px; right: auto; bottom: 10px;
       width: min(300px, calc(100vw - 16px));
       z-index: 20; pointer-events: auto;
     }
 
     #recent-frames-progress {
       position: absolute;
-      right: 0;
+      left: 0;
+      right: auto;
       bottom: calc(100% + 8px);
       display: none;
       align-items: center;
@@ -2765,6 +2822,9 @@
       border-radius: 999px;
       transform: translateX(-50%);
     }
+    .tl-lbl-loaded { background: rgba(255,255,255,0.86); }
+    .tl-lbl-pending,
+    .tl-lbl-failed { background: #ff4b4b; box-shadow: 0 0 5px rgba(255,55,55,0.42); }
     .tl-lbl-active { background: #f0f0f0; height: 7px; top: -1px; }
     #tl-btn-play {
       width: 24px; height: 24px;
@@ -3289,7 +3349,9 @@
 
     #camera-popup {
 
-      left: 12px;
+      left: auto;
+
+      right: 12px;
 
       bottom: 12px;
 
@@ -5964,7 +6026,7 @@
 
 
     @media (max-width: 720px) {
-      #control-island { right: 8px; bottom: 8px; width: min(260px, calc(100vw - 16px)); }
+      #control-island { left: 8px; right: auto; bottom: 8px; width: min(260px, calc(100vw - 16px)); }
       #status-island { right: 8px; top: 8px; }
       #info-popup { width: min(260px, calc(100vw - 16px)); }
       #warnings-dropdown { width: min(320px, calc(100vw - 16px)); }
@@ -6340,7 +6402,6 @@
       font-weight: 800;
       color: #e6e6e6;
       letter-spacing: 0;
-      text-transform: none;
     }
 
     .settings-title-wrap {
@@ -6445,7 +6506,7 @@
       color: #9a9a9a;
       display: flex;
       align-items: center;
-      justify-content: space-between;
+      justify-content: flex-start;
       padding: 0 9px;
       margin: 0 0 4px;
       font-size: 11px;
@@ -6553,6 +6614,11 @@
       overflow-x: auto;
     }
 
+    .settings-inline-tabs {
+      min-height: 44px;
+      align-items: center;
+    }
+
     .settings-tab {
       height: 27px;
       border: 1px solid #232323;
@@ -6575,6 +6641,10 @@
       color: #58a6ff;
       background: #0d1522;
       border-color: #203750;
+    }
+
+    .settings-inline-tab {
+      flex: 0 0 auto;
     }
 
     .settings-pages {
@@ -6666,15 +6736,6 @@
       gap: 7px;
     }
 
-    .radar-card-panel {
-      display: grid;
-      gap: 0;
-    }
-
-    .radar-card-panel[hidden] {
-      display: none !important;
-    }
-
     .settings-preset-row {
       display: flex;
       gap: 6px;
@@ -6715,52 +6776,6 @@
       color: #58a6ff;
       background: #0d1522;
       border-color: #203750;
-    }
-
-    .settings-color-chip {
-      width: 40px;
-      height: 24px;
-      border: 1px solid #303030;
-      border-radius: 4px;
-      padding: 0;
-      background: #000;
-      cursor: pointer;
-    }
-
-    .radar-customize-grid {
-      display: grid;
-      grid-template-columns: 1fr;
-      gap: 0;
-    }
-
-    .radar-customize-controls {
-      min-width: 0;
-      display: grid;
-      gap: 0;
-    }
-
-    .radar-customize-section {
-      display: grid;
-      gap: 0;
-      border-bottom: 1px solid #171717;
-    }
-
-    .radar-customize-section:last-child {
-      border-bottom: none;
-    }
-
-    .radar-customize-title {
-      height: 30px;
-      display: flex;
-      align-items: center;
-      padding: 0 14px;
-      color: #aeb7c4;
-      font-size: 11px;
-      font-weight: 850;
-      letter-spacing: .04em;
-      text-transform: uppercase;
-      background: #060606;
-      border-bottom: 1px solid #171717;
     }
 
     .settings-page-empty {
@@ -6954,6 +6969,7 @@
         grid-template-columns: 1fr;
       }
     }
+
   </style>
 
 </head>
@@ -7735,6 +7751,14 @@
 
   </div>
 
+  <div id="boot-status" aria-live="polite" aria-atomic="true">
+    <div id="boot-status-spinner" aria-hidden="true"></div>
+    <div id="boot-status-copy">
+      <div id="boot-status-title">Starting Radar</div>
+      <div id="boot-status-detail">Loading map</div>
+    </div>
+  </div>
+
   <!-- Control island -->
   <div id="control-island">
       <div id="recent-frames-progress" data-state="loading" aria-live="polite" aria-atomic="true">
@@ -8191,15 +8215,17 @@
   <script>
     (function () {
       const scriptQueue = [
-        'hls.min.js',
-        'https://ajax.googleapis.com/ajax/libs/shaka-player/4.15.14/shaka-player.compiled.js',
-        'radar.js',
+        { src: 'hls.min.js' },
+        { src: 'https://ajax.googleapis.com/ajax/libs/shaka-player/4.15.14/shaka-player.compiled.js' },
+        { src: './main.js', type: 'module' },
       ];
 
       function loadNext(index) {
         if (index >= scriptQueue.length) return;
+        const item = scriptQueue[index];
         const script = document.createElement('script');
-        script.src = scriptQueue[index];
+        if (item.type) script.type = item.type;
+        script.src = item.src;
         script.onload = function () { loadNext(index + 1); };
         document.body.appendChild(script);
       }

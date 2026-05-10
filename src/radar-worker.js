@@ -168,10 +168,37 @@ function _writePreparedPaletteColor(palette, rawValue, target, offset) {
     target[offset] = target[offset+1] = target[offset+2] = target[offset+3] = 255;
     return;
   }
-  const scaled = Number(rawValue) * palette.scale;
+  const scaled = Number(rawValue) * (Number.isFinite(Number(palette.scale)) ? Number(palette.scale) : 1.0);
+  const colors = palette.colors;
+  if (Array.isArray(colors) && colors.length) {
+    const min = Number.isFinite(Number(palette.min)) ? Number(palette.min) : 0;
+    const max = Number.isFinite(Number(palette.max)) ? Number(palette.max) : min + colors.length - 1;
+    const clamped = Math.max(min, Math.min(max, scaled));
+    const lookupStep = Number.isFinite(Number(palette.lookupStep)) && Number(palette.lookupStep) > 0 ? Number(palette.lookupStep) : null;
+    const denom = Math.max(max - min, 1e-10);
+    const rawIndex = lookupStep
+      ? Math.round((clamped - min) / lookupStep)
+      : Math.floor(((clamped - min) / denom) * (colors.length - 1));
+    const index = Math.max(0, Math.min(colors.length - 1, rawIndex));
+    const color = colors[index] || colors[colors.length - 1];
+    target[offset+0] = color[0]; target[offset+1] = color[1];
+    target[offset+2] = color[2]; target[offset+3] = color[3];
+    return;
+  }
   const xp = palette.xp, fp = palette.fp;
+  if (!xp || !fp || xp.length < 1) {
+    target[offset] = target[offset+1] = target[offset+2] = target[offset+3] = 255;
+    return;
+  }
   let idx = 0;
   const last = xp.length - 1;
+  if (palette.mode === 'discrete') {
+    while (idx < last && scaled >= xp[idx + 1]) idx += 1;
+    const base = idx * 4;
+    target[offset+0] = fp[base+0]; target[offset+1] = fp[base+1];
+    target[offset+2] = fp[base+2]; target[offset+3] = fp[base+3];
+    return;
+  }
   if (scaled <= xp[0]) {
     idx = 0;
   } else if (scaled >= xp[last]) {
@@ -246,8 +273,9 @@ function buildWiseFrameSync(container, payloadData, palette) {
   };
   if (!validGateCount) return emptyResult;
 
-  const stride          = validGateCount > WISE_MAX_RENDER_GATES
-    ? Math.max(1, Math.ceil(validGateCount / WISE_MAX_RENDER_GATES))
+  const maxRenderGates = Math.max(100_000, Number(container.maxRenderGates) || WISE_MAX_RENDER_GATES);
+  const stride          = validGateCount > maxRenderGates
+    ? Math.max(1, Math.ceil(validGateCount / maxRenderGates))
     : 1;
   const geometry       = _getWiseGeometry(container);
   const rangeEdgeCount = geometry.rangeEdgeCount;
@@ -340,21 +368,23 @@ function buildWiseFrameSync(container, payloadData, palette) {
   const smoothedField = smoothingAvailable ? smoothValueField() : null;
   const renderCoverageThreshold = smoothingAvailable
     ? Math.max(0.055, 0.12 - (smoothY * 0.07))
-    : 1;
+    : 0.5;
   let renderableGateCount = 0;
-  for (let i = 0; i < total; i += 1) {
-    if (grid[i] > 0) {
-      renderableGateCount += 1;
-      continue;
+  if (smoothingAvailable) {
+    for (let i = 0; i < total; i += 1) {
+      if (grid[i] > 0) {
+        renderableGateCount += 1;
+        continue;
+      }
+      if (
+        smoothedField.weights[i] >= renderCoverageThreshold &&
+        smoothedField.values[i] > lowDbzDropBelow
+      ) {
+        renderableGateCount += 1;
+      }
     }
-    if (
-      smoothingAvailable &&
-      smoothedField &&
-      smoothedField.weights[i] >= renderCoverageThreshold &&
-      smoothedField.values[i] > lowDbzDropBelow
-    ) {
-      renderableGateCount += 1;
-    }
+  } else {
+    renderableGateCount = validGateCount;
   }
   const renderGateCapacity = Math.ceil(renderableGateCount / stride);
   const vertexCapacity  = Math.max(0, renderGateCapacity * 6);
@@ -389,9 +419,6 @@ function buildWiseFrameSync(container, payloadData, palette) {
     return { valid, strong };
   };
   const sampleValueField = (rayCoord, gateCoord, fallbackValue) => {
-    if (!smoothingAvailable || !smoothedField) {
-      return { value: fallbackValue, alpha: 1 };
-    }
     const ray0Raw = Math.floor(rayCoord);
     const rayFrac = rayCoord - ray0Raw;
     const gate0 = Math.floor(gateCoord);
@@ -449,10 +476,9 @@ function buildWiseFrameSync(container, payloadData, palette) {
       const fieldIdx = rowBase + gate;
       const code = grid[rowBase + gate];
       const rawValid = code > 0;
-      const fieldValue = smoothingAvailable && smoothedField ? smoothedField.values[fieldIdx] : 0;
-      const fieldWeight = smoothingAvailable && smoothedField ? smoothedField.weights[fieldIdx] : 0;
+      const fieldValue = smoothingAvailable ? smoothedField.values[fieldIdx] : 0;
+      const fieldWeight = smoothingAvailable ? smoothedField.weights[fieldIdx] : 0;
       const fringeValid = smoothingAvailable &&
-        smoothedField &&
         fieldWeight >= renderCoverageThreshold &&
         fieldValue > lowDbzDropBelow;
       if (!rawValid && !fringeValid) continue;
@@ -480,36 +506,24 @@ function buildWiseFrameSync(container, payloadData, palette) {
       const x11 = edgeXs[p11], y11 = edgeYs[p11];
       const x01 = edgeXs[p01], y01 = edgeYs[p01];
 
-      const emitRawVertex = (x, y) => {
+      const emitVertex = (x, y, rayEdgeOffset, gateEdgeOffset) => {
         writeVertexPosition(vertexIndex, x, y);
-        writeVertexValueColor(vertexIndex, value, 1);
+        if (smoothingAvailable) {
+          const sampled = sampleValueField(ray + rayEdgeOffset - 0.5, gate + gateEdgeOffset - 0.5, value);
+          writeVertexValueColor(vertexIndex, sampled.value, sampled.alpha);
+        } else {
+          writeVertexValueColor(vertexIndex, value, 1);
+        }
         if (types) types[vertexIndex] = typeCode;
         vertexIndex += 1;
       };
 
-      const emitSmoothedVertex = (x, y, rayEdgeOffset, gateEdgeOffset) => {
-        const sampled = sampleValueField(ray + rayEdgeOffset - 0.5, gate + gateEdgeOffset - 0.5, value);
-        writeVertexPosition(vertexIndex, x, y);
-        writeVertexValueColor(vertexIndex, sampled.value, sampled.alpha);
-        if (types) types[vertexIndex] = typeCode;
-        vertexIndex += 1;
-      };
-
-      if (smoothingAvailable) {
-        emitSmoothedVertex(x00, y00, 0, 0);
-        emitSmoothedVertex(x10, y10, 0, 1);
-        emitSmoothedVertex(x11, y11, 1, 1);
-        emitSmoothedVertex(x00, y00, 0, 0);
-        emitSmoothedVertex(x11, y11, 1, 1);
-        emitSmoothedVertex(x01, y01, 1, 0);
-      } else {
-        emitRawVertex(x00, y00);
-        emitRawVertex(x10, y10);
-        emitRawVertex(x11, y11);
-        emitRawVertex(x00, y00);
-        emitRawVertex(x11, y11);
-        emitRawVertex(x01, y01);
-      }
+      emitVertex(x00, y00, 0, 0);
+      emitVertex(x10, y10, 0, 1);
+      emitVertex(x11, y11, 1, 1);
+      emitVertex(x00, y00, 0, 0);
+      emitVertex(x11, y11, 1, 1);
+      emitVertex(x01, y01, 1, 0);
       outGateCount += 1;
     }
   }
@@ -526,13 +540,15 @@ function buildWiseFrameSync(container, payloadData, palette) {
     product_code: container.productCode || '--',
     decimated:    stride > 1,
     field:        container.field,
+    min_val:      minValue,
+    max_val:      maxValue,
     data_smoothing: smoothingAvailable,
     data_smoothing_method: smoothingAvailable ? 'separable-hann-value-field' : 'off',
     data_smoothing_strength: smoothStrength,
     data_smoothing_x: smoothX,
     data_smoothing_y: smoothY,
-    data_smoothing_radius_x: smoothedField?.radiusX || 0,
-    data_smoothing_radius_y: smoothedField?.radiusY || 0,
+    data_smoothing_radius_x: smoothedField ? smoothedField.radiusX : 0,
+    data_smoothing_radius_y: smoothedField ? smoothedField.radiusY : 0,
     data_smoothing_cleanup_strength: cleanupStrength,
     data_smoothing_low_dbz_cleanup: lowDbzCleanup,
     data_smoothing_low_dbz_threshold: lowDbzThreshold,
