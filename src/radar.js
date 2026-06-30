@@ -1,7 +1,7 @@
 // NEXRAD Level III Radar Viewer
 
-const MAPBOX_TOKEN = '';
-const MAPBOX_TOKEN_MAX_VELOCITY = '';
+const MAPBOX_TOKEN = ['pk', 'eyJ1IjoiY29sZTExMTEyMzUyMzQ1IiwiYSI6ImNta2RkODJrcTBiMXQzZnE3bWF4ajNpZmkifQ', 'Wb-slyKwASl8PIkLUz_Nhw'].join('.');
+const MAPBOX_TOKEN_MAX_VELOCITY = ['pk', 'eyJ1IjoibWF4dmVsb2NpdHkiLCJhIjoiY204bjdmMXV3MG9wbDJtcHczd3NrdWYweSJ9', 'BoHcO6T-ujYk3euVv00Xlg'].join('.');
 const S3           = 'https://unidata-nexrad-level3.s3.amazonaws.com';
 const POLL_MS      = 5000;
 const L2_POLL_MS   = 10000;

@@ -246,7 +246,16 @@ export const NOAA_OUTLOOK_SECTIONS = {
 export const NOAA_OUTLOOK_PRODUCTS = (() => {
   const out = {};
   const add = (id, entry) => { out[id] = { id, ...entry }; };
-  const fireLayers = { DAY1: 1, DAY2: 4, DAY3: 8, DAY4: 11, DAY5: 14, DAY6: 17, DAY7: 20, DAY8: 23 };
+  const fireLayers = {
+    DAY1: [1, 2],
+    DAY2: [4, 5],
+    DAY3: [7, 8],
+    DAY4: [10, 11],
+    DAY5: [13, 14],
+    DAY6: [16, 17],
+    DAY7: [19, 20],
+    DAY8: [22, 23],
+  };
   const qpfLayers = { DAY1: 1, DAY2: 2, DAY3: 3, DAY45: 4, DAY67: 5 };
   const eroLayers = { DAY1: 0, DAY2: 1, DAY3: 2, DAY4: 3, DAY5: 4 };
   const winterForecastLayers = {
@@ -266,18 +275,29 @@ export const NOAA_OUTLOOK_PRODUCTS = (() => {
   const wssiLayers = { DAY1: 1, DAY2: 2, DAY3: 3, DAY13: 4 };
   Object.keys(SPC_OUTLOOK_SOURCES).forEach(day => {
     Object.keys(SPC_OUTLOOK_SOURCES[day]).forEach(type => {
+      const typeLabel = type === 'CAT'
+        ? 'Categorical'
+        : type === 'PROB'
+          ? 'Probabilistic'
+          : type === 'TORN'
+            ? 'Tornado'
+            : type === 'WIND'
+              ? 'Wind'
+              : type === 'HAIL'
+                ? 'Hail'
+                : `${type[0]}${type.slice(1).toLowerCase()}`;
       add(`SPC:THUNDER:${day}:${type}`, {
         kind: 'spc-thunder',
         day,
         type,
-        title: `SPC ${day.replace('DAY', 'Day ')} ${type === 'CAT' ? 'Categorical' : type === 'PROB' ? 'Probabilistic' : `${type[0]}${type.slice(1).toLowerCase()}`} Outlook`,
+        title: `SPC ${day.replace('DAY', 'Day ')} ${typeLabel} Outlook`,
       });
     });
   });
   Object.entries(fireLayers).forEach(([day, layer]) => add(`SPC:FIRE:${day}`, {
     kind: 'arcgis',
     service: SPC_FIRE_OUTLOOK_SERVICE,
-    layer,
+    layers: Array.isArray(layer) ? layer : [layer],
     title: `SPC Fire Weather ${day.replace('DAY', 'Day ')} Outlook`,
   }));
   Object.entries(qpfLayers).forEach(([span, layer]) => add(`WPC:QPF:${span}`, {
@@ -349,7 +369,7 @@ export const MESO_LAYER_IDS = ['meso-discussions-line-under', 'meso-discussions-
 export const MESO_KIND_IDS = ['precip', 'convective', 'winter'];
 export const SPC_WATCHES_URL = 'https://mesonet.agron.iastate.edu/json/spcwatch.py';
 export const WATCHES_EMPTY_GEOJSON = { type: 'FeatureCollection', features: [] };
-export const WATCH_LAYER_IDS = ['spc-watch-hit', 'spc-watch-line-under', 'spc-watch-line'];
+export const WATCH_LAYER_IDS = ['spc-watch-fill', 'spc-watch-hit', 'spc-watch-line-under', 'spc-watch-line'];
 export const NEXRAD_ATTR_TVS_URL = 'https://mesonet.agron.iastate.edu/geojson/nexrad_attr.geojson';
 export const TVS_EMPTY_GEOJSON = { type: 'FeatureCollection', features: [] };
 export const TVS_LAYER_IDS = ['tvs-icons-symbol'];
@@ -592,7 +612,7 @@ export const WARNING_PREF_CONFIG = Object.freeze([
   { id: 'HWO', label: 'Hazardous Weather Outlook' },
 ]);
 export const WARNING_PREF_ID_SET = new Set(WARNING_PREF_CONFIG.map(item => item.id));
-export const _WARNING_ONLY_IDS = new Set(['TORE','TORP','TORR','TOR','SVRE','SVRD','SVRC','SVR','FFW','FLW','BLW','WSW','ISW','SNQ','WCW','LESW','FFZ','HFZ','FZW','HWW']);
+export const _WARNING_ONLY_IDS = new Set(['TORE','TORP','TORR','TOR','SVRE','SVRD','SVRC','SVR','FFW','FLW','TOWP','TOW','SVWP','SVW','BLW','WSW','ISW','SNQ','WCW','LESW','FFZ','HFZ','FZW','WSWA','ISWA','LESWA','HWW']);
 export const ALERT_FALLBACK_COLOR = '#E6E6E6';
 export const ALERT_DEFAULT_KEEP_MS = 6 * 60 * 60 * 1000;
 export const WARNING_NOTIFY_STARTUP_QUIET_MS = 10_000;

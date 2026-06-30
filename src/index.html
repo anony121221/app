@@ -36,13 +36,19 @@
 
 
     #map-grid {
-      position: fixed; inset: 0;
+      position: fixed;
+      top: 0;
+      left: var(--app-sidebar-offset, 0px);
+      right: auto;
+      bottom: 0;
+      width: calc(100vw - var(--app-sidebar-offset, 0px));
       z-index: 1;
       display: grid;
       gap: 0;
       grid-template-columns: 1fr;
       grid-template-rows: 1fr;
       background: transparent;
+      transition: left 160ms ease;
     }
 
     #map-grid.panes-1 {
@@ -2386,8 +2392,7 @@
     }
 
     .warning-drawer-title {
-
-      color: #f1f4fa; font-size: 13px; font-weight: 700; line-height: 1.2;
+      color: var(--warning-color, #f1f4fa); font-size: 13px; font-weight: 700; line-height: 1.2;
 
     }
 
@@ -3620,7 +3625,18 @@
       backdrop-filter: blur(2px);
     }
 
+    #warning-prefs-overlay[hidden] {
+      display: none !important;
+    }
+
     #noaa-outlooks-overlay {
+      display: block;
+      padding: 0;
+      background: transparent;
+      backdrop-filter: none;
+    }
+
+    #warning-prefs-overlay {
       display: block;
       padding: 0;
       background: transparent;
@@ -3633,6 +3649,10 @@
     #noaa-outlooks-overlay.open {
       opacity: 1;
       pointer-events: auto;
+    }
+
+    #warning-prefs-overlay.open {
+      pointer-events: none;
     }
 
     #noaa-outlooks-overlay.open {
@@ -3671,9 +3691,13 @@
     }
 
     #warning-prefs-modal {
+      position: fixed;
+      left: calc(50% - 360px);
+      top: 84px;
       width: min(720px, calc(100vw - 28px));
       max-height: min(78vh, calc(100vh - 32px));
       border-radius: 9px;
+      pointer-events: auto;
     }
 
     #warning-prefs-overlay.open #warning-prefs-modal,
@@ -3728,6 +3752,13 @@
       align-items: center;
       gap: 12px;
       padding: 14px 16px 12px;
+      cursor: move;
+      cursor: grab;
+      user-select: none;
+    }
+
+    #warning-prefs-header:active {
+      cursor: grabbing;
     }
 
     .warning-prefs-title-wrap {
@@ -4929,6 +4960,8 @@
 
       #warning-prefs-modal,
       #nwws-login-modal {
+        left: 8px;
+        top: 8px;
         width: min(100vw - 16px, 100%);
         max-height: calc(100vh - 20px);
         border-radius: 8px;
@@ -6970,11 +7003,895 @@
       }
     }
 
+    #top-left-controls {
+      width: 38px;
+      z-index: 33;
+    }
+
+    body.sidebar-radar-ui #top-left-controls {
+      display: none;
+    }
+
+    body.sidebar-radar-ui #city-search-wrap {
+      position: relative;
+      top: auto;
+      left: auto;
+      width: 34px;
+      height: 34px;
+    }
+
+    body.sidebar-radar-ui #city-search-btn {
+      position: static;
+      width: 34px;
+      height: 34px;
+      border: 1px solid #313640;
+      border-radius: 6px;
+      background: #20242c;
+    }
+
+    body.sidebar-radar-ui #city-search-btn:hover,
+    body.sidebar-radar-ui #city-search-btn.open {
+      border-color: #505663;
+      background: #292e38;
+    }
+
+    body.sidebar-radar-ui #control-island {
+      display: none !important;
+    }
+
+    #status-island {
+      top: 10px;
+      right: 10px;
+    }
+
+    #radar-control-sidebar {
+      position: fixed;
+      left: 0;
+      top: 0;
+      bottom: 0;
+      width: min(var(--radar-sidebar-width, 332px), calc(100vw - 18px));
+      z-index: 30;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+      position: fixed;
+      border-right: 1px solid #30343d;
+      background: rgba(16, 19, 25, 0.985);
+      box-shadow: 18px 0 42px rgba(0,0,0,0.46);
+      color: #eceff4;
+      transform: translateX(0);
+      transition: transform 160ms ease, opacity 160ms ease;
+    }
+
+    body.radar-sidebar-collapsed #radar-control-sidebar {
+      transform: translateX(calc(-100% - 12px));
+      opacity: 0;
+      pointer-events: none;
+    }
+
+    #radar-sidebar-toggle {
+      position: fixed;
+      left: 10px;
+      top: 10px;
+      z-index: 31;
+      width: 38px;
+      height: 38px;
+      display: none;
+      align-items: center;
+      justify-content: center;
+      padding: 0;
+      border: 1px solid #2f333b;
+      border-radius: 6px;
+      background: rgba(9, 10, 13, 0.96);
+      color: #f0f2f5;
+      cursor: pointer;
+      box-shadow: 0 10px 26px rgba(0,0,0,0.35);
+    }
+
+    body.radar-sidebar-collapsed #radar-sidebar-toggle {
+      display: inline-flex;
+    }
+
+    #radar-sidebar-toggle svg,
+    .radar-sidebar-icon-btn svg,
+    #settings-btn svg {
+      width: 17px;
+      height: 17px;
+    }
+
+    .radar-sidebar-header {
+      min-height: 62px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      padding: 10px 10px 10px 14px;
+      border-bottom: 1px solid #272b33;
+      background: #181c22;
+    }
+
+    .radar-sidebar-top-actions {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      flex: 1 1 auto;
+      margin-right: auto;
+    }
+
+    #radar-sidebar-collapse {
+      margin-left: auto;
+    }
+
+    .radar-sidebar-toolstrip {
+      display: grid;
+      grid-template-columns: repeat(5, minmax(0, 1fr));
+      gap: 8px;
+      padding: 10px 14px;
+      border-bottom: 1px solid #252a32;
+      background: #171b21;
+    }
+
+    .radar-sidebar-tool-btn {
+      height: 34px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      padding: 0;
+      border: 1px solid #313741;
+      border-radius: 7px;
+      background: #20242c;
+      color: #edf0f4;
+      cursor: pointer;
+      transition: background 120ms ease, border-color 120ms ease, color 120ms ease;
+    }
+
+    .radar-sidebar-tool-btn:hover {
+      border-color: #505663;
+      background: #2a313b;
+      color: #ffffff;
+    }
+
+    .radar-sidebar-tool-btn.active {
+      border-color: #4f8fe8;
+      background: #2f78ff;
+      color: #ffffff;
+    }
+
+    .radar-sidebar-tool-btn svg {
+      width: 16px;
+      height: 16px;
+    }
+
+    #settings-btn,
+    .radar-sidebar-icon-btn {
+      position: static;
+      width: 34px;
+      height: 34px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      padding: 0;
+      border: 1px solid #313640;
+      border-radius: 6px;
+      background: #20242c;
+      color: #edf0f4;
+      cursor: pointer;
+      box-shadow: none;
+    }
+
+    #settings-btn:hover,
+    #settings-btn.open,
+    .radar-sidebar-icon-btn:hover,
+    #radar-sidebar-toggle:hover {
+      border-color: #505663;
+      background: #292e38;
+    }
+
+    .radar-sidebar-tabs {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      min-height: 54px;
+      border-bottom: 1px solid #252a32;
+      background: #14181e;
+    }
+
+    .radar-sidebar-tab {
+      border: 0;
+      border-bottom: 2px solid transparent;
+      background: transparent;
+      color: #afb6c1;
+      font-size: 14px;
+      font-weight: 800;
+      cursor: pointer;
+      transition: color 120ms ease, background 120ms ease, border-color 120ms ease;
+    }
+
+    .radar-sidebar-tab:hover {
+      color: #f3f5f7;
+      background: rgba(255,255,255,0.02);
+    }
+
+    .radar-sidebar-tab.active {
+      color: #f5f7fa;
+      border-bottom-color: #d7dbe2;
+      background: #191d24;
+    }
+
+    .radar-sidebar-panel {
+      min-height: 0;
+      flex: 1;
+      overflow-y: auto;
+      padding: 14px 14px 18px;
+      scrollbar-color: #393f49 transparent;
+    }
+
+    .radar-sidebar-panel[hidden] {
+      display: none !important;
+    }
+
+    .radar-sidebar-resize-handle {
+      position: absolute;
+      top: 0;
+      right: 0;
+      bottom: 0;
+      width: 12px;
+      cursor: ew-resize;
+      background: transparent;
+      z-index: 2;
+    }
+
+    .radar-sidebar-resize-handle::after {
+      content: "";
+      position: absolute;
+      top: 18px;
+      right: 3px;
+      bottom: 18px;
+      width: 4px;
+      border-radius: 999px;
+      background:
+        linear-gradient(180deg, rgba(112, 128, 150, 0.85), rgba(63, 74, 89, 0.85));
+      box-shadow: 0 0 0 1px rgba(7, 10, 14, 0.75);
+    }
+
+    .radar-field {
+      display: grid;
+      gap: 8px;
+      margin-bottom: 18px;
+    }
+
+    .radar-field span,
+    .radar-sidebar-section-title {
+      font-size: 10px;
+      font-weight: 850;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+      color: #8e97a3;
+    }
+
+    .radar-field select {
+      width: 100%;
+      min-height: 42px;
+      border: 1px solid #313741;
+      border-radius: 8px;
+      background: #242933;
+      color: #f1f4f7;
+      padding: 0 12px;
+      font-size: 14px;
+      outline: none;
+    }
+
+    .radar-sidebar-section {
+      border-top: 1px solid #252a32;
+      padding-top: 14px;
+      margin-top: 14px;
+    }
+
+    .radar-sidebar-section:first-of-type {
+      margin-top: 0;
+    }
+
+    .radar-sidebar-section-title-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      margin-bottom: 10px;
+    }
+
+    .radar-product-list {
+      display: grid;
+      gap: 2px;
+    }
+
+    .radar-product-group {
+      border-top: 1px solid #2a2f37;
+    }
+
+    .radar-product-group:first-child {
+      border-top: 0;
+    }
+
+    .radar-product-group-head {
+      width: 100%;
+      min-height: 42px;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 0 4px;
+      border: 0;
+      background: transparent;
+      color: #d4d9e0;
+      font-size: 13px;
+      font-weight: 800;
+      text-align: left;
+      cursor: pointer;
+    }
+
+    .radar-product-group-head:hover {
+      color: #ffffff;
+    }
+
+    .radar-product-group-chevron {
+      width: 14px;
+      height: 14px;
+      color: #8a929e;
+      transition: transform 140ms ease, color 140ms ease;
+      flex-shrink: 0;
+    }
+
+    .radar-product-group.open .radar-product-group-chevron {
+      transform: rotate(90deg);
+      color: #f1f4f7;
+    }
+
+    .radar-product-group-body {
+      display: none;
+      padding: 0 0 8px 18px;
+    }
+
+    .radar-product-group.open .radar-product-group-body {
+      display: grid;
+      gap: 4px;
+    }
+
+    .radar-product-btn,
+    .radar-sidebar-action {
+      width: 100%;
+      min-height: 36px;
+      border: 1px solid transparent;
+      border-radius: 8px;
+      background: transparent;
+      color: #d8dde5;
+      padding: 0 12px;
+      text-align: left;
+      font-size: 14px;
+      font-weight: 700;
+      cursor: pointer;
+    }
+
+    .radar-product-btn:hover,
+    .radar-sidebar-action:hover {
+      background: #20252d;
+      color: #fff;
+    }
+
+    .radar-product-btn.active {
+      border-color: #49505c;
+      background: #263240;
+      color: #ffffff;
+    }
+
+    .radar-product-btn:disabled,
+    .radar-sidebar-action:disabled {
+      opacity: 0.45;
+      cursor: default;
+    }
+
+    .radar-tilt-list {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 8px;
+    }
+
+    .radar-tilt-btn {
+      min-width: 0;
+      height: 38px;
+      border: 1px solid #313741;
+      border-radius: 8px;
+      background: #242933;
+      color: #e2e7ee;
+      font-size: 13px;
+      font-weight: 800;
+      cursor: pointer;
+    }
+
+    .radar-tilt-btn:hover {
+      border-color: #5a6270;
+      color: #fff;
+    }
+
+    .radar-tilt-btn.active {
+      border-color: #5d6879;
+      background: #4b5563;
+      color: #fff;
+    }
+
+    .radar-sidebar-action {
+      text-align: center;
+      border-color: #313741;
+      background: #242933;
+    }
+
+    .radar-sidebar-alerts {
+      display: grid;
+      gap: 14px;
+      grid-template-rows: auto auto minmax(0, 1fr) auto;
+    }
+
+    .radar-alerts-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+    }
+
+    .radar-alerts-title-wrap {
+      display: grid;
+      gap: 4px;
+    }
+
+    .radar-alerts-title {
+      font-size: 18px;
+      font-weight: 800;
+      color: #f5f7fa;
+    }
+
+    .radar-alerts-subtitle {
+      font-size: 12px;
+      color: #98a2ae;
+    }
+
+    .radar-alerts-count {
+      min-width: 28px;
+      height: 28px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      padding: 0 10px;
+      border-radius: 999px;
+      background: #f0c648;
+      color: #1b1a12;
+      font-size: 14px;
+      font-weight: 900;
+    }
+
+    .radar-alerts-list {
+      display: grid;
+      gap: 8px;
+      min-height: 0;
+      overflow: auto;
+      padding-right: 2px;
+      scrollbar-width: thin;
+      scrollbar-color: #39414d transparent;
+    }
+
+    .radar-alerts-list .warn-drop-cat-header {
+      padding: 2px 4px;
+    }
+
+    .radar-alerts-list .warning-drawer-row {
+      gap: 8px;
+      padding: 12px 14px;
+      border: 1px solid #2b3038;
+      border-left-width: 0;
+      border-radius: 10px;
+      background: #232831;
+    }
+
+    .radar-alerts-list .warning-drawer-top {
+      align-items: flex-start;
+    }
+
+    .radar-alerts-list .warning-drawer-title {
+      font-size: 15px;
+      font-weight: 800;
+    }
+
+    .radar-alerts-list .warning-drawer-code,
+    .radar-alerts-list .warning-drawer-area,
+    .radar-alerts-list .warning-drawer-hazards {
+      font-size: 12px;
+    }
+
+    .radar-alerts-list .warning-drawer-time {
+      font-size: 11px;
+    }
+
+    .radar-alerts-list .warning-drawer-btn {
+      min-width: 74px;
+      height: 28px;
+      border-radius: 7px;
+      background: #1b2027;
+    }
+
+    .radar-alerts-empty {
+      display: none;
+      padding: 30px 16px;
+      border: 1px dashed #2c323b;
+      border-radius: 10px;
+      color: #8f98a4;
+      text-align: center;
+      font-size: 13px;
+    }
+
+    .radar-sidebar-outlooks {
+      display: grid;
+      gap: 14px;
+      align-content: start;
+    }
+
+    .radar-sidebar-outlooks-host {
+      display: grid;
+      gap: 14px;
+    }
+
+    .radar-sidebar-outlook-shell {
+      display: grid;
+      gap: 14px;
+    }
+
+    .radar-sidebar-outlook-block {
+      display: grid;
+      gap: 8px;
+    }
+
+    .radar-sidebar-outlook-sources {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 8px;
+    }
+
+    .radar-sidebar-outlook-source-btn {
+      min-height: 36px;
+      border: 1px solid #313741;
+      border-radius: 10px;
+      background: #1f242c;
+      color: #d3dae3;
+      font-size: 12px;
+      font-weight: 800;
+      cursor: pointer;
+      transition: border-color 120ms ease, background 120ms ease, color 120ms ease;
+    }
+
+    .radar-sidebar-outlook-source-btn:hover {
+      border-color: #525c69;
+      background: #252c35;
+      color: #ffffff;
+    }
+
+    .radar-sidebar-outlook-source-btn.active {
+      border-color: #5b6777;
+      background: #2c3540;
+      color: #ffffff;
+      box-shadow: inset 0 0 0 1px rgba(255,255,255,0.04);
+    }
+
+    .radar-sidebar-divider {
+      height: 1px;
+      background: linear-gradient(90deg, rgba(255,255,255,0.03), rgba(255,255,255,0.1), rgba(255,255,255,0.03));
+    }
+
+    .radar-sidebar-field-tight {
+      margin-bottom: 0;
+    }
+
+    .radar-sidebar-select-wrap {
+      position: relative;
+    }
+
+    .radar-sidebar-select-wrap::after {
+      content: "";
+      position: absolute;
+      right: 14px;
+      top: 50%;
+      width: 10px;
+      height: 10px;
+      margin-top: -6px;
+      pointer-events: none;
+      border-left: 2px solid #a4afbc;
+      border-bottom: 2px solid #a4afbc;
+      transform: rotate(-45deg);
+      opacity: 0.88;
+    }
+
+    .radar-sidebar-select {
+      width: 100%;
+      min-height: 42px;
+      padding: 0 40px 0 12px;
+      border: 1px solid #313741;
+      border-radius: 10px;
+      background:
+        linear-gradient(180deg, rgba(255,255,255,0.03), rgba(255,255,255,0)),
+        #1e232b;
+      color: #eef2f6;
+      font-size: 13px;
+      font-weight: 750;
+      appearance: none;
+      -webkit-appearance: none;
+      outline: none;
+      box-shadow: inset 0 1px 0 rgba(255,255,255,0.04);
+    }
+
+    .radar-sidebar-select:hover,
+    .radar-sidebar-select:focus {
+      border-color: #566171;
+      background-color: #232a33;
+    }
+
+    .radar-sidebar-outlook-actions {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+
+    .radar-sidebar-outlook-toggle {
+      flex: 1 1 auto;
+      min-height: 38px;
+      padding: 0 14px;
+      border: 1px solid #313741;
+      border-radius: 10px;
+      background: #21262f;
+      color: #e9edf3;
+      font-size: 13px;
+      font-weight: 800;
+      text-align: left;
+      cursor: pointer;
+      transition: border-color 120ms ease, background 120ms ease, color 120ms ease;
+    }
+
+    .radar-sidebar-outlook-toggle.active {
+      border-color: #4f8fe8;
+      background: #23384d;
+      color: #ffffff;
+    }
+
+    .radar-sidebar-outlook-view-btn {
+      width: 42px;
+      min-width: 42px;
+      height: 38px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      padding: 0;
+      border: 1px solid #313741;
+      border-radius: 10px;
+      background: #20252d;
+      color: #eef2f6;
+      cursor: pointer;
+    }
+
+    .radar-sidebar-outlook-view-btn:disabled {
+      opacity: 0.4;
+      cursor: default;
+    }
+
+    .radar-sidebar-outlook-view-btn svg {
+      width: 17px;
+      height: 17px;
+    }
+
+    .radar-sidebar-outlooks-opacity {
+      display: grid;
+      gap: 8px;
+    }
+
+    .radar-sidebar-outlooks-opacity-top {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+    }
+
+    .radar-sidebar-outlooks-opacity-value {
+      font-size: 12px;
+      font-weight: 800;
+      color: #e7ebf1;
+    }
+
+    .radar-sidebar-outlooks-opacity input[type="range"] {
+      width: 100%;
+    }
+
+    .radar-sidebar-outlook-empty {
+      padding: 14px 12px;
+      border: 1px dashed #303640;
+      border-radius: 10px;
+      color: #92a0af;
+      font-size: 12px;
+      text-align: center;
+    }
+
+    #radar-map-header {
+      position: fixed;
+      left: 24px;
+      top: 72px;
+      width: 620px;
+      max-width: min(760px, calc(100vw - 36px));
+      z-index: 24;
+      display: grid;
+      gap: 0;
+      border-radius: 10px;
+      border: 1px solid rgba(255,255,255,0.1);
+      background:
+        linear-gradient(180deg, rgba(255,255,255,0.05), rgba(255,255,255,0)),
+        rgba(14, 17, 23, 0.94);
+      box-shadow: 0 18px 36px rgba(0,0,0,0.34);
+      overflow: hidden;
+      user-select: none;
+      pointer-events: none;
+    }
+
+    #radar-map-header.hidden {
+      display: none;
+    }
+
+    #radar-map-header.dragging {
+      cursor: grabbing;
+    }
+
+    #radar-map-header.drag-enabled {
+      pointer-events: auto;
+      box-shadow: 0 18px 36px rgba(0,0,0,0.34), 0 0 0 2px rgba(76, 145, 235, 0.55);
+    }
+
+    .radar-map-header-drag {
+      position: absolute;
+      left: 0;
+      top: 0;
+      right: 0;
+      bottom: 0;
+      z-index: 2;
+      pointer-events: none;
+      cursor: grab;
+    }
+
+    #radar-map-header.drag-enabled .radar-map-header-drag {
+      pointer-events: auto;
+    }
+
+    .radar-map-header-body {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 12px;
+      align-items: center;
+      padding: 18px 20px 14px;
+      pointer-events: none;
+    }
+
+    .radar-map-header-main,
+    .radar-map-header-meta {
+      min-width: 0;
+      display: grid;
+      gap: 2px;
+      align-content: center;
+    }
+
+    .radar-map-header-meta {
+      min-width: 170px;
+      padding-left: 14px;
+      border-left: 1px solid rgba(255,255,255,0.12);
+      text-align: right;
+    }
+
+    .radar-map-header-product {
+      font-size: clamp(16px, 1.45vw, 26px);
+      font-weight: 900;
+      line-height: 1.02;
+      color: #ffffff;
+      letter-spacing: 0;
+      white-space: nowrap;
+    }
+
+    .radar-map-header-time {
+      font-size: clamp(14px, 1.35vw, 24px);
+      font-weight: 900;
+      line-height: 1.02;
+      color: #ffffff;
+      letter-spacing: 0;
+      white-space: nowrap;
+    }
+
+    .radar-map-header-site,
+    .radar-map-header-date {
+      font-size: 13px;
+      font-weight: 800;
+      color: #c2ccda;
+      line-height: 1.15;
+    }
+
+    .radar-map-header-bar {
+      height: 12px;
+      background: linear-gradient(90deg, #2b91ff, #22c55e, #facc15, #f97316, #d946ef, #f8fafc);
+      border-top: 1px solid rgba(255,255,255,0.08);
+      pointer-events: none;
+    }
+
+    .radar-sidebar-outlooks-toggle {
+      min-height: 42px;
+      width: 100%;
+      display: grid;
+      gap: 3px;
+      padding: 9px 12px;
+      border: 1px solid #2d323a;
+      border-radius: 9px;
+      background: #1a1f26;
+      color: #eef2f6;
+      text-align: left;
+      cursor: pointer;
+    }
+
+    .radar-sidebar-outlooks-toggle.active {
+      border-color: #4f8fe8;
+      background: #21344d;
+    }
+
+    .radar-sidebar-outlooks-item-title {
+      font-size: 13px;
+      font-weight: 800;
+    }
+
+    .radar-sidebar-outlooks-item-subtitle {
+      font-size: 11px;
+      color: #95a0ae;
+    }
+
+    .noaa-outlooks-cell-actions {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 6px;
+    }
+
+    .noaa-outlooks-view-btn {
+      width: 24px;
+      height: 24px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      padding: 0;
+      border: 1px solid #313741;
+      border-radius: 6px;
+      background: #242933;
+      color: #eef1f4;
+      cursor: pointer;
+    }
+
+    .noaa-outlooks-view-btn:hover {
+      background: #2d333d;
+      border-color: #525c69;
+    }
+
+    .noaa-outlooks-view-btn:disabled {
+      opacity: 0.38;
+      cursor: default;
+    }
+
+    @media (max-width: 720px) {
+      #radar-control-sidebar {
+        width: min(320px, calc(100vw - 12px));
+      }
+
+      #status-island {
+        top: auto;
+        bottom: 10px;
+      }
+    }
+
   </style>
 
 </head>
 
-<body>
+<body class="sidebar-radar-ui">
 
   <div id="map-grid" class="panes-1">
 
@@ -6992,51 +7909,128 @@
 
 
 
-  <!-- Top-left controls -->
+  <!-- Top controls -->
 
-  <div id="top-left-controls">
+  <div id="top-left-controls"></div>
 
-    <button id="settings-btn" type="button" title="Settings" aria-label="Settings">
-
-      <svg class="icon-gear" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
-
-        <path d="M19.14 12.94c.04-.31.06-.63.06-.94s-.02-.63-.06-.94l2.03-1.58a.5.5 0 0 0 .12-.64l-1.92-3.32a.5.5 0 0 0-.6-.22l-2.39.96a7.18 7.18 0 0 0-1.63-.94l-.36-2.54a.5.5 0 0 0-.5-.42h-3.84a.5.5 0 0 0-.5.42l-.36 2.54c-.58.23-1.12.54-1.63.94l-2.39-.96a.5.5 0 0 0-.6.22L2.67 8.84a.5.5 0 0 0 .12.64l2.03 1.58c-.04.31-.06.63-.06.94s.02.63.06.94L2.79 14.52a.5.5 0 0 0-.12.64l1.92 3.32c.13.22.39.31.6.22l2.39-.96c.5.4 1.05.72 1.63.94l.36 2.54c.04.24.25.42.5.42h3.84c.25 0 .46-.18.5-.42l.36-2.54c.58-.23 1.13-.54 1.63-.94l2.39.96c.22.09.47 0 .6-.22l1.92-3.32a.5.5 0 0 0-.12-.64l-2.03-1.58ZM12 15.5A3.5 3.5 0 1 1 12 8a3.5 3.5 0 0 1 0 7.5Z"/>
-
-      </svg>
-
-    </button>
-
-    <div id="city-search-wrap">
-
-      <button id="city-search-btn" type="button" title="Search (Ctrl+S)" aria-label="Search">
-
-        <svg class="icon-search" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
-
-          <path d="M10.5 3a7.5 7.5 0 0 1 5.94 12.08l4.24 4.24-1.42 1.42-4.24-4.24A7.5 7.5 0 1 1 10.5 3Zm0 2A5.5 5.5 0 1 0 16 10.5 5.51 5.51 0 0 0 10.5 5Z"/>
-
-        </svg>
-
-      </button>
-
-      <div id="city-search-panel">
-
-        <div id="city-search-box">
-
-          <input id="city-search-input" type="text" autocomplete="off" placeholder="Search city or radar site...">
-
-          <div id="city-search-results"></div>
-
-        </div>
-
+  <div id="radar-map-header" aria-live="polite">
+    <div class="radar-map-header-drag" id="radar-map-header-drag" aria-hidden="true"></div>
+    <div class="radar-map-header-body">
+      <div class="radar-map-header-main">
+        <div class="radar-map-header-product" id="radar-map-header-product">Reflectivity</div>
+        <div class="radar-map-header-site" id="radar-map-header-site">Radar Site</div>
       </div>
-
+      <div class="radar-map-header-meta">
+        <div class="radar-map-header-time" id="radar-map-header-time">--:-- --</div>
+        <div class="radar-map-header-date" id="radar-map-header-date">--/--/--</div>
+      </div>
     </div>
-
+    <div class="radar-map-header-bar" id="radar-map-header-bar"></div>
   </div>
 
+  <aside id="radar-control-sidebar" aria-label="Radar controls">
+    <div class="radar-sidebar-header">
+      <div class="radar-sidebar-top-actions">
+        <button id="settings-btn" type="button" title="Settings" aria-label="Settings">
+          <svg class="icon-gear" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+            <path d="M19.14 12.94c.04-.31.06-.63.06-.94s-.02-.63-.06-.94l2.03-1.58a.5.5 0 0 0 .12-.64l-1.92-3.32a.5.5 0 0 0-.6-.22l-2.39.96a7.18 7.18 0 0 0-1.63-.94l-.36-2.54a.5.5 0 0 0-.5-.42h-3.84a.5.5 0 0 0-.5.42l-.36 2.54c-.58.23-1.12.54-1.63.94l-2.39-.96a.5.5 0 0 0-.6.22L2.67 8.84a.5.5 0 0 0 .12.64l2.03 1.58c-.04.31-.06.63-.06.94s.02.63.06.94L2.79 14.52a.5.5 0 0 0-.12.64l1.92 3.32c.13.22.39.31.6.22l2.39-.96c.5.4 1.05.72 1.63.94l.36 2.54c.04.24.25.42.5.42h3.84c.25 0 .46-.18.5-.42l.36-2.54c.58-.23 1.13-.54 1.63-.94l2.39.96c.22.09.47 0 .6-.22l1.92-3.32a.5.5 0 0 0-.12-.64l-2.03-1.58ZM12 15.5A3.5 3.5 0 1 1 12 8a3.5 3.5 0 0 1 0 7.5Z"/>
+          </svg>
+        </button>
+        <div id="city-search-wrap">
+          <button id="city-search-btn" type="button" title="Search (Ctrl+S)" aria-label="Search">
+            <svg class="icon-search" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+              <path d="M10.5 3a7.5 7.5 0 0 1 5.94 12.08l4.24 4.24-1.42 1.42-4.24-4.24A7.5 7.5 0 1 1 10.5 3Zm0 2A5.5 5.5 0 1 0 16 10.5 5.51 5.51 0 0 0 10.5 5Z"/>
+            </svg>
+          </button>
+          <div id="city-search-panel">
+            <div id="city-search-box">
+              <input id="city-search-input" type="text" autocomplete="off" placeholder="Search city or radar site...">
+              <div id="city-search-results"></div>
+            </div>
+          </div>
+        </div>
+        <button id="radar-sidebar-collapse" class="radar-sidebar-icon-btn" type="button" title="Collapse radar controls" aria-label="Collapse radar controls">
+          <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+            <path d="M15.4 7.4 10.8 12l4.6 4.6L14 18l-6-6 6-6 1.4 1.4Z"/>
+          </svg>
+        </button>
+      </div>
+    </div>
+
+    <div class="radar-sidebar-toolstrip" aria-label="Map tools">
+      <button class="radar-sidebar-tool-btn" id="sidebar-recent-frames-btn" type="button" title="Recent frames" aria-label="Recent frames">
+        <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 6V3L8 7l4 4V8c2.76 0 5 2.24 5 5a5 5 0 1 1-8.66-3.42l-1.42-1.42A7 7 0 1 0 19 13c0-3.87-3.13-7-7-7Z"/></svg>
+      </button>
+      <button class="radar-sidebar-tool-btn" id="sidebar-draw-btn" type="button" title="Drawing tools" aria-label="Drawing tools">
+        <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="m3 17.25 9.9-9.9 3.75 3.75-9.9 9.9H3v-3.75Zm14.71-9.04-1.92-1.92 1.41-1.41a1 1 0 0 1 1.42 0l.5.5a1 1 0 0 1 0 1.41l-1.41 1.42Z"/></svg>
+      </button>
+      <button class="radar-sidebar-tool-btn" id="sidebar-measure-btn" type="button" title="Measure" aria-label="Measure">
+        <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="m21 7.5-4.5-4.5L3 16.5V21h4.5L21 7.5Zm-13.32 9.68 8.82-8.82 1.64 1.64-1.06 1.06-1.23-1.23-1.41 1.41 1.23 1.23-1.41 1.41-1.23-1.23-1.41 1.41 1.23 1.23-1.06 1.06H7.68Z"/></svg>
+      </button>
+      <button class="radar-sidebar-tool-btn" id="sidebar-location-btn" type="button" title="My location" aria-label="My location">
+        <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M11 2h2v3.06A7.002 7.002 0 0 1 18.94 11H22v2h-3.06A7.002 7.002 0 0 1 13 18.94V22h-2v-3.06A7.002 7.002 0 0 1 5.06 13H2v-2h3.06A7.002 7.002 0 0 1 11 5.06V2Zm1 5a5 5 0 1 0 0 10 5 5 0 0 0 0-10Z"/></svg>
+      </button>
+      <button class="radar-sidebar-tool-btn" id="sidebar-multi-pane-btn" type="button" title="Multi pane" aria-label="Multi pane">
+        <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M4 4h7v7H4V4Zm9 0h7v7h-7V4ZM4 13h7v7H4v-7Zm9 0h7v7h-7v-7Z"/></svg>
+      </button>
+    </div>
+
+    <div class="radar-sidebar-tabs" role="tablist" aria-label="Data view">
+      <button class="radar-sidebar-tab active" id="radar-sidebar-tab-radar" type="button">Radar</button>
+      <button class="radar-sidebar-tab" id="radar-sidebar-tab-outlooks" type="button">Outlooks</button>
+      <button class="radar-sidebar-tab" id="radar-sidebar-tab-alerts" type="button">NWS Alerts</button>
+    </div>
+
+    <div class="radar-sidebar-panel" id="radar-sidebar-panel-radar">
+      <label class="radar-field">
+        <span>Site</span>
+        <select id="radar-sidebar-site" aria-label="Radar site"></select>
+      </label>
+
+      <section class="radar-sidebar-section">
+        <div class="radar-sidebar-section-title-row">
+          <span class="radar-sidebar-section-title">Products</span>
+        </div>
+        <div class="radar-product-list" id="radar-sidebar-products"></div>
+      </section>
+
+      <section class="radar-sidebar-section">
+        <div class="radar-sidebar-section-title-row">
+          <span class="radar-sidebar-section-title">Tilt</span>
+        </div>
+        <div class="radar-tilt-list" id="radar-sidebar-tilts"></div>
+      </section>
+    </div>
+
+    <div class="radar-sidebar-panel radar-sidebar-outlooks" id="radar-sidebar-panel-outlooks" hidden>
+      <div class="radar-sidebar-outlooks-host" id="sidebar-noaa-panel-compact"></div>
+    </div>
+
+    <div class="radar-sidebar-panel radar-sidebar-alerts" id="radar-sidebar-panel-alerts" hidden>
+      <div class="radar-alerts-header">
+        <div class="radar-alerts-title-wrap">
+          <div class="radar-alerts-title">Active Alerts</div>
+          <div class="radar-alerts-subtitle">Live warnings and watches in a scrollable feed.</div>
+        </div>
+        <div class="radar-alerts-count" id="radar-sidebar-alerts-count">0</div>
+      </div>
+      <button class="radar-sidebar-action" id="warning-prefs-btn" type="button" aria-expanded="false">Warning Customization</button>
+      <div class="radar-alerts-list" id="radar-sidebar-alerts-list"></div>
+      <div class="radar-alerts-empty" id="radar-sidebar-alerts-empty">No active warnings.</div>
+    </div>
+
+    <div class="radar-sidebar-resize-handle" id="radar-sidebar-resize-handle" aria-hidden="true"></div>
+  </aside>
+
+  <button id="radar-sidebar-toggle" type="button" title="Radar controls" aria-label="Radar controls">
+    <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+      <path d="M4 5h16v2H4V5Zm0 6h16v2H4v-2Zm0 6h16v2H4v-2Z"/>
+    </svg>
+  </button>
 
 
-  <!-- Settings sidebar -->
+
+  <!-- Settings window -->
 
   <div id="settings-overlay">
 
@@ -7219,12 +8213,6 @@
                 <div class="settings-section-body">
                   <div class="settings-section-inner">
                     <div class="settings-subblock">
-                      <div class="sp-row alert-source-row">
-                        <span class="sp-row-label">Customization</span>
-                        <div class="sp-row-right">
-                          <button class="sp-btn" id="warning-prefs-btn" type="button" aria-expanded="false">Customize</button>
-                        </div>
-                      </div>
                       <div class="sp-row alert-source-row" id="nws-api-source-row">
                         <div class="settings-row-left">
                           <span class="sp-row-label">NWS API</span>
@@ -7624,7 +8612,7 @@
 
   </div>
 
-  <div id="warning-prefs-overlay" aria-hidden="true">
+  <div id="warning-prefs-overlay" aria-hidden="true" hidden>
     <section id="warning-prefs-modal" aria-labelledby="warning-prefs-title">
       <div id="warning-prefs-header">
         <div class="warning-prefs-title-wrap">
@@ -7791,7 +8779,7 @@
           </div>
           <select id="family-select" title="Product">
             <option value="" disabled data-placeholder="true">Select a product</option>
-            <option value="REF">Super-Res Reflectivity</option>
+            <option value="REF">Reflectivity</option>
             <option value="VEL">Velocity</option>
             <option value="SRV">Storm Relative Velocity</option>
             <option value="CC">Correlation Coefficient</option>

@@ -5,7 +5,7 @@ import {
 // ﻿// NEXRAD Level III Radar Viewer
 
 
-export const PAL_PARSER_VERSION = 4;
+export const PAL_PARSER_VERSION = 5;
 export function _prepareInlinePalette(palData) {
   if (!palData) return null;
   const scale = Number.isFinite(Number(palData.scale)) ? Number(palData.scale) : 1.0;
@@ -87,7 +87,7 @@ export function _writePreparedPaletteColor(palette, rawValue, target, offset) {
     const lookupStep = Number.isFinite(Number(palette.lookupStep)) && Number(palette.lookupStep) > 0 ? Number(palette.lookupStep) : null;
     const denom = Math.max(max - min, 1e-10);
     const rawIndex = lookupStep
-      ? Math.round((clamped - min) / lookupStep)
+      ? Math.floor(((clamped - min) / lookupStep) + 1e-9)
       : Math.floor(((clamped - min) / denom) * (colors.length - 1));
     const index = Math.max(0, Math.min(colors.length - 1, rawIndex));
     const color = colors[index] || colors[colors.length - 1];
@@ -540,6 +540,9 @@ export function ctStore(family) {
             }
           } else {
             console.warn('[PAL] stored palette needs re-upload:', name);
+            delete store.tables[name];
+            if (store.active === name) store.active = 'Default';
+            changed = true;
           }
         }
       }
@@ -702,11 +705,32 @@ export function parsePalFile(text) {
 
   const orderedRows = rows.slice().sort((a, b) => a.value - b.value);
   if (orderedRows.length < 2) return null;
-  const stops = orderedRows.map(row => [row.value, ...row.color1]);
+  const stops = [];
+  const addStop = (value, color) => {
+    if (!Number.isFinite(value) || !Array.isArray(color)) return;
+    stops.push([value, ...color]);
+  };
+  for (let i = 0; i < orderedRows.length; i += 1) {
+    const row = orderedRows[i];
+    const next = orderedRows[i + 1] || null;
+    addStop(row.value, row.color1);
+    if (row.color2) {
+      const stepSize = Number.isFinite(step) && step > 0 ? step : 1;
+      const rampEnd = row.value + stepSize;
+      addStop(rampEnd, row.color2);
+      if (next && Number.isFinite(next.value) && next.value > rampEnd) {
+        addStop(next.value, row.color2);
+      }
+    }
+  }
   const lookupProduct = product || '';
-  const lookupStep = lookupProduct === 'REF' || lookupProduct === 'BR' ? 1.0 : 1.0;
+  const hasSegmentRows = dualColorRowCount > 0 || solidColorRowCount > 0;
+  const lookupStep = hasSegmentRows ? 0.5 : 1.0;
   const min = orderedRows[0].value;
-  const max = orderedRows[orderedRows.length - 1].value;
+  const lastRow = orderedRows[orderedRows.length - 1];
+  const max = lastRow?.color2 && Number.isFinite(step) && step > 0
+    ? Math.max(lastRow.value + step, lastRow.value)
+    : orderedRows[orderedRows.length - 1].value;
   const colors = [];
   const lerp = (a, b, t) => [
     Math.round(a[0] + ((b[0] - a[0]) * t)),
@@ -714,15 +738,29 @@ export function parsePalFile(text) {
     Math.round(a[2] + ((b[2] - a[2]) * t)),
     Math.round(a[3] + ((b[3] - a[3]) * t)),
   ];
-  for (let y = min; y <= max + (lookupStep * 1e-6); y += lookupStep) {
-    let idx = 0;
-    while (idx < orderedRows.length - 2 && y > orderedRows[idx + 1].value) idx += 1;
-    const row = orderedRows[idx];
-    const next = orderedRows[Math.min(idx + 1, orderedRows.length - 1)];
-    const denom = Math.max(next.value - row.value, 1e-10);
-    const t = Math.max(0, Math.min(1, (y - row.value) / denom));
-    const endColor = row.color2 || next.color1;
-    colors.push(lerp(row.color1, endColor, t));
+  if (hasSegmentRows) {
+    for (let y = min; y <= max + (lookupStep * 1e-6); y += lookupStep) {
+      let idx = 0;
+      while (idx < orderedRows.length - 1 && y >= orderedRows[idx + 1].value) idx += 1;
+      const row = orderedRows[idx];
+      const next = orderedRows[idx + 1] || null;
+      if (row.color2) {
+        const stepSize = Number.isFinite(step) && step > 0 ? step : 1;
+        const rampEnd = row.value + stepSize;
+        if (y <= rampEnd) {
+          const t = Math.max(0, Math.min(1, (y - row.value) / Math.max(rampEnd - row.value, 1e-10)));
+          colors.push(lerp(row.color1, row.color2, t));
+        } else {
+          colors.push(row.color2.slice());
+        }
+      } else if (next) {
+        const denom = Math.max(next.value - row.value, 1e-10);
+        const t = Math.max(0, Math.min(1, (y - row.value) / denom));
+        colors.push(lerp(row.color1, next.color1, t));
+      } else {
+        colors.push(row.color1.slice());
+      }
+    }
   }
 
   const palette = {
@@ -731,9 +769,8 @@ export function parsePalFile(text) {
     min,
     max,
     lookupStep,
-    colors,
     scale: 1,
-    stops,
+    stops: stops.filter(stop => stop.every(Number.isFinite)).sort((a, b) => a[0] - b[0]),
     parserVersion: PAL_PARSER_VERSION,
     sourceText: String(text || ''),
     debug: {
@@ -745,8 +782,20 @@ export function parsePalFile(text) {
       offset: offsetValue,
     },
   };
+  if (colors.length) palette.colors = colors;
+  if (colors.length) palette.mode = 'segments';
+  else palette.mode = 'continuous';
   if (Number.isFinite(step)) palette.step = step;
   if (rf !== null) palette.rf = rf;
+  console.debug('[PAL] parsed palette summary', {
+    name: lookupProduct || 'uploaded palette',
+    parserMode: palette.mode,
+    colorRows: rawColorRowCount,
+    generatedSegments: hasSegmentRows ? colors.length : 0,
+    first10: colors.length ? colors.slice(0, 10) : palette.stops.slice(0, 10),
+    last10: colors.length ? colors.slice(-10) : palette.stops.slice(-10),
+    parserVersion: PAL_PARSER_VERSION,
+  });
   return palette;
 }
 

@@ -43,8 +43,8 @@ export const _radarGateLayerInstances = new Map();
 // Maximum vertices to upload per render frame for the chunked GPU upload path.
 // Keeps each bufferSubData call well within the 16 ms frame budget even on
 // slow integrated graphics (~320 KB per chunk across all three buffers).
-const _UPLOAD_CHUNK_VERTS = 90_000;
-const LARGE_FRAME_IMMEDIATE_VERTEX_LIMIT = 250_000;
+const _UPLOAD_CHUNK_VERTS = 55_000;
+const LARGE_FRAME_IMMEDIATE_VERTEX_LIMIT = 150_000;
 const RADAR_PERF_DEBUG = false;
 
 export class RadarGateLayer {
@@ -217,8 +217,9 @@ export class RadarGateLayer {
     // pass so the scan appears without a multi-frame build-up delay.
     // When replacing a visible frame, use the chunked path so the old scan
     // stays smooth until the new one is fully ready.
-    const wantsImmediate = opts?.immediateUpload === true || this.vertexCount === 0;
-    const _immediate = wantsImmediate && vertexCount <= LARGE_FRAME_IMMEDIATE_VERTEX_LIMIT;
+    const forceImmediate = opts?.immediateUpload === true;
+    const wantsImmediate = forceImmediate || this.vertexCount === 0;
+    const _immediate = forceImmediate || (wantsImmediate && vertexCount <= LARGE_FRAME_IMMEDIATE_VERTEX_LIMIT);
     this._pending = { vertexCount, xy, colors, valData, _offset: 0, _immediate, _uploadStartMs: 0 };
     this._onSwap = onReady || null;
     this.map?.triggerRepaint();

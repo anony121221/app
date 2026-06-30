@@ -6,10 +6,10 @@
 
 const EARTH_RADIUS_M      = 6_371_000.0;
 const MAX_MERCATOR_LAT    = 85.05112878;
-const WISE_MAX_RENDER_GATES      = 750_000;
+const WISE_MAX_RENDER_GATES      = 600_000;
 const WISE_MULTI_TYPE_RANGE_SPAN = 120.0; // RANGE_MAX(90) - RANGE_MIN(-30)
 const WISE_PRT_SECTION_ORDER     = ['RAIN', 'SNOW', 'SLEET', 'FRZR'];
-const WISE_GEOMETRY_CACHE_MAX    = 6;
+const WISE_GEOMETRY_CACHE_MAX    = 4;
 const _wiseGeometryCache         = new Map();
 
 // ---------------------------------------------------------------------------
@@ -177,7 +177,7 @@ function _writePreparedPaletteColor(palette, rawValue, target, offset) {
     const lookupStep = Number.isFinite(Number(palette.lookupStep)) && Number(palette.lookupStep) > 0 ? Number(palette.lookupStep) : null;
     const denom = Math.max(max - min, 1e-10);
     const rawIndex = lookupStep
-      ? Math.round((clamped - min) / lookupStep)
+      ? Math.floor(((clamped - min) / lookupStep) + 1e-9)
       : Math.floor(((clamped - min) / denom) * (colors.length - 1));
     const index = Math.max(0, Math.min(colors.length - 1, rawIndex));
     const color = colors[index] || colors[colors.length - 1];
