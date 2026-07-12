@@ -1,1 +1,0 @@
-{"default":{"identifier":"default","description":"Default capabilities","local":true,"windows":["main","warning-dashboard"],"permissions":["core:default","core:webview:default"]}}
